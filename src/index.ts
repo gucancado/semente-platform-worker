@@ -4,6 +4,7 @@ import { registerContactsRoutes } from './contacts/routes.js';
 import { registerWebhookRoutes } from './webhook/routes.js';
 import { registerMcpRoutes } from './mcp/server.js';
 import { registerDebugRoutes } from './debug/routes.js';
+import { registerSdrRoutes } from './sdr/routes.js';
 
 async function main() {
   const app = Fastify({
@@ -30,6 +31,11 @@ async function main() {
   // Debug logs: agente posta texto livre, owner lê. Auth por X-Agent-Token.
   await app.register(async (scope) => {
     await registerDebugRoutes(scope);
+  });
+
+  // SDR: lead-state, handoff, meetings simulados. Auth por X-Agent-Token.
+  await app.register(async (scope) => {
+    await registerSdrRoutes(scope);
   });
 
   await app.listen({ host: '0.0.0.0', port: config.PORT });

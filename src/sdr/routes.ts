@@ -1,0 +1,318 @@
+import type { FastifyInstance } from 'fastify';
+import { z } from 'zod';
+import { requireAgentToken } from '../auth.js';
+import { pool } from '../db.js';
+
+const LeadKey = z.object({
+  channel: z.string().min(1),
+  identifier: z.string().min(1),
+});
+
+export async function registerSdrRoutes(app: FastifyInstance) {
+  app.addHook('preHandler', requireAgentToken);
+
+  // ── Lead state ────────────────────────────────────────────────────────
+
+  app.get('/lead-state', async (req) => {
+    const query = LeadKey.parse(req.query);
+    const { rows } = await pool.query<{ state: Record<string, unknown>; updated_at: Date; created_at: Date }>(
+      `SELECT state, updated_at, created_at
+         FROM lead_states
+        WHERE agent = $1 AND channel = $2 AND identifier = $3`,
+      [req.agent.name, query.channel, query.identifier]
+    );
+    if (!rows[0]) return { state: null, exists: false };
+    return { state: rows[0].state, exists: true, updated_at: rows[0].updated_at, created_at: rows[0].created_at };
+  });
+
+  // Patch (merge JSONB no estado salvo). Body: { channel, identifier, patch }.
+  app.post('/lead-state', async (req) => {
+    const body = z
+      .object({
+        channel: z.string().min(1),
+        identifier: z.string().min(1),
+        patch: z.record(z.string(), z.unknown()),
+      })
+      .parse(req.body);
+
+    // Postgres jsonb concatenation `||` faz shallow merge top-level.
+    // Pra campos aninhados (qualificacao, fatos_coletados), o caller envia o objeto inteiro.
+    const { rows } = await pool.query<{ state: Record<string, unknown> }>(
+      `INSERT INTO lead_states (agent, channel, identifier, state, updated_at)
+       VALUES ($1, $2, $3, $4::jsonb, NOW())
+       ON CONFLICT (agent, channel, identifier)
+       DO UPDATE SET state = lead_states.state || EXCLUDED.state, updated_at = NOW()
+       RETURNING state`,
+      [req.agent.name, body.channel, body.identifier, JSON.stringify(body.patch)]
+    );
+    return { state: rows[0]!.state };
+  });
+
+  // ── Handoff ───────────────────────────────────────────────────────────
+
+  app.post('/handoff', async (req) => {
+    const body = z
+      .object({
+        channel: z.string().min(1),
+        identifier: z.string().min(1),
+        motivo: z.string().min(1),
+        urgencia: z.enum(['alta', 'media', 'baixa']).default('media'),
+        contexto_resumido: z.string().max(2000).optional(),
+      })
+      .parse(req.body);
+
+    const { rows } = await pool.query<{ id: number }>(
+      `INSERT INTO handoffs (agent, channel, identifier, motivo, urgencia, contexto_resumido)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       RETURNING id`,
+      [req.agent.name, body.channel, body.identifier, body.motivo, body.urgencia, body.contexto_resumido ?? null]
+    );
+    return { id: rows[0]!.id, ok: true };
+  });
+
+  app.get('/handoffs', async (req) => {
+    const query = z
+      .object({
+        status: z.enum(['open', 'claimed', 'resolved', 'dismissed', 'all']).default('open'),
+        limit: z.coerce.number().int().min(1).max(200).default(50),
+      })
+      .parse(req.query);
+
+    const where = query.status === 'all' ? 'agent = $1' : 'agent = $1 AND status = $3';
+    const args: unknown[] = [req.agent.name, query.limit];
+    if (query.status !== 'all') args.push(query.status);
+
+    const { rows } = await pool.query(
+      `SELECT id, channel, identifier, motivo, urgencia, contexto_resumido, status, created_at, resolved_at, resolved_by
+         FROM handoffs
+        WHERE ${where}
+        ORDER BY created_at DESC
+        LIMIT $2`,
+      args
+    );
+    return { handoffs: rows };
+  });
+
+  app.post('/handoffs/:id/resolve', async (req) => {
+    const params = z.object({ id: z.coerce.number().int() }).parse(req.params);
+    const body = z
+      .object({
+        resolved_by: z.string().default('owner'),
+        status: z.enum(['resolved', 'dismissed']).default('resolved'),
+      })
+      .parse(req.body);
+
+    const { rowCount } = await pool.query(
+      `UPDATE handoffs
+          SET status = $3, resolved_at = NOW(), resolved_by = $4
+        WHERE id = $2 AND agent = $1 AND status = 'open'`,
+      [req.agent.name, params.id, body.status, body.resolved_by]
+    );
+    return { resolved: (rowCount ?? 0) > 0 };
+  });
+
+  // ── Meetings (simulado por enquanto) ──────────────────────────────────
+
+  /**
+   * Sugere 3 slots respeitando regras (seg-sex, 9-12 e 14-18, antecedência 4h,
+   * pula feriado, etc.). Por enquanto, gerador determinístico simples — sem
+   * integração com Google Calendar. Aceita filtro opcional.
+   */
+  app.get('/meetings/suggest-slots', async (req) => {
+    const query = z
+      .object({
+        day: z.enum(['qualquer', 'seg', 'ter', 'qua', 'qui', 'sex']).default('qualquer'),
+        period: z.enum(['qualquer', 'manha', 'tarde']).default('qualquer'),
+      })
+      .parse(req.query);
+
+    return { slots: generateSlots(query.day, query.period) };
+  });
+
+  app.post('/meetings/schedule', async (req) => {
+    const body = z
+      .object({
+        channel: z.string().min(1),
+        identifier: z.string().min(1),
+        slot_iso: z.string().datetime({ offset: true }),
+        slot_human: z.string().min(1),
+        lead_email: z.string().email().optional(),
+        lead_name: z.string().optional(),
+        company: z.string().optional(),
+        contexto: z.string().max(2000).optional(),
+      })
+      .parse(req.body);
+
+    const { rows } = await pool.query<{ id: number }>(
+      `INSERT INTO simulated_meetings (agent, channel, identifier, slot_iso, slot_human, lead_email, lead_name, company, contexto)
+       VALUES ($1, $2, $3, $4::timestamptz, $5, $6, $7, $8, $9)
+       RETURNING id`,
+      [
+        req.agent.name,
+        body.channel,
+        body.identifier,
+        body.slot_iso,
+        body.slot_human,
+        body.lead_email ?? null,
+        body.lead_name ?? null,
+        body.company ?? null,
+        body.contexto ?? null,
+      ]
+    );
+    return { id: rows[0]!.id, ok: true, simulated: true };
+  });
+
+  app.post('/meetings/:id/reschedule', async (req) => {
+    const params = z.object({ id: z.coerce.number().int() }).parse(req.params);
+    const body = z
+      .object({
+        slot_iso: z.string().datetime({ offset: true }),
+        slot_human: z.string().min(1),
+      })
+      .parse(req.body);
+
+    const orig = await pool.query<{ channel: string; identifier: string; lead_email: string | null; lead_name: string | null; company: string | null; contexto: string | null }>(
+      `SELECT channel, identifier, lead_email, lead_name, company, contexto
+         FROM simulated_meetings WHERE id = $1 AND agent = $2`,
+      [params.id, req.agent.name]
+    );
+    if (!orig.rows[0]) return { error: 'meeting not found' };
+
+    const inserted = await pool.query<{ id: number }>(
+      `INSERT INTO simulated_meetings (agent, channel, identifier, slot_iso, slot_human, lead_email, lead_name, company, contexto)
+       VALUES ($1, $2, $3, $4::timestamptz, $5, $6, $7, $8, $9)
+       RETURNING id`,
+      [
+        req.agent.name,
+        orig.rows[0].channel,
+        orig.rows[0].identifier,
+        body.slot_iso,
+        body.slot_human,
+        orig.rows[0].lead_email,
+        orig.rows[0].lead_name,
+        orig.rows[0].company,
+        orig.rows[0].contexto,
+      ]
+    );
+
+    await pool.query(
+      `UPDATE simulated_meetings
+          SET status = 'rescheduled', rescheduled_to = $2, updated_at = NOW()
+        WHERE id = $1`,
+      [params.id, inserted.rows[0]!.id]
+    );
+
+    return { new_id: inserted.rows[0]!.id, ok: true };
+  });
+
+  app.get('/meetings', async (req) => {
+    const query = z
+      .object({
+        channel: z.string().optional(),
+        identifier: z.string().optional(),
+        status: z.enum(['scheduled', 'rescheduled', 'cancelled', 'completed', 'no_show', 'all']).default('all'),
+        limit: z.coerce.number().int().min(1).max(200).default(50),
+      })
+      .parse(req.query);
+
+    const conds: string[] = ['agent = $1'];
+    const args: unknown[] = [req.agent.name, query.limit];
+    if (query.channel) {
+      args.push(query.channel);
+      conds.push(`channel = $${args.length}`);
+    }
+    if (query.identifier) {
+      args.push(query.identifier);
+      conds.push(`identifier = $${args.length}`);
+    }
+    if (query.status !== 'all') {
+      args.push(query.status);
+      conds.push(`status = $${args.length}`);
+    }
+
+    const { rows } = await pool.query(
+      `SELECT id, channel, identifier, slot_iso, slot_human, lead_email, lead_name, company, contexto,
+              status, rescheduled_to, created_at
+         FROM simulated_meetings
+        WHERE ${conds.join(' AND ')}
+        ORDER BY slot_iso DESC
+        LIMIT $2`,
+      args
+    );
+    return { meetings: rows };
+  });
+}
+
+// ── Helpers ─────────────────────────────────────────────────────────────
+
+type Slot = { iso: string; human: string; day_label: string; hour: number; minute: number };
+
+const WEEKDAY_PT: Record<number, string> = {
+  1: 'segunda',
+  2: 'terça',
+  3: 'quarta',
+  4: 'quinta',
+  5: 'sexta',
+};
+
+const DAY_FILTER_TO_NUM: Record<string, number | null> = {
+  qualquer: null,
+  seg: 1,
+  ter: 2,
+  qua: 3,
+  qui: 4,
+  sex: 5,
+};
+
+/**
+ * Gera 3 slots respeitando regras:
+ * - Seg-sex, 9-12 e 14-18 fuso BRT (UTC-3).
+ * - Antecedência mínima 4h.
+ * - Próximos 10 dias úteis.
+ * - Filtro opcional por dia/period.
+ * - Espaça os 3 slots em dias diferentes quando possível.
+ */
+function generateSlots(dayFilter: string, periodFilter: string): Slot[] {
+  const dayNum = DAY_FILTER_TO_NUM[dayFilter] ?? null;
+  const hours: number[] =
+    periodFilter === 'manha' ? [10, 11] :
+    periodFilter === 'tarde' ? [14, 15, 16] :
+    [10, 11, 14, 15, 16];
+
+  const now = new Date();
+  const minStart = new Date(now.getTime() + 4 * 60 * 60 * 1000); // +4h
+  const slots: Slot[] = [];
+
+  // Itera próximos 14 dias corridos pra cobrir 10 úteis
+  for (let dayOffset = 0; dayOffset < 14 && slots.length < 3; dayOffset++) {
+    const d = new Date(now);
+    d.setDate(d.getDate() + dayOffset);
+    const wd = d.getDay();
+    if (wd < 1 || wd > 5) continue; // só seg-sex
+    if (dayNum !== null && wd !== dayNum) continue;
+
+    for (const hour of hours) {
+      if (slots.length >= 3) break;
+      // Constrói slot no fuso BRT (UTC-3)
+      const yyyy = d.getFullYear();
+      const mm = String(d.getMonth() + 1).padStart(2, '0');
+      const dd = String(d.getDate()).padStart(2, '0');
+      const hh = String(hour).padStart(2, '0');
+      const iso = `${yyyy}-${mm}-${dd}T${hh}:00:00-03:00`;
+      const slotDate = new Date(iso);
+      if (slotDate < minStart) continue;
+      // segunda antes das 10h: pula 9h (regra "primeiro horário da segunda")
+      if (wd === 1 && hour < 10) continue;
+      // sexta após 17h: pula
+      if (wd === 5 && hour >= 17) continue;
+
+      const dayLabel = `${WEEKDAY_PT[wd]} (${dd}/${mm})`;
+      slots.push({ iso, human: `${dayLabel} às ${hh}h`, day_label: dayLabel, hour, minute: 0 });
+
+      // espaça: 1 slot por dia, exceto se filtro restritivo
+      if (dayFilter === 'qualquer') break;
+    }
+  }
+
+  return slots;
+}
