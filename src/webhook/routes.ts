@@ -88,6 +88,21 @@ export async function registerWebhookRoutes(app: FastifyInstance) {
       fallback_used: fallbackUsed,
     });
 
+    // Webhook duplicado (Evolution re-enviou o mesmo evento). Não dispara
+    // trigger — o item original já foi processado ou está na fila.
+    if (inserted.duplicate) {
+      req.log.info(
+        { agent: msg.agent, evolution_event_id: msg.rawEventId, inbox_id: inserted.id },
+        'webhook duplicado — ignorando (sem trigger)'
+      );
+      return {
+        ok: true,
+        inbox_id: inserted.id,
+        duplicate: true,
+        trigger_fired: false,
+      };
+    }
+
     // v0.7 trigger-based: notifica o container do agente que tem mensagem nova.
     // Fire-and-forget — falha do trigger não impede ack do webhook.
     let triggerFired = false;

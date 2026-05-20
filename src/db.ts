@@ -92,12 +92,17 @@ export async function logWebhook(args: {
   push_name?: string | null;
   message_text?: string | null;
   workspace_id?: string | null;
-}): Promise<{ id: number }> {
-  const { rows } = await pool.query<{ id: number }>(
+}): Promise<{ id: number; duplicate: boolean }> {
+  // Dedup: índice único parcial em (agent, evolution_event_id). Se Evolution
+  // re-emite o mesmo evento, ON CONFLICT cai no DO NOTHING e a query principal
+  // não retorna linha — buscamos o id existente num segundo SELECT.
+  const insert = await pool.query<{ id: number }>(
     `INSERT INTO webhook_logs
        (agent, channel, identifier, evolution_event_id, payload_summary, bloquim_task_id, fallback_used,
         instance, push_name, message_text, workspace_id)
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+     ON CONFLICT (agent, evolution_event_id) WHERE evolution_event_id IS NOT NULL
+     DO NOTHING
      RETURNING id`,
     [
       args.agent,
@@ -113,7 +118,14 @@ export async function logWebhook(args: {
       args.workspace_id ?? null,
     ]
   );
-  return rows[0]!;
+  if (insert.rows[0]) {
+    return { id: insert.rows[0].id, duplicate: false };
+  }
+  const existing = await pool.query<{ id: number }>(
+    `SELECT id FROM webhook_logs WHERE agent = $1 AND evolution_event_id = $2 LIMIT 1`,
+    [args.agent, args.evolution_event_id]
+  );
+  return { id: existing.rows[0]!.id, duplicate: true };
 }
 
 export type InboxItem = {
