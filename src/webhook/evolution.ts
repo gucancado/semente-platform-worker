@@ -21,7 +21,8 @@ export const EvolutionMessageSchema = z.object({
 export type EvolutionMessage = z.infer<typeof EvolutionMessageSchema>;
 
 export type ParsedMessage = {
-  agent: string;
+  agent: string;             // nome técnico do agente (mercurio)
+  instance: string;          // nome bruto da instância (mercurio-metido-a-gente)
   channel: 'whatsapp';
   identifier: string;        // E.164: '+5531999998888'
   isGroup: boolean;
@@ -55,8 +56,15 @@ export function parseEvolutionPayload(raw: unknown): ParsedMessage | null {
       ? (msg as any).extendedTextMessage.text
       : null;
 
+  // Convenção: instância Evolution = `<agente>-<projeto>` (ex: mercurio-metido-a-gente).
+  // O agente técnico é o prefixo (até o primeiro hífen). Fallback: a instância inteira
+  // (caso de agente com 1 só persona ou nomes legados sem hífen).
+  const hyphenIdx = ev.instance.indexOf('-');
+  const agent = hyphenIdx > 0 ? ev.instance.slice(0, hyphenIdx) : ev.instance;
+
   return {
-    agent: ev.instance,
+    agent,
+    instance: ev.instance,
     channel: 'whatsapp',
     identifier,
     isGroup,

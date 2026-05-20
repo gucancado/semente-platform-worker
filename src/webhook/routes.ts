@@ -47,6 +47,7 @@ export async function registerWebhookRoutes(app: FastifyInstance) {
         title: `WA: ${preview}`,
         description: [
           `**Canal:** ${msg.channel}`,
+          `**Instância (persona/projeto):** ${msg.instance}`,
           `**De:** ${msg.identifier}${msg.pushName ? ` (${msg.pushName})` : ''}`,
           `**Fallback workspace:** ${fallbackUsed ? 'sim — triagem necessária' : 'não'}`,
           `**Evolution event id:** ${msg.rawEventId}`,
