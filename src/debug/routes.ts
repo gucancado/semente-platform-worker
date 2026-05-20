@@ -45,4 +45,30 @@ export async function registerDebugRoutes(app: FastifyInstance) {
     );
     return { logs: rows };
   });
+
+  // Inspect inbox real (mensagens recebidas via webhook, channel != debug).
+  app.get('/inbox-debug', async (req) => {
+    const query = z
+      .object({
+        limit: z.coerce.number().int().min(1).max(200).default(50),
+        unread_only: z.coerce.boolean().default(false),
+      })
+      .parse(req.query);
+
+    const where = query.unread_only
+      ? `agent = $1 AND channel != 'debug' AND processed_at IS NULL`
+      : `agent = $1 AND channel != 'debug'`;
+
+    const { rows } = await pool.query(
+      `SELECT id, channel, instance, identifier, push_name, message_text,
+              workspace_id, evolution_event_id, fallback_used,
+              created_at, processed_at, processed_by
+         FROM webhook_logs
+        WHERE ${where}
+        ORDER BY created_at DESC
+        LIMIT $2`,
+      [req.agent.name, query.limit]
+    );
+    return { messages: rows };
+  });
 }
