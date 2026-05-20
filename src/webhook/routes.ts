@@ -6,14 +6,13 @@ import { createTask } from '../bloquim/client.js';
 
 export async function registerWebhookRoutes(app: FastifyInstance) {
   app.post('/webhook', async (req, reply) => {
-    // Auth do webhook por shared secret no header. Evolution às vezes não envia
-    // o header (config perde após reconnect) — em modo MVP aceitamos sem secret
-    // mas logamos pra observação. TODO: reforçar quando Evolution estabilizar.
+    // Auth: shared secret obrigatório no header X-Evolution-Secret.
     const secret = req.headers['x-evolution-secret'];
-    if (!secret) {
-      req.log.warn({ msg: 'webhook sem x-evolution-secret (aceitando em modo MVP)' });
-    } else if (secret !== config.EVOLUTION_WEBHOOK_SECRET) {
-      req.log.warn({ secretLen: typeof secret === 'string' ? secret.length : 0 }, 'webhook secret mismatch — rejeitando');
+    if (!secret || secret !== config.EVOLUTION_WEBHOOK_SECRET) {
+      req.log.warn(
+        { hasHeader: !!secret, secretLen: typeof secret === 'string' ? secret.length : 0 },
+        'webhook rejeitado — X-Evolution-Secret ausente ou mismatch'
+      );
       return reply.code(401).send({ error: 'invalid evolution secret' });
     }
 
