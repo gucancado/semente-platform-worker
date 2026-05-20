@@ -6,10 +6,14 @@ import { createTask } from '../bloquim/client.js';
 
 export async function registerWebhookRoutes(app: FastifyInstance) {
   app.post('/webhook', async (req, reply) => {
-    // Auth do webhook é por shared secret no header (não X-Agent-Token,
-    // pois Evolution não conhece nosso esquema de agentes).
+    // Auth do webhook por shared secret no header. Evolution às vezes não envia
+    // o header (config perde após reconnect) — em modo MVP aceitamos sem secret
+    // mas logamos pra observação. TODO: reforçar quando Evolution estabilizar.
     const secret = req.headers['x-evolution-secret'];
-    if (secret !== config.EVOLUTION_WEBHOOK_SECRET) {
+    if (!secret) {
+      req.log.warn({ msg: 'webhook sem x-evolution-secret (aceitando em modo MVP)' });
+    } else if (secret !== config.EVOLUTION_WEBHOOK_SECRET) {
+      req.log.warn({ secretLen: typeof secret === 'string' ? secret.length : 0 }, 'webhook secret mismatch — rejeitando');
       return reply.code(401).send({ error: 'invalid evolution secret' });
     }
 
@@ -87,6 +91,7 @@ export async function registerWebhookRoutes(app: FastifyInstance) {
     // v0.7 trigger-based: notifica o container do agente que tem mensagem nova.
     // Fire-and-forget — falha do trigger não impede ack do webhook.
     let triggerFired = false;
+    let triggerError: string | null = null;
     if (agentCfg.trigger_url) {
       const headers: Record<string, string> = { 'Content-Type': 'application/json' };
       if (agentCfg.trigger_secret) headers['X-Trigger-Secret'] = agentCfg.trigger_secret;
@@ -98,12 +103,19 @@ export async function registerWebhookRoutes(app: FastifyInstance) {
           signal: AbortSignal.timeout(5000),
         });
         triggerFired = r.ok;
-        if (!r.ok) {
+        if (r.ok) {
+          req.log.info({ agent: msg.agent, url: agentCfg.trigger_url, inbox_id: inserted.id }, 'trigger fired OK');
+        } else {
+          triggerError = `status ${r.status}`;
           req.log.warn({ status: r.status, agent: msg.agent }, 'trigger non-ok');
         }
       } catch (err) {
-        req.log.warn({ err, agent: msg.agent }, 'trigger fetch falhou');
+        triggerError = (err as Error).message;
+        req.log.warn({ err: (err as Error).message, agent: msg.agent, url: agentCfg.trigger_url }, 'trigger fetch falhou');
       }
+    } else {
+      req.log.warn({ agent: msg.agent }, 'agentCfg.trigger_url não está setado em AGENT_TOKENS_JSON');
+      triggerError = 'no trigger_url configured';
     }
 
     return {

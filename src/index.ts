@@ -8,6 +8,7 @@ import { registerDebugRoutes } from './debug/routes.js';
 async function main() {
   const app = Fastify({
     logger: { level: config.LOG_LEVEL },
+    bodyLimit: 5 * 1024 * 1024, // 5MB — Evolution webhooks podem ser grandes com metadados
   });
 
   // Health: público, sem auth
