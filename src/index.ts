@@ -3,6 +3,7 @@ import { config } from './config.js';
 import { registerContactsRoutes } from './contacts/routes.js';
 import { registerWebhookRoutes } from './webhook/routes.js';
 import { registerMcpRoutes } from './mcp/server.js';
+import { registerDebugRoutes } from './debug/routes.js';
 
 async function main() {
   const app = Fastify({
@@ -23,6 +24,11 @@ async function main() {
   // MCP /mcp: auth por X-Agent-Token (registrado dentro do plugin)
   await app.register(async (scope) => {
     await registerMcpRoutes(scope);
+  });
+
+  // Debug logs: agente posta texto livre, owner lê. Auth por X-Agent-Token.
+  await app.register(async (scope) => {
+    await registerDebugRoutes(scope);
   });
 
   await app.listen({ host: '0.0.0.0', port: config.PORT });
