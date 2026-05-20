@@ -84,12 +84,35 @@ export async function registerWebhookRoutes(app: FastifyInstance) {
       fallback_used: fallbackUsed,
     });
 
+    // v0.7 trigger-based: notifica o container do agente que tem mensagem nova.
+    // Fire-and-forget — falha do trigger não impede ack do webhook.
+    let triggerFired = false;
+    if (agentCfg.trigger_url) {
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (agentCfg.trigger_secret) headers['X-Trigger-Secret'] = agentCfg.trigger_secret;
+      try {
+        const r = await fetch(agentCfg.trigger_url, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({ inbox_id: inserted.id, agent: msg.agent }),
+          signal: AbortSignal.timeout(5000),
+        });
+        triggerFired = r.ok;
+        if (!r.ok) {
+          req.log.warn({ status: r.status, agent: msg.agent }, 'trigger non-ok');
+        }
+      } catch (err) {
+        req.log.warn({ err, agent: msg.agent }, 'trigger fetch falhou');
+      }
+    }
+
     return {
       ok: true,
       inbox_id: inserted.id,
       bloquim_task_id: bloquimTaskId,
       bloquim_sync: bloquimTaskId !== null,
       fallback: fallbackUsed,
+      trigger_fired: triggerFired,
     };
   });
 }

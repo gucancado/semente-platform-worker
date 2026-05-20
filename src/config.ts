@@ -5,10 +5,11 @@ const AgentTokensSchema = z.record(
   z.object({
     worker_token: z.string().min(8),
     // Bloquim sync é opcional a partir da v0.6 — worker é a inbox primária.
-    // Setar apenas se o agente quer espelhar mensagens em tarefas Bloquim
-    // (ex: pra owner ter dashboard humano).
     bloquim_token: z.string().min(8).optional(),
     fallback_workspace_id: z.string().min(1).optional(),
+    // v0.7 trigger-based: worker faz POST aqui quando webhook chega.
+    trigger_url: z.string().url().optional(),
+    trigger_secret: z.string().min(8).optional(),
   })
 );
 

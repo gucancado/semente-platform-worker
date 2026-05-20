@@ -71,4 +71,23 @@ export async function registerDebugRoutes(app: FastifyInstance) {
     );
     return { messages: rows };
   });
+
+  // Marca item da inbox como processado (REST substitute do MCP inbox_mark_read).
+  app.post('/inbox-debug/mark-read', async (req) => {
+    const body = z
+      .object({
+        id: z.number().int(),
+        processed_by: z.string().default('tick'),
+      })
+      .parse(req.body);
+
+    const { rowCount } = await pool.query(
+      `UPDATE webhook_logs
+          SET processed_at = NOW(),
+              processed_by = COALESCE(processed_by, $3)
+        WHERE id = $2 AND agent = $1 AND processed_at IS NULL`,
+      [req.agent.name, body.id, body.processed_by]
+    );
+    return { marked: (rowCount ?? 0) > 0 };
+  });
 }
