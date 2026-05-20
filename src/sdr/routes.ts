@@ -111,6 +111,59 @@ export async function registerSdrRoutes(app: FastifyInstance) {
     return { resolved: (rowCount ?? 0) > 0 };
   });
 
+  // ── Reset de lead (testes) ────────────────────────────────────────────
+
+  /**
+   * Wipe completo de um lead. Útil pra reiniciar conversa em testes.
+   * Apaga lead_state, cancela meetings em aberto, fecha handoffs em aberto,
+   * marca todas as mensagens não-lidas em webhook_logs como processadas
+   * (pra não voltar na inbox).
+   */
+  app.post('/sdr/reset', async (req) => {
+    const body = z
+      .object({
+        channel: z.string().min(1),
+        identifier: z.string().min(1),
+      })
+      .parse(req.body);
+
+    const { rowCount: stateDel } = await pool.query(
+      `DELETE FROM lead_states WHERE agent = $1 AND channel = $2 AND identifier = $3`,
+      [req.agent.name, body.channel, body.identifier]
+    );
+
+    const { rowCount: meetingsCancelled } = await pool.query(
+      `UPDATE simulated_meetings
+          SET status = 'cancelled', updated_at = NOW()
+        WHERE agent = $1 AND channel = $2 AND identifier = $3 AND status = 'scheduled'`,
+      [req.agent.name, body.channel, body.identifier]
+    );
+
+    const { rowCount: handoffsClosed } = await pool.query(
+      `UPDATE handoffs
+          SET status = 'dismissed', resolved_at = NOW(), resolved_by = 'reset'
+        WHERE agent = $1 AND channel = $2 AND identifier = $3 AND status = 'open'`,
+      [req.agent.name, body.channel, body.identifier]
+    );
+
+    const { rowCount: inboxMarked } = await pool.query(
+      `UPDATE webhook_logs
+          SET processed_at = NOW(), processed_by = 'reset'
+        WHERE agent = $1 AND channel = $2 AND identifier = $3 AND processed_at IS NULL`,
+      [req.agent.name, body.channel, body.identifier]
+    );
+
+    return {
+      ok: true,
+      cleared: {
+        state: (stateDel ?? 0) > 0,
+        meetings_cancelled: meetingsCancelled ?? 0,
+        handoffs_closed: handoffsClosed ?? 0,
+        inbox_marked_read: inboxMarked ?? 0,
+      },
+    };
+  });
+
   // ── Meetings (simulado por enquanto) ──────────────────────────────────
 
   /**
