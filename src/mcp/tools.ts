@@ -5,6 +5,8 @@ import {
   upsertContact,
   listContactsByWorkspace,
   deleteContact,
+  listUnreadInbox,
+  markInboxRead,
 } from '../db.js';
 
 /**
@@ -83,6 +85,48 @@ export function registerTools(server: McpServer, agent: string): void {
     async ({ id }): Promise<CallToolResult> => {
       const deleted = await deleteContact(agent, id);
       return { content: [{ type: 'text', text: JSON.stringify({ deleted }) }] };
+    }
+  );
+
+  // ── inbox_list_unread ──────────────────────────────────────────────────
+  server.registerTool(
+    'inbox_list_unread',
+    {
+      description:
+        'Lista mensagens recebidas via webhook que ainda não foram processadas pelo agente. FIFO (mais antigas primeiro). Filtro opcional por `instance` quando agente quer focar em um projeto específico do tick atual.',
+      inputSchema: {
+        limit: z.number().int().min(1).max(100).optional(),
+        instance: z
+          .string()
+          .optional()
+          .describe('Filtra por instância Evolution (ex: "mercurio-metido-a-gente")'),
+      },
+    },
+    async ({ limit, instance }): Promise<CallToolResult> => {
+      const items = await listUnreadInbox(agent, limit ?? 20, instance);
+      return { content: [{ type: 'text', text: JSON.stringify(items) }] };
+    }
+  );
+
+  // ── inbox_mark_read ────────────────────────────────────────────────────
+  server.registerTool(
+    'inbox_mark_read',
+    {
+      description:
+        'Marca uma mensagem da inbox como processada. Chame DEPOIS de ter executado a ação (responder, criar tarefa Bloquim, escalonar, etc). Idempotente.',
+      inputSchema: {
+        id: z.number().int(),
+        processed_by: z
+          .string()
+          .optional()
+          .describe('Identificador de quem processou (ex: TICK_ID); aparece no log.'),
+      },
+    },
+    async ({ id, processed_by }): Promise<CallToolResult> => {
+      const updated = await markInboxRead(agent, id, processed_by ?? 'agent');
+      return {
+        content: [{ type: 'text', text: JSON.stringify({ marked: updated }) }],
+      };
     }
   );
 }

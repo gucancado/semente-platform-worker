@@ -88,11 +88,17 @@ export async function logWebhook(args: {
   payload_summary: string | null;
   bloquim_task_id: string | null;
   fallback_used: boolean;
-}): Promise<void> {
-  await pool.query(
+  instance?: string | null;
+  push_name?: string | null;
+  message_text?: string | null;
+  workspace_id?: string | null;
+}): Promise<{ id: number }> {
+  const { rows } = await pool.query<{ id: number }>(
     `INSERT INTO webhook_logs
-       (agent, channel, identifier, evolution_event_id, payload_summary, bloquim_task_id, fallback_used)
-     VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+       (agent, channel, identifier, evolution_event_id, payload_summary, bloquim_task_id, fallback_used,
+        instance, push_name, message_text, workspace_id)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+     RETURNING id`,
     [
       args.agent,
       args.channel,
@@ -101,6 +107,70 @@ export async function logWebhook(args: {
       args.payload_summary,
       args.bloquim_task_id,
       args.fallback_used,
+      args.instance ?? null,
+      args.push_name ?? null,
+      args.message_text ?? null,
+      args.workspace_id ?? null,
     ]
   );
+  return rows[0]!;
+}
+
+export type InboxItem = {
+  id: number;
+  agent: string;
+  channel: string;
+  instance: string | null;
+  identifier: string | null;
+  push_name: string | null;
+  message_text: string | null;
+  workspace_id: string | null;
+  evolution_event_id: string | null;
+  created_at: Date;
+};
+
+/**
+ * Lista mensagens recebidas e ainda não processadas pelo agente.
+ * Default: mais antigas primeiro (FIFO) — não perde mensagem em fila longa.
+ */
+export async function listUnreadInbox(
+  agent: string,
+  limit = 20,
+  instance?: string
+): Promise<InboxItem[]> {
+  const args: unknown[] = [agent, limit];
+  let where = `agent = $1 AND processed_at IS NULL`;
+  if (instance) {
+    args.push(instance);
+    where += ` AND instance = $3`;
+  }
+  const { rows } = await pool.query<InboxItem>(
+    `SELECT id, agent, channel, instance, identifier, push_name, message_text,
+            workspace_id, evolution_event_id, created_at
+       FROM webhook_logs
+      WHERE ${where}
+      ORDER BY created_at ASC
+      LIMIT $2`,
+    args
+  );
+  return rows;
+}
+
+/**
+ * Marca uma mensagem como processada. Idempotente — re-marcar não falha
+ * mas não altera processed_at original.
+ */
+export async function markInboxRead(
+  agent: string,
+  id: number,
+  processedBy: string
+): Promise<boolean> {
+  const { rowCount } = await pool.query(
+    `UPDATE webhook_logs
+        SET processed_at = NOW(),
+            processed_by = COALESCE(processed_by, $3)
+      WHERE id = $2 AND agent = $1 AND processed_at IS NULL`,
+    [agent, id, processedBy]
+  );
+  return (rowCount ?? 0) > 0;
 }
