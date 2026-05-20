@@ -22,4 +22,4 @@ COPY migrations ./migrations
 
 EXPOSE 3000
 # Migrations rodam no startup (idempotente — _migrations table dedupe).
-CMD ["sh", "-c", "node dist/scripts/migrate.js && node dist/index.js"]
+CMD ["sh", "-c", "node dist/migrate.js && node dist/index.js"]
