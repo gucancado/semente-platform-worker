@@ -5,6 +5,7 @@ import { registerWebhookRoutes } from './webhook/routes.js';
 import { registerMcpRoutes } from './mcp/server.js';
 import { registerDebugRoutes } from './debug/routes.js';
 import { registerSdrRoutes } from './sdr/routes.js';
+import { registerTimelineRoutes } from './timeline/routes.js';
 
 async function main() {
   const app = Fastify({
@@ -36,6 +37,11 @@ async function main() {
   // SDR: lead-state, handoff, meetings simulados. Auth por X-Agent-Token.
   await app.register(async (scope) => {
     await registerSdrRoutes(scope);
+  });
+
+  // Timeline (Fase 1 plano de ação): messages + llm_metrics. Auth por X-Agent-Token.
+  await app.register(async (scope) => {
+    await registerTimelineRoutes(scope);
   });
 
   await app.listen({ host: '0.0.0.0', port: config.PORT });

@@ -1,6 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import { config } from '../config.js';
-import { lookupContact, logWebhook } from '../db.js';
+import { insertMessage, lookupContact, logWebhook } from '../db.js';
 import { parseEvolutionPayload, shouldCreateTask } from './evolution.js';
 import { createTask } from '../bloquim/client.js';
 
@@ -86,6 +86,24 @@ export async function registerWebhookRoutes(app: FastifyInstance) {
       bloquim_task_id: bloquimTaskId,
       fallback_used: fallbackUsed,
     });
+
+    // Fase 1: timeline conversacional. Inbound vai pra `messages` em paralelo
+    // ao `webhook_logs`. Dedup pelo unique index parcial (agent, evolution_event_id).
+    // Falha aqui não interrompe webhook — apenas loga.
+    try {
+      if (msg.messageText && msg.identifier) {
+        await insertMessage({
+          agent: msg.agent,
+          channel: msg.channel,
+          identifier: msg.identifier,
+          direction: 'inbound',
+          text: msg.messageText,
+          evolution_event_id: msg.rawEventId,
+        });
+      }
+    } catch (err) {
+      req.log.warn({ err: (err as Error).message }, 'insertMessage(inbound) falhou — webhook segue');
+    }
 
     // Webhook duplicado (Evolution re-enviou o mesmo evento). Não dispara
     // trigger — o item original já foi processado ou está na fila.
