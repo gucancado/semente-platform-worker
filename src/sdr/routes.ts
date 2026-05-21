@@ -196,6 +196,25 @@ export async function registerSdrRoutes(app: FastifyInstance) {
       })
       .parse(req.body);
 
+    // Dedup: se já há meeting "scheduled" pro lead, devolve a existente em vez
+    // de criar duplicada. Defesa em profundidade pra erro de re-emissão.
+    const existing = await pool.query<{ id: number; slot_human: string }>(
+      `SELECT id, slot_human FROM simulated_meetings
+        WHERE agent = $1 AND channel = $2 AND identifier = $3 AND status = 'scheduled'
+        ORDER BY created_at DESC
+        LIMIT 1`,
+      [req.agent.name, body.channel, body.identifier]
+    );
+    if (existing.rows[0]) {
+      return {
+        id: existing.rows[0].id,
+        ok: true,
+        simulated: true,
+        already_scheduled: true,
+        existing_slot_human: existing.rows[0].slot_human,
+      };
+    }
+
     const { rows } = await pool.query<{ id: number }>(
       `INSERT INTO simulated_meetings (agent, channel, identifier, slot_iso, slot_human, lead_email, lead_name, company, contexto)
        VALUES ($1, $2, $3, $4::timestamptz, $5, $6, $7, $8, $9)
@@ -213,6 +232,17 @@ export async function registerSdrRoutes(app: FastifyInstance) {
       ]
     );
     return { id: rows[0]!.id, ok: true, simulated: true };
+  });
+
+  app.post('/meetings/:id/cancel', async (req) => {
+    const params = z.object({ id: z.coerce.number().int() }).parse(req.params);
+    const { rowCount } = await pool.query(
+      `UPDATE simulated_meetings
+          SET status = 'cancelled', updated_at = NOW()
+        WHERE id = $1 AND agent = $2 AND status = 'scheduled'`,
+      [params.id, req.agent.name]
+    );
+    return { cancelled: (rowCount ?? 0) > 0 };
   });
 
   app.post('/meetings/:id/reschedule', async (req) => {
