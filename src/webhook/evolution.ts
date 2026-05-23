@@ -22,6 +22,7 @@ export type EvolutionMessage = z.infer<typeof EvolutionMessageSchema>;
 
 export type ParsedMessage = {
   agent: string;             // nome técnico do agente (mercurio)
+  project: string | null;    // slug do projeto (sufixo da instance após o primeiro '-'); null se instance não tiver hífen
   instance: string;          // nome bruto da instância (mercurio-metido-a-gente)
   channel: 'whatsapp';
   identifier: string;        // E.164: '+5531999998888'
@@ -57,13 +58,15 @@ export function parseEvolutionPayload(raw: unknown): ParsedMessage | null {
       : null;
 
   // Convenção: instância Evolution = `<agente>-<projeto>` (ex: mercurio-metido-a-gente).
-  // O agente técnico é o prefixo (até o primeiro hífen). Fallback: a instância inteira
-  // (caso de agente com 1 só persona ou nomes legados sem hífen).
+  // `agent` = prefixo até o primeiro hífen; `project` = sufixo após o primeiro hífen.
+  // Sem hífen: agent = instância inteira, project = null (compat com nomes legados).
   const hyphenIdx = ev.instance.indexOf('-');
   const agent = hyphenIdx > 0 ? ev.instance.slice(0, hyphenIdx) : ev.instance;
+  const project = hyphenIdx > 0 ? ev.instance.slice(hyphenIdx + 1) : null;
 
   return {
     agent,
+    project,
     instance: ev.instance,
     channel: 'whatsapp',
     identifier,
