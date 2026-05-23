@@ -56,8 +56,8 @@ export async function registerWebhookCloudRoutes(app: FastifyInstance) {
 
     if (!verifyHmacSignature(bodyForHmac, sigHeader, appSecret)) {
       // Computa o hash esperado pra debug. Não vaza o secret.
-      const crypto = require('node:crypto');
-      const hmac = crypto.createHmac('sha256', appSecret);
+      const { createHmac } = await import('node:crypto');
+      const hmac = createHmac('sha256', appSecret);
       hmac.update(bodyForHmac);
       const computed = hmac.digest('hex').slice(0, 16);
       req.log.warn(

@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { createHmac, timingSafeEqual } from 'node:crypto';
 
 /**
  * Payload do webhook do WhatsApp Cloud API (Meta).
@@ -200,14 +201,11 @@ export function verifyHmacSignature(rawBody: Buffer | string, signatureHeader: s
   if (!signatureHeader.startsWith('sha256=')) return false;
   const expectedHex = signatureHeader.slice('sha256='.length);
 
-  // crypto via require (compat com Node 20+)
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const crypto = require('node:crypto');
-  const hmac = crypto.createHmac('sha256', appSecret);
+  const hmac = createHmac('sha256', appSecret);
   hmac.update(rawBody);
   const computedHex = hmac.digest('hex');
 
   // timing-safe compare
   if (expectedHex.length !== computedHex.length) return false;
-  return crypto.timingSafeEqual(Buffer.from(expectedHex, 'hex'), Buffer.from(computedHex, 'hex'));
+  return timingSafeEqual(Buffer.from(expectedHex, 'hex'), Buffer.from(computedHex, 'hex'));
 }
