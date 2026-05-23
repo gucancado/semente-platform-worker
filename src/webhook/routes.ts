@@ -94,6 +94,7 @@ export async function registerWebhookRoutes(app: FastifyInstance) {
       if (msg.messageText && msg.identifier) {
         await insertMessage({
           agent: msg.agent,
+          project: msg.project,
           channel: msg.channel,
           identifier: msg.identifier,
           direction: 'inbound',
