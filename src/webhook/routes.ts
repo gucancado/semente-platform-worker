@@ -21,6 +21,17 @@ export async function registerWebhookRoutes(app: FastifyInstance) {
       return { ignored: true, reason: 'parse-failed-or-irrelevant' };
     }
 
+    // Diagnóstico: quando texto vier null, loga o keyset da envelope pra entender
+    // que tipo de mensagem foi enviada. Sem isso a investigação fica cega.
+    if (!msg.messageText) {
+      const envelope = (req.body as any)?.data?.message;
+      const envelopeKeys = envelope && typeof envelope === 'object' ? Object.keys(envelope) : [];
+      req.log.warn(
+        { agent: msg.agent, identifier: msg.identifier, envelopeKeys, isGroup: msg.isGroup },
+        'webhook: mensagem chegou sem texto extraível — checar envelope keys'
+      );
+    }
+
     if (!shouldCreateTask(msg)) {
       return { ignored: true, reason: 'not-DM-or-mention' };
     }

@@ -48,14 +48,10 @@ export function parseEvolutionPayload(raw: unknown): ParsedMessage | null {
 
   if (!identifier) return null;
 
-  // Extrai texto da mensagem (best-effort; tipos diferentes têm payloads diferentes)
-  const msg = ev.data.message;
-  const messageText =
-    typeof (msg as any)?.conversation === 'string'
-      ? (msg as any).conversation
-      : typeof (msg as any)?.extendedTextMessage?.text === 'string'
-      ? (msg as any).extendedTextMessage.text
-      : null;
+  // Extrai texto da mensagem cobrindo os envelopes mais comuns do Baileys.
+  // Cobertura best-effort; tipos não cobertos ficam null e disparam warning no
+  // webhook handler.
+  const messageText = extractMessageText(ev.data.message);
 
   // Convenção: instância Evolution = `<agente>-<projeto>` (ex: mercurio-metido-a-gente).
   // `agent` = prefixo até o primeiro hífen; `project` = sufixo após o primeiro hífen.
@@ -76,6 +72,47 @@ export function parseEvolutionPayload(raw: unknown): ParsedMessage | null {
     messageText,
     rawEventId: ev.data.key.id,
   };
+}
+
+/**
+ * Extrai texto da mensagem cobrindo os envelopes comuns do Baileys/WhatsApp.
+ * Ordem de tentativa importa: envelopes "container" (ephemeral, edited,
+ * viewOnce) são desempacotados recursivamente.
+ */
+export function extractMessageText(msg: unknown): string | null {
+  if (!msg || typeof msg !== 'object') return null;
+  const m = msg as Record<string, any>;
+
+  // 1) Envelopes container — desempacotar e tentar de novo
+  if (m.ephemeralMessage?.message) return extractMessageText(m.ephemeralMessage.message);
+  if (m.viewOnceMessage?.message) return extractMessageText(m.viewOnceMessage.message);
+  if (m.viewOnceMessageV2?.message) return extractMessageText(m.viewOnceMessageV2.message);
+  if (m.viewOnceMessageV2Extension?.message) return extractMessageText(m.viewOnceMessageV2Extension.message);
+  if (m.editedMessage?.message) return extractMessageText(m.editedMessage.message);
+  if (m.protocolMessage?.editedMessage) return extractMessageText(m.protocolMessage.editedMessage);
+  if (m.documentWithCaptionMessage?.message) return extractMessageText(m.documentWithCaptionMessage.message);
+
+  // 2) Texto puro
+  if (typeof m.conversation === 'string' && m.conversation.length) return m.conversation;
+  if (typeof m.extendedTextMessage?.text === 'string') return m.extendedTextMessage.text;
+
+  // 3) Captions de mídia
+  if (typeof m.imageMessage?.caption === 'string' && m.imageMessage.caption.length)
+    return m.imageMessage.caption;
+  if (typeof m.videoMessage?.caption === 'string' && m.videoMessage.caption.length)
+    return m.videoMessage.caption;
+  if (typeof m.documentMessage?.caption === 'string' && m.documentMessage.caption.length)
+    return m.documentMessage.caption;
+
+  // 4) Botão/lista (raros mas existem)
+  if (typeof m.buttonsResponseMessage?.selectedDisplayText === 'string')
+    return m.buttonsResponseMessage.selectedDisplayText;
+  if (typeof m.listResponseMessage?.title === 'string')
+    return m.listResponseMessage.title;
+  if (typeof m.templateButtonReplyMessage?.selectedDisplayText === 'string')
+    return m.templateButtonReplyMessage.selectedDisplayText;
+
+  return null;
 }
 
 /**
