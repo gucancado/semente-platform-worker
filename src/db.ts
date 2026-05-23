@@ -215,6 +215,7 @@ export type MessageRow = {
  */
 export async function insertMessage(args: {
   agent: string;
+  project?: string | null;
   channel: string;
   identifier: string;
   direction: 'inbound' | 'outbound';
@@ -233,13 +234,13 @@ export async function insertMessage(args: {
   if (args.direction === 'inbound' && args.evolution_event_id) {
     const insert = await pool.query<{ id: number }>(
       `INSERT INTO messages
-         (agent, channel, identifier, direction, text, evolution_event_id)
-       VALUES ($1, $2, $3, 'inbound', $4, $5)
+         (agent, project, channel, identifier, direction, text, evolution_event_id)
+       VALUES ($1, $2, $3, $4, 'inbound', $5, $6)
        ON CONFLICT (agent, evolution_event_id)
          WHERE direction = 'inbound' AND evolution_event_id IS NOT NULL
          DO NOTHING
        RETURNING id`,
-      [args.agent, args.channel, args.identifier, args.text, args.evolution_event_id]
+      [args.agent, args.project ?? null, args.channel, args.identifier, args.text, args.evolution_event_id]
     );
     if (insert.rows[0]) return { id: insert.rows[0].id, duplicate: false };
 
@@ -254,13 +255,14 @@ export async function insertMessage(args: {
 
   const { rows } = await pool.query<{ id: number }>(
     `INSERT INTO messages
-       (agent, channel, identifier, direction, text,
+       (agent, project, channel, identifier, direction, text,
         evolution_event_id, evolution_send_id,
         tier, model, provider, classifier_intent, cost_usd, latency_ms)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
      RETURNING id`,
     [
       args.agent,
+      args.project ?? null,
       args.channel,
       args.identifier,
       args.direction,
