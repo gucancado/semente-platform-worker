@@ -9,6 +9,8 @@
     "dev": "tsx watch src/index.ts",
     "start": "node dist/index.js",
     "migrate": "tsx src/migrate.ts",
+    "test": "node --test --import tsx tests/**/*.test.ts",
+    "test:watch": "node --test --watch --import tsx tests/**/*.test.ts",
     "typecheck": "tsc --noEmit",
     "lint": "eslint src/**/*.ts"
   },
