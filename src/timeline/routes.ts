@@ -18,6 +18,7 @@ export async function registerTimelineRoutes(app: FastifyInstance) {
   app.post('/messages', async (req, reply) => {
     const body = z
       .object({
+        project: z.string().min(1).optional(),
         channel: z.string().min(1),
         identifier: z.string().min(1),
         direction: z.enum(['inbound', 'outbound']),
@@ -35,6 +36,7 @@ export async function registerTimelineRoutes(app: FastifyInstance) {
 
     const result = await insertMessage({
       agent: req.agent.name,
+      project: body.project ?? null,
       channel: body.channel,
       identifier: body.identifier,
       direction: body.direction,
