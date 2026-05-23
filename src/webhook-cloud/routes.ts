@@ -46,10 +46,29 @@ export async function registerWebhookCloudRoutes(app: FastifyInstance) {
     const rawBody = (req as any).rawBody as Buffer | string | undefined;
     const bodyForHmac = rawBody ?? JSON.stringify(req.body);
     const sigHeader = req.headers['x-hub-signature-256'] as string | undefined;
+    const usingRaw = !!rawBody;
+    const bodyLen = Buffer.isBuffer(bodyForHmac) ? bodyForHmac.length : bodyForHmac.length;
+
+    req.log.info(
+      { usingRaw, bodyLen, hasSig: !!sigHeader, sigPrefix: sigHeader?.slice(0, 20) },
+      'cloud webhook: validando HMAC'
+    );
 
     if (!verifyHmacSignature(bodyForHmac, sigHeader, appSecret)) {
+      // Computa o hash esperado pra debug. Não vaza o secret.
+      const crypto = require('node:crypto');
+      const hmac = crypto.createHmac('sha256', appSecret);
+      hmac.update(bodyForHmac);
+      const computed = hmac.digest('hex').slice(0, 16);
       req.log.warn(
-        { hasSig: !!sigHeader, sigPrefix: sigHeader?.slice(0, 12) },
+        {
+          hasSig: !!sigHeader,
+          sigReceivedPrefix: sigHeader?.slice(0, 20),
+          computedPrefix: 'sha256=' + computed + '...',
+          usingRaw,
+          bodyLen,
+          appSecretLen: appSecret.length,
+        },
         'cloud webhook HMAC mismatch — rejeitando'
       );
       return reply.code(401).send({ error: 'invalid signature' });
