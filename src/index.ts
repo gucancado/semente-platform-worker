@@ -16,12 +16,18 @@ async function main() {
   });
 
   // Pra validar HMAC do Cloud webhook, precisamos do body bruto.
-  // Fastify por default consome o JSON; este hook substitui o parser pra
-  // todos os JSON, lê body como buffer e preserva uma cópia em req.rawBody
-  // SEMPRE (não condicional por URL). Custo: ~bytes do request, irrelevante.
-  // Cobre `application/json` com ou sem charset.
-  app.addContentTypeParser(/^application\/json/, { parseAs: 'buffer' }, (req, body: Buffer, done) => {
+  // Fastify v5 registra um parser default pra application/json — precisamos
+  // remover ANTES de adicionar o nosso (senão o default ganha precedência).
+  app.removeContentTypeParser(['application/json']);
+
+  app.addContentTypeParser('application/json', { parseAs: 'buffer' }, function (req, body: Buffer, done) {
+    // Atribuição em req e em req.raw (alguns paths checam um ou outro)
     (req as any).rawBody = body;
+    if ((req as any).raw) (req as any).raw.rawBody = body;
+    req.log.info(
+      { len: body.length, url: req.url, contentType: req.headers['content-type'] },
+      'content-type-parser: JSON received, rawBody set'
+    );
     try {
       const parsed = body.length ? JSON.parse(body.toString('utf8')) : {};
       done(null, parsed);
