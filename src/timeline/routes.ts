@@ -83,7 +83,7 @@ export async function registerTimelineRoutes(app: FastifyInstance) {
     }
 
     const { rows } = await pool.query(
-      `SELECT id, channel, identifier, direction, text,
+      `SELECT id, project, channel, identifier, direction, text,
               evolution_event_id, evolution_send_id,
               tier, model, provider, classifier_intent, cost_usd, latency_ms,
               created_at
