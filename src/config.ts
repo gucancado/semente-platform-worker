@@ -13,6 +13,16 @@ const AgentTokensSchema = z.record(
   })
 );
 
+// Mapping de phone_number_id (WhatsApp Cloud) → { agent, project }.
+// Permite múltiplos números numa mesma app Meta, cada um roteando pra agent/project diferente.
+const CloudNumberMapSchema = z.record(
+  z.string(),
+  z.object({
+    agent: z.string().min(1),
+    project: z.string().min(1),
+  })
+);
+
 const EnvSchema = z.object({
   PORT: z.coerce.number().default(3000),
   LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
@@ -27,6 +37,31 @@ const EnvSchema = z.object({
     }
   }),
   EVOLUTION_WEBHOOK_SECRET: z.string().min(8),
+
+  // WhatsApp Cloud API (Meta) — opcional. Quando setado, ativa /webhook-cloud
+  // e /send-cloud no worker. Tokens vivem aqui em vez de no orquestrador
+  // pra centralizar rotação.
+  WHATSAPP_CLOUD_APP_SECRET: z.string().optional(),
+  WHATSAPP_CLOUD_VERIFY_TOKEN: z.string().optional(),
+  WHATSAPP_CLOUD_ACCESS_TOKEN: z.string().optional(),
+  WHATSAPP_CLOUD_GRAPH_VERSION: z.string().default('v22.0'),
+  // JSON string mapeando phone_number_id → { agent, project }
+  // Ex: {"1152130677980438":{"agent":"mercurio","project":"metido-a-gente"}}
+  WHATSAPP_CLOUD_NUMBERS_JSON: z
+    .string()
+    .optional()
+    .transform((s, ctx) => {
+      if (!s) return {};
+      try {
+        return CloudNumberMapSchema.parse(JSON.parse(s));
+      } catch (e) {
+        ctx.addIssue({
+          code: 'custom',
+          message: `WHATSAPP_CLOUD_NUMBERS_JSON inválido: ${(e as Error).message}`,
+        });
+        return z.NEVER;
+      }
+    }),
 });
 
 export const config = EnvSchema.parse(process.env);

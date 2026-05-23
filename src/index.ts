@@ -6,6 +6,8 @@ import { registerMcpRoutes } from './mcp/server.js';
 import { registerDebugRoutes } from './debug/routes.js';
 import { registerSdrRoutes } from './sdr/routes.js';
 import { registerTimelineRoutes } from './timeline/routes.js';
+import { registerWebhookCloudRoutes, registerSendCloudRoute } from './webhook-cloud/routes.js';
+import { requireAgentToken } from './auth.js';
 
 async function main() {
   const app = Fastify({
@@ -13,11 +15,37 @@ async function main() {
     bodyLimit: 5 * 1024 * 1024, // 5MB — Evolution webhooks podem ser grandes com metadados
   });
 
+  // Pra validar HMAC do Cloud webhook, precisamos do body bruto.
+  // Fastify por default consome o JSON; este hook preserva uma cópia raw
+  // em req.rawBody quando o path bate em /webhook-cloud.
+  app.addContentTypeParser('application/json', { parseAs: 'buffer' }, (req, body: Buffer, done) => {
+    if (req.url === '/webhook-cloud') {
+      (req as any).rawBody = body;
+    }
+    try {
+      const parsed = body.length ? JSON.parse(body.toString('utf8')) : {};
+      done(null, parsed);
+    } catch (err) {
+      done(err as Error, undefined);
+    }
+  });
+
   // Health: público, sem auth
   app.get('/health', async () => ({ status: 'ok', ts: new Date().toISOString() }));
 
   // Webhook (Evolution): auth por shared secret no handler
   await app.register(registerWebhookRoutes);
+
+  // Webhook Cloud (Meta WhatsApp Business Platform): GET verify + POST HMAC.
+  // Público (sem X-Agent-Token), validado por HMAC dentro do handler.
+  await app.register(registerWebhookCloudRoutes);
+
+  // POST /send-cloud — chamado pelo orquestrador pra enviar via Cloud API.
+  // Auth: X-Agent-Token (qualquer agente reconhecido pode usar).
+  await app.register(async (scope) => {
+    scope.addHook('preHandler', requireAgentToken);
+    await registerSendCloudRoute(scope);
+  });
 
   // REST /contacts: auth por X-Agent-Token (registrado dentro do plugin)
   await app.register(async (scope) => {
