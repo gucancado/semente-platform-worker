@@ -1,8 +1,15 @@
 import type { FastifyInstance } from 'fastify';
 import { config } from '../config.js';
-import { insertMessage, lookupContact, logWebhook } from '../db.js';
+import {
+  enqueuePendingTrigger,
+  getAgentProjectConfig,
+  insertMessage,
+  lookupContact,
+  logWebhook,
+} from '../db.js';
 import { parseEvolutionPayload, shouldCreateTask } from './evolution.js';
 import { createTask } from '../bloquim/client.js';
+import { computeScheduledAt } from '../triggers/quiet-hours.js';
 
 export async function registerWebhookRoutes(app: FastifyInstance) {
   app.post('/webhook', async (req, reply) => {
@@ -132,34 +139,47 @@ export async function registerWebhookRoutes(app: FastifyInstance) {
       };
     }
 
-    // v0.7 trigger-based: notifica o container do agente que tem mensagem nova.
-    // Fire-and-forget — falha do trigger não impede ack do webhook.
-    let triggerFired = false;
+    // v0.8 (mitigação anti-detecção): em vez de fire-and-forget do trigger,
+    // enfileiramos em pending_triggers. Burst smoothing: várias msgs em
+    // sequência atualizam a MESMA row pending e empurram scheduled_at —
+    // mercurio recebe 1 trigger só. Quiet hours: se config tem janela
+    // silenciada e o horário cai dentro, scheduled_at vira o fim da janela.
+    let triggerQueued = false;
     let triggerError: string | null = null;
-    if (agentCfg.trigger_url) {
-      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-      if (agentCfg.trigger_secret) headers['X-Trigger-Secret'] = agentCfg.trigger_secret;
-      try {
-        const r = await fetch(agentCfg.trigger_url, {
-          method: 'POST',
-          headers,
-          body: JSON.stringify({ inbox_id: inserted.id, agent: msg.agent }),
-          signal: AbortSignal.timeout(5000),
-        });
-        triggerFired = r.ok;
-        if (r.ok) {
-          req.log.info({ agent: msg.agent, url: agentCfg.trigger_url, inbox_id: inserted.id }, 'trigger fired OK');
-        } else {
-          triggerError = `status ${r.status}`;
-          req.log.warn({ status: r.status, agent: msg.agent }, 'trigger non-ok');
-        }
-      } catch (err) {
-        triggerError = (err as Error).message;
-        req.log.warn({ err: (err as Error).message, agent: msg.agent, url: agentCfg.trigger_url }, 'trigger fetch falhou');
-      }
-    } else {
+    if (!agentCfg.trigger_url) {
       req.log.warn({ agent: msg.agent }, 'agentCfg.trigger_url não está setado em AGENT_TOKENS_JSON');
       triggerError = 'no trigger_url configured';
+    } else if (!msg.identifier) {
+      triggerError = 'missing identifier';
+    } else {
+      try {
+        const projectConfig = msg.project
+          ? await getAgentProjectConfig(msg.agent, msg.project).catch(() => null)
+          : null;
+        const scheduledAt = computeScheduledAt(projectConfig, config.TRIGGER_DEBOUNCE_MS);
+        const queued = await enqueuePendingTrigger({
+          agent: msg.agent,
+          project: msg.project,
+          identifier: msg.identifier,
+          inbox_id: inserted.id,
+          scheduled_at: scheduledAt,
+        });
+        triggerQueued = true;
+        req.log.info(
+          {
+            agent: msg.agent,
+            identifier: msg.identifier,
+            pending_id: queued.id,
+            msg_count: queued.msg_count,
+            scheduled_at: scheduledAt.toISOString(),
+            quiet_active: projectConfig?.quiet_hours_enabled === true,
+          },
+          queued.msg_count > 1 ? 'trigger debounced — burst smoothing' : 'trigger enqueued'
+        );
+      } catch (err) {
+        triggerError = (err as Error).message;
+        req.log.warn({ err: triggerError, agent: msg.agent }, 'enqueuePendingTrigger falhou');
+      }
     }
 
     return {
@@ -168,7 +188,8 @@ export async function registerWebhookRoutes(app: FastifyInstance) {
       bloquim_task_id: bloquimTaskId,
       bloquim_sync: bloquimTaskId !== null,
       fallback: fallbackUsed,
-      trigger_fired: triggerFired,
+      trigger_queued: triggerQueued,
+      trigger_error: triggerError,
     };
   });
 }

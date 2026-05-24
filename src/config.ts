@@ -62,6 +62,16 @@ const EnvSchema = z.object({
         return z.NEVER;
       }
     }),
+
+  // Burst smoothing / debounce: tempo de espera após cada msg recebida antes
+  // de disparar trigger pro mercurio. Nova msg na janela reseta o timer.
+  TRIGGER_DEBOUNCE_MS: z.coerce.number().int().positive().default(25_000),
+  // Intervalo do poller que varre pending_triggers prontos pra disparar.
+  TRIGGER_POLLER_INTERVAL_MS: z.coerce.number().int().positive().default(5_000),
+  // Tentativas máximas por trigger antes de marcar 'failed'.
+  TRIGGER_POLLER_MAX_ATTEMPTS: z.coerce.number().int().positive().default(3),
+  // Quantos triggers o poller processa por ciclo.
+  TRIGGER_POLLER_BATCH_SIZE: z.coerce.number().int().positive().default(50),
 });
 
 export const config = EnvSchema.parse(process.env);

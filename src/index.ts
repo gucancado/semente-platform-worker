@@ -6,8 +6,10 @@ import { registerMcpRoutes } from './mcp/server.js';
 import { registerDebugRoutes } from './debug/routes.js';
 import { registerSdrRoutes } from './sdr/routes.js';
 import { registerTimelineRoutes } from './timeline/routes.js';
+import { registerProjectsRoutes } from './projects/routes.js';
 import { registerWebhookCloudRoutes, registerSendCloudRoute } from './webhook-cloud/routes.js';
 import { requireAgentToken } from './auth.js';
+import { startTriggerPoller } from './triggers/poller.js';
 
 async function main() {
   const app = Fastify({
@@ -78,8 +80,17 @@ async function main() {
     await registerTimelineRoutes(scope);
   });
 
+  // Config por (agent, project) — quiet_hours etc. Auth por X-Agent-Token.
+  await app.register(async (scope) => {
+    await registerProjectsRoutes(scope);
+  });
+
   await app.listen({ host: '0.0.0.0', port: config.PORT });
   app.log.info({ port: config.PORT }, 'semente-platform-worker up');
+
+  // Poller que processa pending_triggers (burst smoothing + quiet hours).
+  // Substitui o trigger fire-and-forget inline do webhook handler.
+  startTriggerPoller(app.log);
 }
 
 main().catch((err) => {

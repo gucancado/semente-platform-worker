@@ -280,6 +280,193 @@ export async function insertMessage(args: {
   return { id: rows[0]!.id, duplicate: false };
 }
 
+// ── Fase 3: config por (agent, project) — hoje só quiet_hours ──
+
+export type AgentProjectConfig = {
+  agent: string;
+  project: string;
+  quiet_hours_enabled: boolean;
+  quiet_start: string; // HH:MM:SS
+  quiet_end: string; // HH:MM:SS
+  quiet_tz: string;
+  created_at: Date;
+  updated_at: Date;
+};
+
+export async function getAgentProjectConfig(
+  agent: string,
+  project: string
+): Promise<AgentProjectConfig | null> {
+  const { rows } = await pool.query<AgentProjectConfig>(
+    `SELECT agent, project, quiet_hours_enabled,
+            quiet_start::text AS quiet_start,
+            quiet_end::text AS quiet_end,
+            quiet_tz, created_at, updated_at
+       FROM agent_project_config
+      WHERE agent = $1 AND project = $2`,
+    [agent, project]
+  );
+  return rows[0] ?? null;
+}
+
+/**
+ * Upsert atômico. Campos não-fornecidos preservam valor existente (COALESCE
+ * com EXCLUDED). Defaults aplicam só em INSERT inicial.
+ */
+export async function upsertAgentProjectConfig(args: {
+  agent: string;
+  project: string;
+  quiet_hours_enabled?: boolean;
+  quiet_start?: string;
+  quiet_end?: string;
+  quiet_tz?: string;
+}): Promise<AgentProjectConfig> {
+  const { rows } = await pool.query<AgentProjectConfig>(
+    `INSERT INTO agent_project_config
+       (agent, project, quiet_hours_enabled, quiet_start, quiet_end, quiet_tz)
+     VALUES (
+       $1, $2,
+       COALESCE($3, false),
+       COALESCE($4::time, '23:00'::time),
+       COALESCE($5::time, '07:00'::time),
+       COALESCE($6, 'America/Sao_Paulo')
+     )
+     ON CONFLICT (agent, project) DO UPDATE SET
+       quiet_hours_enabled = COALESCE($3, agent_project_config.quiet_hours_enabled),
+       quiet_start = COALESCE($4::time, agent_project_config.quiet_start),
+       quiet_end = COALESCE($5::time, agent_project_config.quiet_end),
+       quiet_tz = COALESCE($6, agent_project_config.quiet_tz),
+       updated_at = NOW()
+     RETURNING agent, project, quiet_hours_enabled,
+               quiet_start::text AS quiet_start,
+               quiet_end::text AS quiet_end,
+               quiet_tz, created_at, updated_at`,
+    [
+      args.agent,
+      args.project,
+      args.quiet_hours_enabled ?? null,
+      args.quiet_start ?? null,
+      args.quiet_end ?? null,
+      args.quiet_tz ?? null,
+    ]
+  );
+  return rows[0]!;
+}
+
+// ── Fase 2: pending_triggers (burst smoothing + quiet-hours fail-safe) ──
+
+export type PendingTrigger = {
+  id: number;
+  agent: string;
+  project: string | null;
+  identifier: string;
+  last_inbox_id: number;
+  msg_count: number;
+  attempt_count: number;
+};
+
+/**
+ * Enfileira (ou atualiza) um trigger pendente.
+ *
+ * Se já existe um trigger 'pending' pra esse (agent, identifier), o UPSERT
+ * empurra `scheduled_at` pra frente — esse é o **debounce/burst smoothing**:
+ * lead manda 5 msgs em 10s, mercurio recebe 1 trigger só.
+ *
+ * `scheduled_at` é computado pelo caller (`computeScheduledAt`), que considera
+ * tanto debounce quanto quiet hours.
+ */
+export async function enqueuePendingTrigger(args: {
+  agent: string;
+  project: string | null;
+  identifier: string;
+  inbox_id: number;
+  scheduled_at: Date;
+}): Promise<{ id: number; msg_count: number }> {
+  const { rows } = await pool.query<{ id: number; msg_count: number }>(
+    `INSERT INTO pending_triggers (agent, project, identifier, last_inbox_id, scheduled_at)
+     VALUES ($1, $2, $3, $4, $5)
+     ON CONFLICT (agent, identifier) WHERE status = 'pending'
+     DO UPDATE SET
+       last_inbox_id = EXCLUDED.last_inbox_id,
+       project = COALESCE(EXCLUDED.project, pending_triggers.project),
+       scheduled_at = EXCLUDED.scheduled_at,
+       msg_count = pending_triggers.msg_count + 1,
+       updated_at = NOW()
+     RETURNING id, msg_count`,
+    [args.agent, args.project, args.identifier, args.inbox_id, args.scheduled_at]
+  );
+  return rows[0]!;
+}
+
+/**
+ * Claim atômico de triggers prontos pra disparar. `FOR UPDATE SKIP LOCKED`
+ * defende contra múltiplos pollers em paralelo. Empurra `scheduled_at` pra
+ * +60s e bumpa `attempt_count` — se o poller crashar antes de marcar fired,
+ * o próximo ciclo pega de novo após 60s (zero perda, dedup via flock no
+ * mercurio absorve double-fire eventual).
+ */
+export async function claimDuePendingTriggers(batchSize = 50): Promise<PendingTrigger[]> {
+  const { rows } = await pool.query<PendingTrigger>(
+    `WITH due AS (
+       SELECT id FROM pending_triggers
+        WHERE status = 'pending' AND scheduled_at <= NOW()
+        ORDER BY scheduled_at ASC
+        LIMIT $1
+        FOR UPDATE SKIP LOCKED
+     )
+     UPDATE pending_triggers t
+        SET attempt_count = t.attempt_count + 1,
+            scheduled_at = NOW() + INTERVAL '60 seconds',
+            updated_at = NOW()
+       FROM due
+      WHERE t.id = due.id
+      RETURNING t.id, t.agent, t.project, t.identifier, t.last_inbox_id, t.msg_count, t.attempt_count`,
+    [batchSize]
+  );
+  return rows;
+}
+
+export async function markTriggerFired(id: number): Promise<void> {
+  await pool.query(
+    `UPDATE pending_triggers
+        SET status = 'fired', fired_at = NOW(), updated_at = NOW(), last_error = NULL
+      WHERE id = $1`,
+    [id]
+  );
+}
+
+/**
+ * Marca falha. Se ainda há tentativas disponíveis, devolve a row pra status
+ * 'pending' com backoff (30s * attempt, capado em 5min). Senão marca 'failed'.
+ */
+export async function markTriggerRetryOrFail(
+  id: number,
+  currentAttempt: number,
+  maxAttempts: number,
+  error: string
+): Promise<{ retried: boolean }> {
+  if (currentAttempt >= maxAttempts) {
+    await pool.query(
+      `UPDATE pending_triggers
+          SET status = 'failed', last_error = $2, updated_at = NOW()
+        WHERE id = $1`,
+      [id, error]
+    );
+    return { retried: false };
+  }
+  const backoffSec = Math.min(currentAttempt * 30, 300);
+  await pool.query(
+    `UPDATE pending_triggers
+        SET status = 'pending',
+            scheduled_at = NOW() + ($2 || ' seconds')::INTERVAL,
+            last_error = $3,
+            updated_at = NOW()
+      WHERE id = $1`,
+    [id, String(backoffSec), error]
+  );
+  return { retried: true };
+}
+
 export async function insertLlmMetric(args: {
   agent: string;
   message_id?: number | null;
