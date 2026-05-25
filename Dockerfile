@@ -21,5 +21,9 @@ COPY --from=build /app/dist ./dist
 COPY migrations ./migrations
 
 EXPOSE 3000
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+  CMD node -e "fetch('http://localhost:3000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+
 # Migrations rodam no startup (idempotente — _migrations table dedupe).
 CMD ["sh", "-c", "node dist/migrate.js && node dist/index.js"]
