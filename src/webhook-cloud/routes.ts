@@ -1,6 +1,12 @@
 import type { FastifyInstance } from 'fastify';
 import { config } from '../config.js';
-import { insertMessage, logWebhook } from '../db.js';
+import {
+  enqueuePendingTrigger,
+  getAgentProjectConfig,
+  insertMessage,
+  logWebhook,
+} from '../db.js';
+import { computeScheduledAt } from '../triggers/quiet-hours.js';
 import { parseCloudPayload, verifyHmacSignature } from './parser.js';
 
 /**
@@ -86,7 +92,7 @@ export async function registerWebhookCloudRoutes(app: FastifyInstance) {
       return reply.code(200).send({ ok: true, ignored: true });
     }
 
-    const results: Array<{ inbox_id: number; duplicate: boolean; trigger_fired: boolean }> = [];
+    const results: Array<{ inbox_id: number; duplicate: boolean; trigger_queued?: boolean; trigger_error?: string | null }> = [];
 
     for (const msg of parsed) {
       const agentCfg = config.AGENT_TOKENS_JSON[msg.agent];
@@ -137,40 +143,53 @@ export async function registerWebhookCloudRoutes(app: FastifyInstance) {
           { agent: msg.agent, wamid: msg.rawEventId, inbox_id: inserted.id },
           'cloud webhook duplicado — sem trigger'
         );
-        results.push({ inbox_id: inserted.id, duplicate: true, trigger_fired: false });
+        results.push({ inbox_id: inserted.id, duplicate: true });
         continue;
       }
 
-      // Dispara trigger pro agente correspondente
-      let triggerFired = false;
-      if (agentCfg.trigger_url) {
-        const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-        if (agentCfg.trigger_secret) headers['X-Trigger-Secret'] = agentCfg.trigger_secret;
+      // Enfileira pending_trigger em vez de fire-and-forget. Burst smoothing
+      // (várias msgs em sequência → 1 trigger), quiet hours (config DB
+      // empurra scheduled_at pro fim da janela) e retry com backoff (poller)
+      // ficam disponíveis pro Cloud path igual o Evolution path.
+      let triggerQueued = false;
+      let triggerError: string | null = null;
+      if (!agentCfg.trigger_url) {
+        triggerError = 'no trigger_url configured';
+      } else if (!msg.identifier) {
+        triggerError = 'missing identifier';
+      } else {
         try {
-          const r = await fetch(agentCfg.trigger_url, {
-            method: 'POST',
-            headers,
-            body: JSON.stringify({ inbox_id: inserted.id, agent: msg.agent }),
-            signal: AbortSignal.timeout(5000),
+          const projectConfig = msg.project
+            ? await getAgentProjectConfig(msg.agent, msg.project).catch(() => null)
+            : null;
+          const scheduledAt = computeScheduledAt(projectConfig, config.TRIGGER_DEBOUNCE_MS);
+          const queued = await enqueuePendingTrigger({
+            agent: msg.agent,
+            project: msg.project,
+            identifier: msg.identifier,
+            inbox_id: inserted.id,
+            scheduled_at: scheduledAt,
           });
-          triggerFired = r.ok;
-          if (r.ok) {
-            req.log.info(
-              { agent: msg.agent, inbox_id: inserted.id, source: 'cloud' },
-              'cloud trigger fired OK'
-            );
-          } else {
-            req.log.warn({ status: r.status, agent: msg.agent }, 'cloud trigger non-ok');
-          }
-        } catch (err) {
-          req.log.warn(
-            { err: (err as Error).message, agent: msg.agent },
-            'cloud trigger fetch falhou'
+          triggerQueued = true;
+          req.log.info(
+            {
+              agent: msg.agent,
+              identifier: msg.identifier,
+              pending_id: queued.id,
+              msg_count: queued.msg_count,
+              scheduled_at: scheduledAt.toISOString(),
+              quiet_active: projectConfig?.quiet_hours_enabled === true,
+              source: 'cloud',
+            },
+            queued.msg_count > 1 ? 'cloud trigger debounced — burst smoothing' : 'cloud trigger enqueued'
           );
+        } catch (err) {
+          triggerError = (err as Error).message;
+          req.log.warn({ err: triggerError, agent: msg.agent }, 'cloud enqueuePendingTrigger falhou');
         }
       }
 
-      results.push({ inbox_id: inserted.id, duplicate: false, trigger_fired: triggerFired });
+      results.push({ inbox_id: inserted.id, duplicate: false, trigger_queued: triggerQueued, trigger_error: triggerError });
     }
 
     return reply.code(200).send({ ok: true, processed: results.length, results });

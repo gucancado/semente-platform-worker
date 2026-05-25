@@ -3,9 +3,20 @@ import { config } from './config.js';
 
 export const pool = new pg.Pool({
   connectionString: config.DATABASE_URL,
-  max: 10,
+  max: 20,
   idleTimeoutMillis: 30_000,
-});
+  // Mata pool.connect() se nenhuma conexão livre em 10s (defesa contra hang
+  // permanente esperando slot — preferimos falhar rápido e deixar requests
+  // novos rodarem).
+  connectionTimeoutMillis: 10_000,
+  // Mata query individual após 30s no Postgres-side. Defende contra query
+  // pendurada bloqueando connection no pool indefinidamente.
+  statement_timeout: 30_000,
+  // Mata transação ociosa após 60s (BEGIN sem COMMIT/ROLLBACK). Crítico pra
+  // claimDuePendingTriggers que usa FOR UPDATE SKIP LOCKED — se poller crashar
+  // mid-transação, Postgres libera após 60s em vez de manter lock pra sempre.
+  idle_in_transaction_session_timeout: 60_000,
+} as any);
 
 export type ContactRoute = {
   id: number;
