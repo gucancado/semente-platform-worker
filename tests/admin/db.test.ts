@@ -107,3 +107,128 @@ test('listGoals: vazio se projeto sem goals', async () => {
   const goals = await listGoals(p.id);
   assert.deepEqual(goals, []);
 });
+
+import {
+  createAgenda,
+  listAgendas,
+  getAgenda,
+  updateAgenda,
+  softDeleteAgenda,
+} from '../../src/admin/db.js';
+
+const sampleHours = {
+  mon: ['09:00-12:00', '14:00-18:00'],
+  tue: ['09:00-12:00', '14:00-18:00'],
+  wed: ['09:00-12:00', '14:00-18:00'],
+  thu: ['09:00-12:00', '14:00-18:00'],
+  fri: ['09:00-12:00', '14:00-17:00'],
+  timezone: 'America/Sao_Paulo',
+};
+
+test('createAgenda + getAgenda', async () => {
+  const p = await createProject({ agent: 'mercurio', slug: 'acme', display_name: 'ACME' });
+  const a = await createAgenda({
+    project_id: p.id,
+    person_name: 'Rodrigo',
+    person_email: 'rodrigo@acme.com',
+    display_label: 'o time comercial',
+    description: 'Diretor comercial.',
+    working_hours: sampleHours,
+    meeting_duration_min: 30,
+    min_advance_hours: 4,
+    max_advance_business_days: 10,
+  });
+  assert.equal(a.person_name, 'Rodrigo');
+  assert.equal(a.active, true);
+  assert.deepEqual(a.working_hours, sampleHours);
+
+  const got = await getAgenda(a.id);
+  assert.deepEqual(got, a);
+});
+
+test('listAgendas: filtra por project, ordena por created_at asc', async () => {
+  const p = await createProject({ agent: 'mercurio', slug: 'acme', display_name: 'ACME' });
+  await createAgenda({
+    project_id: p.id,
+    person_name: 'A',
+    person_email: 'a@x.com',
+    display_label: 'L1',
+    description: null,
+    working_hours: sampleHours,
+    meeting_duration_min: 30,
+    min_advance_hours: 4,
+    max_advance_business_days: 10,
+  });
+  await new Promise((r) => setTimeout(r, 10));
+  await createAgenda({
+    project_id: p.id,
+    person_name: 'B',
+    person_email: 'b@x.com',
+    display_label: 'L2',
+    description: null,
+    working_hours: sampleHours,
+    meeting_duration_min: 30,
+    min_advance_hours: 4,
+    max_advance_business_days: 10,
+  });
+
+  const list = await listAgendas(p.id);
+  assert.equal(list.length, 2);
+  assert.equal(list[0]!.person_name, 'A');
+});
+
+test('listAgendas: parâmetro activeOnly filtra inativas', async () => {
+  const p = await createProject({ agent: 'mercurio', slug: 'acme', display_name: 'ACME' });
+  const a = await createAgenda({
+    project_id: p.id,
+    person_name: 'A',
+    person_email: 'a@x.com',
+    display_label: 'L',
+    description: null,
+    working_hours: sampleHours,
+    meeting_duration_min: 30,
+    min_advance_hours: 4,
+    max_advance_business_days: 10,
+  });
+  await softDeleteAgenda(a.id);
+  const all = await listAgendas(p.id);
+  const active = await listAgendas(p.id, { activeOnly: true });
+  assert.equal(all.length, 1);
+  assert.equal(active.length, 0);
+});
+
+test('updateAgenda: patch parcial', async () => {
+  const p = await createProject({ agent: 'mercurio', slug: 'acme', display_name: 'ACME' });
+  const a = await createAgenda({
+    project_id: p.id,
+    person_name: 'Rodrigo',
+    person_email: 'r@x.com',
+    display_label: 'L',
+    description: null,
+    working_hours: sampleHours,
+    meeting_duration_min: 30,
+    min_advance_hours: 4,
+    max_advance_business_days: 10,
+  });
+  const u = await updateAgenda(a.id, { display_label: 'time novo', meeting_duration_min: 45 });
+  assert.equal(u.display_label, 'time novo');
+  assert.equal(u.meeting_duration_min, 45);
+  assert.equal(u.person_email, 'r@x.com'); // unchanged
+});
+
+test('softDeleteAgenda: marca active=false', async () => {
+  const p = await createProject({ agent: 'mercurio', slug: 'acme', display_name: 'ACME' });
+  const a = await createAgenda({
+    project_id: p.id,
+    person_name: 'A',
+    person_email: 'a@x.com',
+    display_label: 'L',
+    description: null,
+    working_hours: sampleHours,
+    meeting_duration_min: 30,
+    min_advance_hours: 4,
+    max_advance_business_days: 10,
+  });
+  const d = await softDeleteAgenda(a.id);
+  assert.equal(d.active, false);
+});

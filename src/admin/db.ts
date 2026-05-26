@@ -111,3 +111,135 @@ export async function disableGoal(
   if (!rows[0]) throw new Error(`goal ${goal_type} not found for project ${project_id}`);
   return rows[0];
 }
+
+export type WorkingHours = {
+  mon?: string[];
+  tue?: string[];
+  wed?: string[];
+  thu?: string[];
+  fri?: string[];
+  sat?: string[];
+  sun?: string[];
+  timezone: string;
+};
+
+export type SchedulingAgenda = {
+  id: number;
+  project_id: number;
+  person_name: string;
+  person_email: string;
+  display_label: string;
+  description: string | null;
+  working_hours: WorkingHours;
+  meeting_duration_min: number;
+  min_advance_hours: number;
+  max_advance_business_days: number;
+  active: boolean;
+  round_robin_last_assigned_at: Date | null;
+  created_at: Date;
+  updated_at: Date;
+};
+
+export async function createAgenda(args: {
+  project_id: number;
+  person_name: string;
+  person_email: string;
+  display_label: string;
+  description: string | null;
+  working_hours: WorkingHours;
+  meeting_duration_min: number;
+  min_advance_hours: number;
+  max_advance_business_days: number;
+}): Promise<SchedulingAgenda> {
+  const { rows } = await pool.query<SchedulingAgenda>(
+    `INSERT INTO scheduling_agendas (
+       project_id, person_name, person_email, display_label, description,
+       working_hours, meeting_duration_min, min_advance_hours, max_advance_business_days
+     )
+     VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9)
+     RETURNING *`,
+    [
+      args.project_id,
+      args.person_name,
+      args.person_email,
+      args.display_label,
+      args.description,
+      JSON.stringify(args.working_hours),
+      args.meeting_duration_min,
+      args.min_advance_hours,
+      args.max_advance_business_days,
+    ]
+  );
+  return rows[0]!;
+}
+
+export async function listAgendas(
+  project_id: number,
+  opts: { activeOnly?: boolean } = {}
+): Promise<SchedulingAgenda[]> {
+  const where = opts.activeOnly
+    ? 'WHERE project_id = $1 AND active = TRUE'
+    : 'WHERE project_id = $1';
+  const { rows } = await pool.query<SchedulingAgenda>(
+    `SELECT * FROM scheduling_agendas ${where} ORDER BY created_at ASC`,
+    [project_id]
+  );
+  return rows;
+}
+
+export async function getAgenda(id: number): Promise<SchedulingAgenda | null> {
+  const { rows } = await pool.query<SchedulingAgenda>(
+    `SELECT * FROM scheduling_agendas WHERE id = $1 LIMIT 1`,
+    [id]
+  );
+  return rows[0] ?? null;
+}
+
+export async function updateAgenda(
+  id: number,
+  patch: Partial<{
+    person_name: string;
+    person_email: string;
+    display_label: string;
+    description: string | null;
+    working_hours: WorkingHours;
+    meeting_duration_min: number;
+    min_advance_hours: number;
+    max_advance_business_days: number;
+    active: boolean;
+  }>
+): Promise<SchedulingAgenda> {
+  const { rows } = await pool.query<SchedulingAgenda>(
+    `UPDATE scheduling_agendas SET
+       person_name              = COALESCE($2, person_name),
+       person_email             = COALESCE($3, person_email),
+       display_label            = COALESCE($4, display_label),
+       description              = COALESCE($5, description),
+       working_hours            = COALESCE($6::jsonb, working_hours),
+       meeting_duration_min     = COALESCE($7, meeting_duration_min),
+       min_advance_hours        = COALESCE($8, min_advance_hours),
+       max_advance_business_days = COALESCE($9, max_advance_business_days),
+       active                   = COALESCE($10, active),
+       updated_at               = NOW()
+     WHERE id = $1
+     RETURNING *`,
+    [
+      id,
+      patch.person_name ?? null,
+      patch.person_email ?? null,
+      patch.display_label ?? null,
+      patch.description === undefined ? null : patch.description,
+      patch.working_hours === undefined ? null : JSON.stringify(patch.working_hours),
+      patch.meeting_duration_min ?? null,
+      patch.min_advance_hours ?? null,
+      patch.max_advance_business_days ?? null,
+      patch.active ?? null,
+    ]
+  );
+  if (!rows[0]) throw new Error(`agenda ${id} not found`);
+  return rows[0];
+}
+
+export async function softDeleteAgenda(id: number): Promise<SchedulingAgenda> {
+  return updateAgenda(id, { active: false });
+}
