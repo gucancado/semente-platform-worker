@@ -210,3 +210,134 @@ test('POST goals: 404 se projeto não existe', async () => {
   });
   assert.equal(res.statusCode, 404);
 });
+
+const validAgendaPayload = {
+  person_name: 'Rodrigo Silva',
+  person_email: 'rodrigo@acme.com',
+  display_label: 'o time comercial',
+  description: 'Diretor comercial.',
+  working_hours: {
+    mon: ['09:00-12:00', '14:00-18:00'],
+    tue: ['09:00-12:00', '14:00-18:00'],
+    wed: ['09:00-12:00', '14:00-18:00'],
+    thu: ['09:00-12:00', '14:00-18:00'],
+    fri: ['09:00-12:00', '14:00-17:00'],
+    timezone: 'America/Sao_Paulo',
+  },
+};
+
+test('POST /admin/agents/:agent/projects/:slug/agendas cria agenda', async () => {
+  const app = buildApp();
+  await createTestProject(app, 'acme');
+  const res = await app.inject({
+    method: 'POST',
+    url: '/admin/agents/mercurio/projects/acme/agendas',
+    headers: auth,
+    payload: validAgendaPayload,
+  });
+  assert.equal(res.statusCode, 201);
+  const body = JSON.parse(res.body);
+  assert.equal(body.person_email, 'rodrigo@acme.com');
+  assert.equal(body.meeting_duration_min, 30); // default
+});
+
+test('POST agendas: rejeita working_hours sem nenhum dia', async () => {
+  const app = buildApp();
+  await createTestProject(app, 'acme');
+  const res = await app.inject({
+    method: 'POST',
+    url: '/admin/agents/mercurio/projects/acme/agendas',
+    headers: auth,
+    payload: {
+      ...validAgendaPayload,
+      working_hours: { timezone: 'America/Sao_Paulo' },
+    },
+  });
+  assert.equal(res.statusCode, 400);
+});
+
+test('POST agendas: rejeita janela mal formatada', async () => {
+  const app = buildApp();
+  await createTestProject(app, 'acme');
+  const res = await app.inject({
+    method: 'POST',
+    url: '/admin/agents/mercurio/projects/acme/agendas',
+    headers: auth,
+    payload: {
+      ...validAgendaPayload,
+      working_hours: { mon: ['9-12'], timezone: 'America/Sao_Paulo' },
+    },
+  });
+  assert.equal(res.statusCode, 400);
+});
+
+test('GET /admin/agents/:agent/projects/:slug/agendas lista', async () => {
+  const app = buildApp();
+  await createTestProject(app, 'acme');
+  await app.inject({
+    method: 'POST',
+    url: '/admin/agents/mercurio/projects/acme/agendas',
+    headers: auth,
+    payload: validAgendaPayload,
+  });
+  const res = await app.inject({
+    method: 'GET',
+    url: '/admin/agents/mercurio/projects/acme/agendas',
+    headers: auth,
+  });
+  assert.equal(res.statusCode, 200);
+  const { agendas } = JSON.parse(res.body);
+  assert.equal(agendas.length, 1);
+});
+
+test('PATCH /admin/agents/:agent/projects/:slug/agendas/:id', async () => {
+  const app = buildApp();
+  await createTestProject(app, 'acme');
+  const created = await app.inject({
+    method: 'POST',
+    url: '/admin/agents/mercurio/projects/acme/agendas',
+    headers: auth,
+    payload: validAgendaPayload,
+  });
+  const id = JSON.parse(created.body).id;
+  const res = await app.inject({
+    method: 'PATCH',
+    url: `/admin/agents/mercurio/projects/acme/agendas/${id}`,
+    headers: auth,
+    payload: { display_label: 'novo label' },
+  });
+  assert.equal(res.statusCode, 200);
+  const body = JSON.parse(res.body);
+  assert.equal(body.display_label, 'novo label');
+});
+
+test('DELETE /admin/agents/:agent/projects/:slug/agendas/:id (soft-delete)', async () => {
+  const app = buildApp();
+  await createTestProject(app, 'acme');
+  const created = await app.inject({
+    method: 'POST',
+    url: '/admin/agents/mercurio/projects/acme/agendas',
+    headers: auth,
+    payload: validAgendaPayload,
+  });
+  const id = JSON.parse(created.body).id;
+  const res = await app.inject({
+    method: 'DELETE',
+    url: `/admin/agents/mercurio/projects/acme/agendas/${id}`,
+    headers: auth,
+  });
+  assert.equal(res.statusCode, 200);
+  assert.equal(JSON.parse(res.body).active, false);
+});
+
+test('PATCH agendas: 404 se id não pertence ao projeto', async () => {
+  const app = buildApp();
+  await createTestProject(app, 'acme');
+  const res = await app.inject({
+    method: 'PATCH',
+    url: '/admin/agents/mercurio/projects/acme/agendas/99999',
+    headers: auth,
+    payload: { display_label: 'x' },
+  });
+  assert.equal(res.statusCode, 404);
+});

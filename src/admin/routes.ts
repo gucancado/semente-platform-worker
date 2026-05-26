@@ -10,12 +10,18 @@ import {
   listAgendas,
   upsertGoal,
   disableGoal,
+  createAgenda,
+  getAgenda,
+  updateAgenda,
+  softDeleteAgenda,
 } from './db.js';
 import {
   ProjectCreateBody,
   ProjectPatchBody,
   ProjectSlugParams,
   GoalUpsertBody,
+  AgendaCreateBody,
+  AgendaPatchBody,
 } from './schemas.js';
 
 export async function registerAdminRoutes(app: FastifyInstance) {
@@ -93,5 +99,63 @@ export async function registerAdminRoutes(app: FastifyInstance) {
     } catch {
       return reply.code(404).send({ error: 'goal not found' });
     }
+  });
+
+  // ── Agendas ────────────────────────────────────────────────────────────
+
+  app.post('/admin/agents/:agent/projects/:slug/agendas', async (req, reply) => {
+    const params = ProjectSlugParams.parse(req.params);
+    const body = AgendaCreateBody.parse(req.body);
+    const project = await getProjectBySlug(params.agent, params.slug);
+    if (!project) return reply.code(404).send({ error: 'project not found' });
+    const agenda = await createAgenda({
+      project_id: project.id,
+      person_name: body.person_name,
+      person_email: body.person_email,
+      display_label: body.display_label,
+      description: body.description ?? null,
+      working_hours: body.working_hours,
+      meeting_duration_min: body.meeting_duration_min,
+      min_advance_hours: body.min_advance_hours,
+      max_advance_business_days: body.max_advance_business_days,
+    });
+    return reply.code(201).send(agenda);
+  });
+
+  app.get('/admin/agents/:agent/projects/:slug/agendas', async (req, reply) => {
+    const params = ProjectSlugParams.parse(req.params);
+    const project = await getProjectBySlug(params.agent, params.slug);
+    if (!project) return reply.code(404).send({ error: 'project not found' });
+    const agendas = await listAgendas(project.id);
+    return { agendas };
+  });
+
+  app.patch('/admin/agents/:agent/projects/:slug/agendas/:agendaId', async (req, reply) => {
+    const params = ProjectSlugParams.extend({
+      agendaId: z.coerce.number().int().positive(),
+    }).parse(req.params);
+    const body = AgendaPatchBody.parse(req.body);
+    const project = await getProjectBySlug(params.agent, params.slug);
+    if (!project) return reply.code(404).send({ error: 'project not found' });
+    const current = await getAgenda(params.agendaId);
+    if (!current || current.project_id !== project.id) {
+      return reply.code(404).send({ error: 'agenda not found for this project' });
+    }
+    const updated = await updateAgenda(params.agendaId, body);
+    return updated;
+  });
+
+  app.delete('/admin/agents/:agent/projects/:slug/agendas/:agendaId', async (req, reply) => {
+    const params = ProjectSlugParams.extend({
+      agendaId: z.coerce.number().int().positive(),
+    }).parse(req.params);
+    const project = await getProjectBySlug(params.agent, params.slug);
+    if (!project) return reply.code(404).send({ error: 'project not found' });
+    const current = await getAgenda(params.agendaId);
+    if (!current || current.project_id !== project.id) {
+      return reply.code(404).send({ error: 'agenda not found for this project' });
+    }
+    const deleted = await softDeleteAgenda(params.agendaId);
+    return deleted;
   });
 }
