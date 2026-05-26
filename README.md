@@ -28,6 +28,16 @@ pnpm dev              # tsx watch
 
 Coolify, projeto `semente`, serviço `semente-platform-worker`. Postgres companion: `semente-worker-postgres`. Push em `master` dispara rebuild.
 
+## Rodando testes que tocam DB
+
+Tests em `tests/admin/*.test.ts` e `tests/goals/*.test.ts` precisam de Postgres
+rodando. Use o mesmo `DATABASE_URL` do dev local:
+
+    DATABASE_URL=postgres://semente:senha@localhost:5432/semente_dev pnpm test
+
+Cada test trunca as tabelas de scheduling antes de rodar. Não roda contra
+banco de produção (vai apagar dados).
+
 ## Estado
 
 Esqueleto. Implementar gradualmente:
