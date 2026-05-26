@@ -132,3 +132,81 @@ test('sem X-Owner-Token: 401', async () => {
   });
   assert.equal(res.statusCode, 401);
 });
+
+async function createTestProject(app: FastifyInstance, slug: string) {
+  return app.inject({
+    method: 'POST',
+    url: '/admin/agents/mercurio/projects',
+    headers: auth,
+    payload: { slug, display_name: slug.toUpperCase() },
+  });
+}
+
+test('POST /admin/agents/:agent/projects/:slug/goals cria goal', async () => {
+  const app = buildApp();
+  await createTestProject(app, 'acme');
+  const res = await app.inject({
+    method: 'POST',
+    url: '/admin/agents/mercurio/projects/acme/goals',
+    headers: auth,
+    payload: {
+      goal_type: 'scheduling',
+      enabled: true,
+      config: { selection_strategy: 'single' },
+    },
+  });
+  assert.equal(res.statusCode, 201);
+  const body = JSON.parse(res.body);
+  assert.equal(body.goal_type, 'scheduling');
+  assert.deepEqual(body.config, { selection_strategy: 'single' });
+});
+
+test('POST goals: upsert atualiza existente', async () => {
+  const app = buildApp();
+  await createTestProject(app, 'acme');
+  await app.inject({
+    method: 'POST',
+    url: '/admin/agents/mercurio/projects/acme/goals',
+    headers: auth,
+    payload: { goal_type: 'scheduling', config: { selection_strategy: 'single' } },
+  });
+  const res = await app.inject({
+    method: 'POST',
+    url: '/admin/agents/mercurio/projects/acme/goals',
+    headers: auth,
+    payload: { goal_type: 'scheduling', config: { selection_strategy: 'round_robin' } },
+  });
+  assert.equal(res.statusCode, 200);
+  const body = JSON.parse(res.body);
+  assert.equal(body.config.selection_strategy, 'round_robin');
+});
+
+test('DELETE /admin/agents/:agent/projects/:slug/goals/:goal_type disable', async () => {
+  const app = buildApp();
+  await createTestProject(app, 'acme');
+  await app.inject({
+    method: 'POST',
+    url: '/admin/agents/mercurio/projects/acme/goals',
+    headers: auth,
+    payload: { goal_type: 'scheduling', config: { selection_strategy: 'single' } },
+  });
+  const res = await app.inject({
+    method: 'DELETE',
+    url: '/admin/agents/mercurio/projects/acme/goals/scheduling',
+    headers: auth,
+  });
+  assert.equal(res.statusCode, 200);
+  const body = JSON.parse(res.body);
+  assert.equal(body.enabled, false);
+});
+
+test('POST goals: 404 se projeto não existe', async () => {
+  const app = buildApp();
+  const res = await app.inject({
+    method: 'POST',
+    url: '/admin/agents/mercurio/projects/nope/goals',
+    headers: auth,
+    payload: { goal_type: 'scheduling', config: { selection_strategy: 'single' } },
+  });
+  assert.equal(res.statusCode, 404);
+});
