@@ -63,6 +63,10 @@ const EnvSchema = z.object({
       }
     }),
 
+  // Shared secret entre worker e GUI agentes.beeads.com.br para endpoints /admin/*.
+  // Gerar com: openssl rand -hex 32
+  OWNER_ADMIN_TOKEN: z.string().min(32),
+
   // Burst smoothing / debounce: tempo de espera após cada msg recebida antes
   // de disparar trigger pro mercurio. Nova msg na janela reseta o timer.
   TRIGGER_DEBOUNCE_MS: z.coerce.number().int().positive().default(25_000),
