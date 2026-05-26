@@ -62,3 +62,52 @@ export async function updateProject(
   if (!rows[0]) throw new Error(`project ${id} not found`);
   return rows[0];
 }
+
+export type ProjectGoal = {
+  id: number;
+  project_id: number;
+  goal_type: string;
+  enabled: boolean;
+  config: Record<string, unknown>;
+  created_at: Date;
+  updated_at: Date;
+};
+
+export async function upsertGoal(args: {
+  project_id: number;
+  goal_type: string;
+  enabled: boolean;
+  config: Record<string, unknown>;
+}): Promise<ProjectGoal> {
+  const { rows } = await pool.query<ProjectGoal>(
+    `INSERT INTO project_goals (project_id, goal_type, enabled, config)
+     VALUES ($1, $2, $3, $4::jsonb)
+     ON CONFLICT (project_id, goal_type)
+     DO UPDATE SET enabled = EXCLUDED.enabled, config = EXCLUDED.config, updated_at = NOW()
+     RETURNING *`,
+    [args.project_id, args.goal_type, args.enabled, JSON.stringify(args.config)]
+  );
+  return rows[0]!;
+}
+
+export async function listGoals(project_id: number): Promise<ProjectGoal[]> {
+  const { rows } = await pool.query<ProjectGoal>(
+    `SELECT * FROM project_goals WHERE project_id = $1 ORDER BY goal_type`,
+    [project_id]
+  );
+  return rows;
+}
+
+export async function disableGoal(
+  project_id: number,
+  goal_type: string
+): Promise<ProjectGoal> {
+  const { rows } = await pool.query<ProjectGoal>(
+    `UPDATE project_goals SET enabled = FALSE, updated_at = NOW()
+      WHERE project_id = $1 AND goal_type = $2
+      RETURNING *`,
+    [project_id, goal_type]
+  );
+  if (!rows[0]) throw new Error(`goal ${goal_type} not found for project ${project_id}`);
+  return rows[0];
+}

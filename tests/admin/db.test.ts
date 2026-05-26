@@ -55,3 +55,55 @@ test('getProjectBySlug: retorna null se não existe', async () => {
   const got = await getProjectBySlug('mercurio', 'nope');
   assert.equal(got, null);
 });
+
+import {
+  upsertGoal,
+  listGoals,
+  disableGoal,
+} from '../../src/admin/db.js';
+
+test('upsertGoal: cria novo goal', async () => {
+  const p = await createProject({ agent: 'mercurio', slug: 'acme', display_name: 'ACME' });
+  const g = await upsertGoal({
+    project_id: p.id,
+    goal_type: 'scheduling',
+    enabled: true,
+    config: { selection_strategy: 'single' },
+  });
+  assert.equal(g.goal_type, 'scheduling');
+  assert.equal(g.enabled, true);
+  assert.deepEqual(g.config, { selection_strategy: 'single' });
+});
+
+test('upsertGoal: atualiza goal existente sem criar duplicata', async () => {
+  const p = await createProject({ agent: 'mercurio', slug: 'acme', display_name: 'ACME' });
+  await upsertGoal({
+    project_id: p.id,
+    goal_type: 'scheduling',
+    enabled: true,
+    config: { selection_strategy: 'single' },
+  });
+  const updated = await upsertGoal({
+    project_id: p.id,
+    goal_type: 'scheduling',
+    enabled: true,
+    config: { selection_strategy: 'round_robin' },
+  });
+  assert.deepEqual(updated.config, { selection_strategy: 'round_robin' });
+
+  const goals = await listGoals(p.id);
+  assert.equal(goals.length, 1);
+});
+
+test('disableGoal', async () => {
+  const p = await createProject({ agent: 'mercurio', slug: 'acme', display_name: 'ACME' });
+  await upsertGoal({ project_id: p.id, goal_type: 'scheduling', enabled: true, config: {} });
+  const disabled = await disableGoal(p.id, 'scheduling');
+  assert.equal(disabled.enabled, false);
+});
+
+test('listGoals: vazio se projeto sem goals', async () => {
+  const p = await createProject({ agent: 'mercurio', slug: 'acme', display_name: 'ACME' });
+  const goals = await listGoals(p.id);
+  assert.deepEqual(goals, []);
+});
