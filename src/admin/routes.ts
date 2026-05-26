@@ -1,5 +1,5 @@
 import type { FastifyInstance } from 'fastify';
-import { z } from 'zod';
+import { z, ZodError } from 'zod';
 import { requireOwnerToken } from './auth.js';
 import {
   createProject,
@@ -26,6 +26,15 @@ import {
 
 export async function registerAdminRoutes(app: FastifyInstance) {
   app.addHook('preHandler', requireOwnerToken);
+
+  app.setErrorHandler((err, req, reply) => {
+    // Zod parse errors → 400. Outras erros caem no handler default do Fastify.
+    if (err instanceof ZodError) {
+      return reply.code(400).send({ error: 'validation failed', issues: err.issues });
+    }
+    req.log.error({ err }, 'admin route error');
+    return reply.code(500).send({ error: 'internal error' });
+  });
 
   // ── Projects ───────────────────────────────────────────────────────────
 
