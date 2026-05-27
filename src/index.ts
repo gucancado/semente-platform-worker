@@ -1,5 +1,6 @@
 import Fastify from 'fastify';
 import { config } from './config.js';
+import { registerAdminRoutes } from './admin/routes.js';
 import { registerContactsRoutes } from './contacts/routes.js';
 import { registerWebhookRoutes } from './webhook/routes.js';
 import { registerMcpRoutes } from './mcp/server.js';
@@ -83,6 +84,12 @@ async function main() {
   // Config por (agent, project) — quiet_hours etc. Auth por X-Agent-Token.
   await app.register(async (scope) => {
     await registerProjectsRoutes(scope);
+  });
+
+  // Admin endpoints: CRUD de projects/goals/agendas. Auth: X-Owner-Token (env OWNER_ADMIN_TOKEN).
+  // Consumido pela GUI agentes.beeads.com.br.
+  await app.register(async (scope) => {
+    await registerAdminRoutes(scope);
   });
 
   await app.listen({ host: '0.0.0.0', port: config.PORT });
