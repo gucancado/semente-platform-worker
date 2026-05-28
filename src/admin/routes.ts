@@ -110,8 +110,17 @@ export async function registerAdminRoutes(app: FastifyInstance) {
     const params = ProjectSlugParams.parse(req.params);
     const project = await getProjectBySlug(params.agent, params.slug);
     if (!project) return reply.code(404).send({ error: 'project not found' });
-    const [goals, agendas] = await Promise.all([listGoals(project.id), listAgendas(project.id)]);
-    return { project, goals, agendas };
+    const [goals, agendas, conn] = await Promise.all([
+      listGoals(project.id),
+      listAgendas(project.id),
+      getConnectionByProjectId(project.id),
+    ]);
+    return {
+      project,
+      goals,
+      agendas,
+      google_connection: conn ? toPublic(conn) : null,
+    };
   });
 
   app.patch('/admin/agents/:agent/projects/:slug', async (req, reply) => {
@@ -357,6 +366,42 @@ export async function registerAdminRoutes(app: FastifyInstance) {
       gmail_error: gmailError,
       scopes_granted: conn.scopes,
       scope_warnings: scopeWarnings,
+    };
+  });
+
+  app.post('/admin/agents/:agent/projects/:slug/agendas/:agendaId/test-access', async (req, reply) => {
+    const params = ProjectSlugParams.extend({
+      agendaId: z.coerce.number().int().positive(),
+    }).parse(req.params);
+    const project = await getProjectBySlug(params.agent, params.slug);
+    if (!project) return reply.code(404).send({ error: 'project not found' });
+    const conn = await getConnectionByProjectId(project.id);
+    if (!conn) return reply.code(404).send({ error: 'no google connection' });
+    const agenda = await getAgenda(params.agendaId);
+    if (!agenda || agenda.project_id !== project.id) {
+      return reply.code(404).send({ error: 'agenda not found for this project' });
+    }
+
+    const result = await calendarTestAccess(conn, agenda.person_email);
+
+    req.log.info({
+      op: 'admin.agenda.test_access',
+      agent: params.agent,
+      slug: params.slug,
+      agenda_id: params.agendaId,
+      person_email: agenda.person_email,
+      result: result.ok ? 'ok' : result.error,
+      acting_user: actingUser(req),
+    }, 'admin mutation');
+
+    if (result.ok) {
+      return { ok: true, calendar_metadata: result.metadata };
+    }
+    return {
+      ok: false,
+      error: result.error,
+      detail: result.detail,
+      agent_email: conn.google_email,
     };
   });
 }
