@@ -1,5 +1,13 @@
 import { pool } from '../db.js';
 
+/** Lançado quando UPDATE com if_match_updated_at não encontrou o row na versão esperada (alguém editou no meio). */
+export class StaleWriteError extends Error {
+  constructor(public readonly current: { id: number; updated_at: Date; [key: string]: unknown }) {
+    super('stale write — row was modified concurrently');
+    this.name = 'StaleWriteError';
+  }
+}
+
 export type Project = {
   id: number;
   agent: string;
