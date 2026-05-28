@@ -268,4 +268,95 @@ export async function registerAdminRoutes(app: FastifyInstance) {
 
     return reply.redirect(`${guiBaseUrl()}${result.return_to}&google=connected`);
   });
+
+  app.post('/admin/agents/:agent/projects/:slug/google/disconnect', async (req, reply) => {
+    const params = ProjectSlugParams.parse(req.params);
+    const project = await getProjectBySlug(params.agent, params.slug);
+    if (!project) return reply.code(404).send({ error: 'project not found' });
+    const conn = await getConnectionByProjectId(project.id);
+    if (!conn) return { ok: true, already_disconnected: true };
+
+    // Tentar revogar o refresh token (swallowed errors — Google pode já ter revogado)
+    try {
+      const key = loadEncryptionKey();
+      const cryptoMod = await import('../integrations/google/crypto.js');
+      const refreshToken = cryptoMod.decrypt(conn.refresh_token_encrypted, key);
+      await oauthRevoke(refreshToken);
+    } catch (e) {
+      req.log.warn({ err: e }, 'google revoke failed (continuing with delete)');
+    }
+
+    await deleteConnection(project.id);
+
+    req.log.info({
+      op: 'admin.google.disconnect',
+      agent: params.agent,
+      slug: params.slug,
+      project_id: project.id,
+      acting_user: actingUser(req),
+    }, 'admin mutation');
+
+    return { ok: true };
+  });
+
+  app.post('/admin/agents/:agent/projects/:slug/google/test', async (req, reply) => {
+    const params = ProjectSlugParams.parse(req.params);
+    const project = await getProjectBySlug(params.agent, params.slug);
+    if (!project) return reply.code(404).send({ error: 'project not found' });
+    const conn = await getConnectionByProjectId(project.id);
+    if (!conn) return reply.code(404).send({ error: 'no google connection' });
+
+    // 1. Refresh access token (testa que token ainda é válido)
+    try {
+      await ensureFreshAccessToken(conn);
+    } catch (e) {
+      if (e instanceof TokenRevokedError) {
+        return reply.code(401).send({ error: 'token_revoked', detail: e.message });
+      }
+      throw e;
+    }
+
+    // 2. Testar Calendar (próprio calendar do agente)
+    const calendarResult = await calendarTestAccess(conn, conn.google_email);
+    const calendarOk = calendarResult.ok;
+
+    // 3. Testar Gmail (getOwnEmail funciona)
+    let gmailOk = false;
+    let gmailError: string | undefined;
+    try {
+      await getOwnEmail(conn);
+      gmailOk = true;
+    } catch (e) {
+      gmailError = (e as Error).message;
+    }
+
+    // 4. Verificar scope coverage
+    const requiredScopes = [
+      'https://www.googleapis.com/auth/calendar.events',
+      'https://www.googleapis.com/auth/calendar.readonly',
+      'https://www.googleapis.com/auth/gmail.send',
+      'https://www.googleapis.com/auth/gmail.readonly',
+    ];
+    const scopeWarnings = requiredScopes.filter((s) => !conn.scopes.includes(s));
+
+    req.log.info({
+      op: 'admin.google.test',
+      agent: params.agent,
+      slug: params.slug,
+      calendar_ok: calendarOk,
+      gmail_ok: gmailOk,
+      acting_user: actingUser(req),
+    }, 'admin mutation');
+
+    return {
+      ok: calendarOk && gmailOk,
+      email: conn.google_email,
+      calendar_ok: calendarOk,
+      calendar_error: calendarOk ? undefined : calendarResult.error,
+      gmail_ok: gmailOk,
+      gmail_error: gmailError,
+      scopes_granted: conn.scopes,
+      scope_warnings: scopeWarnings,
+    };
+  });
 }
