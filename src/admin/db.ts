@@ -215,6 +215,7 @@ export async function updateAgenda(
     min_advance_hours: number;
     max_advance_business_days: number;
     active: boolean;
+    if_match_updated_at: string;  // ISO datetime opcional pra concurrency check
   }>
 ): Promise<SchedulingAgenda> {
   const { rows } = await pool.query<SchedulingAgenda>(
@@ -230,6 +231,7 @@ export async function updateAgenda(
        active                   = COALESCE($10, active),
        updated_at               = NOW()
      WHERE id = $1
+       AND ($11::timestamptz IS NULL OR updated_at = $11::timestamptz)
      RETURNING *`,
     [
       id,
@@ -242,9 +244,15 @@ export async function updateAgenda(
       patch.min_advance_hours ?? null,
       patch.max_advance_business_days ?? null,
       patch.active ?? null,
+      patch.if_match_updated_at ?? null,
     ]
   );
-  if (!rows[0]) throw new Error(`agenda ${id} not found`);
+  if (!rows[0]) {
+    // Pode ser "não existe" OU "existe mas updated_at não bate". Distinguir.
+    const current = await getAgenda(id);
+    if (!current) throw new Error(`agenda ${id} not found`);
+    throw new StaleWriteError(current as unknown as { id: number; updated_at: Date });
+  }
   return rows[0];
 }
 
