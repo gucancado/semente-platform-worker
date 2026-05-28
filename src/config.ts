@@ -67,6 +67,15 @@ const EnvSchema = z.object({
   // Gerar com: openssl rand -hex 32
   OWNER_ADMIN_TOKEN: z.string().min(32),
 
+  // Google OAuth (Entrega 2). Sem default — se ausente, endpoints /admin/.../google/* falham
+  // explicitamente em runtime.
+  GOOGLE_OAUTH_CLIENT_ID: z.string().min(10),
+  GOOGLE_OAUTH_CLIENT_SECRET: z.string().min(10),
+  GOOGLE_OAUTH_REDIRECT_URI: z.string().url(),
+  // 32 bytes em base64 — openssl rand -base64 32
+  GOOGLE_TOKEN_ENCRYPTION_KEY: z.string().min(40),
+  GOOGLE_OAUTH_STATE_SECRET: z.string().min(40),
+
   // Burst smoothing / debounce: tempo de espera após cada msg recebida antes
   // de disparar trigger pro mercurio. Nova msg na janela reseta o timer.
   TRIGGER_DEBOUNCE_MS: z.coerce.number().int().positive().default(25_000),
