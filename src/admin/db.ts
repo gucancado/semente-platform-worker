@@ -57,17 +57,22 @@ export async function getProjectById(id: number): Promise<Project | null> {
 
 export async function updateProject(
   id: number,
-  patch: { display_name?: string }
+  patch: { display_name?: string; if_match_updated_at?: string }
 ): Promise<Project> {
   const { rows } = await pool.query<Project>(
     `UPDATE projects
         SET display_name = COALESCE($2, display_name),
             updated_at = NOW()
       WHERE id = $1
+        AND ($3::timestamptz IS NULL OR updated_at = $3::timestamptz)
       RETURNING *`,
-    [id, patch.display_name ?? null]
+    [id, patch.display_name ?? null, patch.if_match_updated_at ?? null]
   );
-  if (!rows[0]) throw new Error(`project ${id} not found`);
+  if (!rows[0]) {
+    const current = await getProjectById(id);
+    if (!current) throw new Error(`project ${id} not found`);
+    throw new StaleWriteError(current as unknown as { id: number; updated_at: Date });
+  }
   return rows[0];
 }
 
@@ -108,15 +113,24 @@ export async function listGoals(project_id: number): Promise<ProjectGoal[]> {
 
 export async function disableGoal(
   project_id: number,
-  goal_type: string
+  goal_type: string,
+  if_match_updated_at?: string
 ): Promise<ProjectGoal> {
   const { rows } = await pool.query<ProjectGoal>(
     `UPDATE project_goals SET enabled = FALSE, updated_at = NOW()
       WHERE project_id = $1 AND goal_type = $2
+        AND ($3::timestamptz IS NULL OR updated_at = $3::timestamptz)
       RETURNING *`,
-    [project_id, goal_type]
+    [project_id, goal_type, if_match_updated_at ?? null]
   );
-  if (!rows[0]) throw new Error(`goal ${goal_type} not found for project ${project_id}`);
+  if (!rows[0]) {
+    const { rows: existing } = await pool.query<ProjectGoal>(
+      `SELECT * FROM project_goals WHERE project_id = $1 AND goal_type = $2 LIMIT 1`,
+      [project_id, goal_type]
+    );
+    if (!existing[0]) throw new Error(`goal ${goal_type} not found for project ${project_id}`);
+    throw new StaleWriteError(existing[0] as unknown as { id: number; updated_at: Date });
+  }
   return rows[0];
 }
 
