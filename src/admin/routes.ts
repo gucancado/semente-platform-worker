@@ -26,6 +26,13 @@ import {
   GoalDisableBody,
 } from './schemas.js';
 
+/** Lê X-Acting-User do request. Não autentica — é apenas pra audit trail. */
+function actingUser(req: { headers: Record<string, string | string[] | undefined> }): string | null {
+  const v = req.headers['x-acting-user'];
+  if (typeof v === 'string' && v.length > 0 && v.length <= 200) return v;
+  return null;
+}
+
 export async function registerAdminRoutes(app: FastifyInstance) {
   app.addHook('preHandler', requireOwnerToken);
 
@@ -51,6 +58,12 @@ export async function registerAdminRoutes(app: FastifyInstance) {
         slug: body.slug,
         display_name: body.display_name,
       });
+      req.log.info({
+        op: 'admin.project.create',
+        agent: params.agent,
+        slug: body.slug,
+        acting_user: actingUser(req),
+      }, 'admin mutation');
       return reply.code(201).send(p);
     } catch (e: any) {
       if (e?.code === '23505') {
@@ -83,6 +96,12 @@ export async function registerAdminRoutes(app: FastifyInstance) {
       display_name: body.display_name,
       if_match_updated_at: body.if_match_updated_at,
     });
+    req.log.info({
+      op: 'admin.project.update',
+      agent: params.agent,
+      slug: params.slug,
+      acting_user: actingUser(req),
+    }, 'admin mutation');
     return updated;
   });
 
@@ -102,6 +121,13 @@ export async function registerAdminRoutes(app: FastifyInstance) {
       enabled: body.enabled,
       config: body.config,
     });
+    req.log.info({
+      op: 'admin.goal.upsert',
+      agent: params.agent,
+      slug: params.slug,
+      goal_type: body.goal_type,
+      acting_user: actingUser(req),
+    }, 'admin mutation');
     return reply.code(isCreate ? 201 : 200).send(goal);
   });
 
@@ -112,6 +138,13 @@ export async function registerAdminRoutes(app: FastifyInstance) {
     if (!project) return reply.code(404).send({ error: 'project not found' });
     try {
       const goal = await disableGoal(project.id, params.goal_type, body.if_match_updated_at);
+      req.log.info({
+        op: 'admin.goal.disable',
+        agent: params.agent,
+        slug: params.slug,
+        goal_type: params.goal_type,
+        acting_user: actingUser(req),
+      }, 'admin mutation');
       return goal;
     } catch (e) {
       if (e instanceof StaleWriteError) throw e; // deixa setErrorHandler tratar
@@ -137,6 +170,13 @@ export async function registerAdminRoutes(app: FastifyInstance) {
       min_advance_hours: body.min_advance_hours,
       max_advance_business_days: body.max_advance_business_days,
     });
+    req.log.info({
+      op: 'admin.agenda.create',
+      agent: params.agent,
+      slug: params.slug,
+      agenda_id: agenda.id,
+      acting_user: actingUser(req),
+    }, 'admin mutation');
     return reply.code(201).send(agenda);
   });
 
@@ -160,6 +200,13 @@ export async function registerAdminRoutes(app: FastifyInstance) {
       return reply.code(404).send({ error: 'agenda not found for this project' });
     }
     const updated = await updateAgenda(params.agendaId, body);
+    req.log.info({
+      op: 'admin.agenda.update',
+      agent: params.agent,
+      slug: params.slug,
+      agenda_id: params.agendaId,
+      acting_user: actingUser(req),
+    }, 'admin mutation');
     return updated;
   });
 
@@ -174,6 +221,13 @@ export async function registerAdminRoutes(app: FastifyInstance) {
       return reply.code(404).send({ error: 'agenda not found for this project' });
     }
     const deleted = await softDeleteAgenda(params.agendaId);
+    req.log.info({
+      op: 'admin.agenda.deactivate',
+      agent: params.agent,
+      slug: params.slug,
+      agenda_id: params.agendaId,
+      acting_user: actingUser(req),
+    }, 'admin mutation');
     return deleted;
   });
 }
