@@ -41,8 +41,12 @@ export const ProjectCreateBody = z.object({
 export const ProjectPatchBody = z
   .object({
     display_name: z.string().min(1).max(200).optional(),
+    if_match_updated_at: z.string().datetime().optional(),
   })
-  .refine((b) => Object.keys(b).length > 0, 'pelo menos 1 campo obrigatório');
+  .refine(
+    (b) => b.display_name !== undefined,
+    'pelo menos display_name é obrigatório'
+  );
 
 export const GoalUpsertBody = z.object({
   goal_type: z.literal('scheduling'), // MVP: só este
@@ -77,5 +81,19 @@ export const AgendaPatchBody = z
     min_advance_hours: z.number().int().min(0).max(168).optional(),
     max_advance_business_days: z.number().int().min(1).max(60).optional(),
     active: z.boolean().optional(),
+    if_match_updated_at: z.string().datetime().optional(),
   })
-  .refine((b) => Object.keys(b).length > 0, 'pelo menos 1 campo obrigatório');
+  .refine(
+    (b) => {
+      const keys = Object.keys(b).filter((k) => k !== 'if_match_updated_at');
+      return keys.length > 0;
+    },
+    'pelo menos 1 campo de mutação obrigatório'
+  );
+
+/** Body opcional de DELETE /admin/.../goals/:goal_type — só carrega o if_match. */
+export const GoalDisableBody = z
+  .object({
+    if_match_updated_at: z.string().datetime().optional(),
+  })
+  .optional();
