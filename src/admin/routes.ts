@@ -14,6 +14,7 @@ import {
   getAgenda,
   updateAgenda,
   softDeleteAgenda,
+  StaleWriteError,
 } from './db.js';
 import {
   ProjectCreateBody,
@@ -22,15 +23,18 @@ import {
   GoalUpsertBody,
   AgendaCreateBody,
   AgendaPatchBody,
+  GoalDisableBody,
 } from './schemas.js';
 
 export async function registerAdminRoutes(app: FastifyInstance) {
   app.addHook('preHandler', requireOwnerToken);
 
   app.setErrorHandler((err, req, reply) => {
-    // Zod parse errors → 400. Outras erros caem no handler default do Fastify.
     if (err instanceof ZodError) {
       return reply.code(400).send({ error: 'validation failed', issues: err.issues });
+    }
+    if (err instanceof StaleWriteError) {
+      return reply.code(409).send({ error: 'stale write', current: err.current });
     }
     req.log.error({ err }, 'admin route error');
     return reply.code(500).send({ error: 'internal error' });
@@ -75,7 +79,10 @@ export async function registerAdminRoutes(app: FastifyInstance) {
     const body = ProjectPatchBody.parse(req.body);
     const project = await getProjectBySlug(params.agent, params.slug);
     if (!project) return reply.code(404).send({ error: 'project not found' });
-    const updated = await updateProject(project.id, body);
+    const updated = await updateProject(project.id, {
+      display_name: body.display_name,
+      if_match_updated_at: body.if_match_updated_at,
+    });
     return updated;
   });
 
@@ -100,12 +107,14 @@ export async function registerAdminRoutes(app: FastifyInstance) {
 
   app.delete('/admin/agents/:agent/projects/:slug/goals/:goal_type', async (req, reply) => {
     const params = ProjectSlugParams.extend({ goal_type: z.string().min(1) }).parse(req.params);
+    const body = GoalDisableBody.parse(req.body) ?? {};
     const project = await getProjectBySlug(params.agent, params.slug);
     if (!project) return reply.code(404).send({ error: 'project not found' });
     try {
-      const goal = await disableGoal(project.id, params.goal_type);
+      const goal = await disableGoal(project.id, params.goal_type, body.if_match_updated_at);
       return goal;
-    } catch {
+    } catch (e) {
+      if (e instanceof StaleWriteError) throw e; // deixa setErrorHandler tratar
       return reply.code(404).send({ error: 'goal not found' });
     }
   });
