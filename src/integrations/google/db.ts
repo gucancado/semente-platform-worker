@@ -14,9 +14,9 @@ export async function upsertConnection(args: {
        google_email = EXCLUDED.google_email,
        refresh_token_encrypted = EXCLUDED.refresh_token_encrypted,
        scopes = EXCLUDED.scopes,
-       last_refresh_at = NOW(),
        last_error = NULL,
-       connected_at = NOW()
+       connected_at = NOW(),
+       last_refresh_at = NULL
      RETURNING *`,
     [args.project_id, args.google_email, args.refresh_token_encrypted, args.scopes]
   );
