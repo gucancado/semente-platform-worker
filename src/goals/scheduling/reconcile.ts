@@ -15,7 +15,11 @@ export type ReconcileDeps = {
     eventId: string,
   ) => Promise<calendar_v3.Schema$Event | null>;
   now: () => Date;
-  logger: { info: Function; warn: Function; error: Function };
+  logger: {
+    info?: (obj: Record<string, unknown>, msg: string) => void;
+    warn?: (obj: Record<string, unknown>, msg: string) => void;
+    error?: (obj: Record<string, unknown>, msg: string) => void;
+  };
 };
 
 export type ReconcileResult = {
@@ -162,7 +166,7 @@ async function handleCancelled(deps: ReconcileDeps, m: MeetingRow): Promise<void
         WHERE id = $1`,
       [m.id],
     );
-    await enqueueReconcileTrigger(client as any, {
+    await enqueueReconcileTrigger(client, {
       agent: m.agent,
       project: m.project_slug,
       identifier: m.identifier,
@@ -194,7 +198,7 @@ async function handleMoved(deps: ReconcileDeps, m: MeetingRow, newIso: string): 
         WHERE id = $1`,
       [m.id, newIso, formatHuman(newIso)],
     );
-    await enqueueReconcileTrigger(client as any, {
+    await enqueueReconcileTrigger(client, {
       agent: m.agent,
       project: m.project_slug,
       identifier: m.identifier,

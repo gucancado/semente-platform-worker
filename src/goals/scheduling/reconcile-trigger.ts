@@ -45,8 +45,9 @@ async function runOnce(logger: FastifyBaseLogger): Promise<void> {
 export function startReconcileCron(
   logger: FastifyBaseLogger,
   intervalMs: number = DEFAULT_INTERVAL_MS,
-): void {
+): () => void {
   void runOnce(logger);
   const handle = setInterval(() => void runOnce(logger), intervalMs);
-  if (typeof (handle as any).unref === 'function') (handle as any).unref();
+  (handle as { unref?: () => void }).unref?.();
+  return () => clearInterval(handle);
 }
