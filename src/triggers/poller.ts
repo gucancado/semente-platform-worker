@@ -7,6 +7,20 @@ import {
   type PendingTrigger,
 } from '../db.js';
 
+export function buildTriggerBody(row: PendingTrigger): {
+  inbox_id: number | null;
+  agent: string;
+  trigger_type: 'inbox' | 'meeting_reconcile';
+  payload: PendingTrigger['payload'];
+} {
+  return {
+    inbox_id: row.last_inbox_id,
+    agent: row.agent,
+    trigger_type: row.trigger_type,
+    payload: row.payload,
+  };
+}
+
 /**
  * Dispara um trigger HTTP no endpoint do mercurio (ou outro agente).
  * Marca status no DB conforme resultado: 'fired' em sucesso, 'pending' com
@@ -28,7 +42,7 @@ async function fireTrigger(row: PendingTrigger, log: FastifyBaseLogger): Promise
     const r = await fetch(agentCfg.trigger_url, {
       method: 'POST',
       headers,
-      body: JSON.stringify({ inbox_id: row.last_inbox_id, agent: row.agent }),
+      body: JSON.stringify(buildTriggerBody(row)),
       signal: AbortSignal.timeout(5_000),
     });
     if (r.ok) {
