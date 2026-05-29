@@ -75,7 +75,7 @@ test('exchangeCode: troca code + chama userinfo + retorna ExchangeResult', async
     access_token: 'at1',
     refresh_token: 'rt1',
     expires_in: 3600,
-    scope: 'https://www.googleapis.com/auth/calendar.events https://www.googleapis.com/auth/gmail.send',
+    scope: 'https://www.googleapis.com/auth/calendar https://www.googleapis.com/auth/gmail.modify',
     token_type: 'Bearer',
   });
   queue(200, { email: 'comercial@beeads.com.br' });
@@ -88,8 +88,8 @@ test('exchangeCode: troca code + chama userinfo + retorna ExchangeResult', async
   assert.equal(result.refresh_token, 'rt1');
   assert.equal(result.access_token, 'at1');
   assert.deepEqual(result.scopes_granted, [
-    'https://www.googleapis.com/auth/calendar.events',
-    'https://www.googleapis.com/auth/gmail.send',
+    'https://www.googleapis.com/auth/calendar',
+    'https://www.googleapis.com/auth/gmail.modify',
   ]);
   assert.equal(calls.length, 2);
   assert.match(calls[0]!.url, /oauth2\.googleapis\.com\/token/);

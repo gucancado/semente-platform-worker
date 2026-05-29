@@ -34,6 +34,7 @@ import {
   TokenRevokedError,
   GoogleApiError,
   toPublic,
+  REQUIRED_SCOPES,
 } from '../integrations/google/types.js';
 
 function guiBaseUrl(): string {
@@ -339,14 +340,8 @@ export async function registerAdminRoutes(app: FastifyInstance) {
       gmailError = (e as Error).message;
     }
 
-    // 4. Verificar scope coverage
-    const requiredScopes = [
-      'https://www.googleapis.com/auth/calendar.events',
-      'https://www.googleapis.com/auth/calendar.readonly',
-      'https://www.googleapis.com/auth/gmail.send',
-      'https://www.googleapis.com/auth/gmail.readonly',
-    ];
-    const scopeWarnings = requiredScopes.filter((s) => !conn.scopes.includes(s));
+    // 4. Verificar scope coverage (usa lista canônica de REQUIRED_SCOPES).
+    const scopeWarnings = REQUIRED_SCOPES.filter((s) => !conn.scopes.includes(s));
 
     req.log.info({
       op: 'admin.google.test',

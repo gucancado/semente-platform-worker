@@ -4,11 +4,21 @@
  * goals/email/gmail-client.ts + admin/routes.ts.
  */
 
+// Scopes "future-proof" pra plataforma de agentes (não só mercurio).
+// - calendar (full): substitui calendar.events + calendar.readonly. Read + write.
+// - gmail.modify: read + send + organize (labels, mark read, trash). Cobre future
+//   uso onde agente lê inbox do usuário Google e organiza/responde.
+// - drive (full): read + write em todos arquivos do usuário. Pra futuros agentes
+//   que vão ler/criar arquivos arbitrários.
+// - openid + email: identifica o usuário Google conectado (google_email).
+//
+// Decisão (2026-05-29): adicionar tudo upfront pra evitar reconnect quando agentes
+// novos precisarem desses scopes. Custo: consent dialog mais longo na 1ª conexão.
+// Aceito porque uso é interno BeeAds (test users em OAuth Consent "Testing" mode).
 export const REQUIRED_SCOPES = [
-  'https://www.googleapis.com/auth/calendar.events',
-  'https://www.googleapis.com/auth/calendar.readonly',
-  'https://www.googleapis.com/auth/gmail.send',
-  'https://www.googleapis.com/auth/gmail.readonly',
+  'https://www.googleapis.com/auth/calendar',
+  'https://www.googleapis.com/auth/gmail.modify',
+  'https://www.googleapis.com/auth/drive',
   'openid',
   'email',
 ] as const;
