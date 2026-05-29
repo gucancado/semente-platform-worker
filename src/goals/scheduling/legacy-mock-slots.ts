@@ -20,6 +20,7 @@ export type SlotCandidate = {
   day_label: string;
   hour: number;
   minute: number;
+  hold_id?: number; // populado pelo service.ts quando source='google'
 };
 
 export type DayFilter = 'qualquer' | 'seg' | 'ter' | 'qua' | 'qui' | 'sex';
