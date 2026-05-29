@@ -116,9 +116,12 @@ export async function listCalendars(
     const res = await cal.calendarList.list({ pageToken, maxResults: 250 });
     for (const c of res.data.items ?? []) {
       const role = c.accessRole ?? 'reader';
+      // summaryOverride reflete o nome que o usuário deu ao calendar no Google Calendar UI.
+      // summary é o nome canônico server-side (pra primary, geralmente é o email).
+      const name = c.summaryOverride ?? c.summary ?? '';
       items.push({
         id: c.id ?? '',
-        summary: c.summary ?? '',
+        summary: name,
         timeZone: c.timeZone ?? 'UTC',
         primary: c.primary ?? false,
         accessRole: role,
