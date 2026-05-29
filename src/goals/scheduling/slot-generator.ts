@@ -76,7 +76,7 @@ export function generateSlotsFromWorkingHours(input: GenerateInput): SlotCandida
     cursor = cursor.plus({ days: 1 })
   ) {
     const wd = cursor.weekday % 7; // luxon: 1=monday..7=sunday → 0=sunday..6=saturday for our DAYS_KEYS
-    const dayKey = DAYS_KEYS[wd];
+    const dayKey = DAYS_KEYS[wd]!;
     const windows = input.workingHours[dayKey];
     if (!windows || windows.length === 0) continue;
 
