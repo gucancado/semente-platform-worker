@@ -3,6 +3,8 @@ import { z } from 'zod';
 import { requireAgentToken } from '../auth.js';
 import { pool } from '../db.js';
 import { generateLegacyMockSlots, type DayFilter, type PeriodFilter } from '../goals/scheduling/legacy-mock-slots.js';
+import { getProjectBySlug } from '../admin/db.js';
+import { suggestSlots } from '../goals/scheduling/service.js';
 
 const LeadKey = z.object({
   channel: z.string().min(1),
@@ -177,10 +179,55 @@ export async function registerSdrRoutes(app: FastifyInstance) {
       .object({
         day: z.enum(['qualquer', 'seg', 'ter', 'qua', 'qui', 'sex']).default('qualquer'),
         period: z.enum(['qualquer', 'manha', 'tarde']).default('qualquer'),
+        project: z.string().min(1).optional(),
+        channel: z.string().min(1).optional(),
+        identifier: z.string().min(1).optional(),
       })
       .parse(req.query);
 
-    return { slots: generateLegacyMockSlots(query.day as DayFilter, query.period as PeriodFilter) };
+    // Caminho legado: sem project/channel/identifier → continua gerador determinístico.
+    if (!query.project || !query.channel || !query.identifier) {
+      return {
+        slots: generateLegacyMockSlots(query.day as DayFilter, query.period as PeriodFilter),
+        source: 'mock' as const,
+        fallback_reason: 'missing_params',
+      };
+    }
+
+    const project = await getProjectBySlug(req.agent.name, query.project);
+    if (!project) {
+      return {
+        slots: generateLegacyMockSlots(query.day as DayFilter, query.period as PeriodFilter),
+        source: 'mock' as const,
+        fallback_reason: 'project_not_found',
+      };
+    }
+
+    const result = await suggestSlots({
+      project_id: project.id,
+      channel: query.channel,
+      identifier: query.identifier,
+      dayFilter: query.day as DayFilter,
+      periodFilter: query.period as PeriodFilter,
+    });
+
+    req.log.info({
+      op: 'sdr.suggest_slots',
+      agent: req.agent.name,
+      project: query.project,
+      channel: query.channel,
+      identifier: query.identifier,
+      source: result.source,
+      fallback_reason: result.fallback_reason,
+      slot_count: result.slots.length,
+    }, 'sdr suggest-slots');
+
+    return {
+      slots: result.slots,
+      source: result.source,
+      fallback_reason: result.fallback_reason,
+      agenda: result.agenda,
+    };
   });
 
   app.post('/meetings/schedule', async (req) => {
