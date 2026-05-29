@@ -5,6 +5,12 @@ import { pool } from '../db.js';
 import { generateLegacyMockSlots, type DayFilter, type PeriodFilter } from '../goals/scheduling/legacy-mock-slots.js';
 import { getProjectBySlug } from '../admin/db.js';
 import { suggestSlots } from '../goals/scheduling/service.js';
+import {
+  scheduleMeeting,
+  cancelMeeting,
+  rescheduleMeeting,
+  defaultScheduleDeps,
+} from '../goals/scheduling/schedule-service.js';
 
 const LeadKey = z.object({
   channel: z.string().min(1),
@@ -241,56 +247,104 @@ export async function registerSdrRoutes(app: FastifyInstance) {
         lead_name: z.string().optional(),
         company: z.string().optional(),
         contexto: z.string().max(2000).optional(),
+        project: z.string().min(1).optional(),
       })
       .parse(req.body);
 
-    // Dedup: se já há meeting "scheduled" pro lead, devolve a existente em vez
-    // de criar duplicada. Defesa em profundidade pra erro de re-emissão.
-    const existing = await pool.query<{ id: number; slot_human: string }>(
-      `SELECT id, slot_human FROM simulated_meetings
-        WHERE agent = $1 AND channel = $2 AND identifier = $3 AND status = 'scheduled'
-        ORDER BY created_at DESC
-        LIMIT 1`,
-      [req.agent.name, body.channel, body.identifier]
-    );
-    if (existing.rows[0]) {
-      return {
-        id: existing.rows[0].id,
-        ok: true,
-        simulated: true,
-        already_scheduled: true,
-        existing_slot_human: existing.rows[0].slot_human,
-      };
+    // Path legado: sem project → mantém simulated_meetings.
+    if (!body.project) {
+      const existing = await pool.query<{ id: number; slot_human: string }>(
+        `SELECT id, slot_human FROM simulated_meetings
+          WHERE agent = $1 AND channel = $2 AND identifier = $3 AND status = 'scheduled'
+          ORDER BY created_at DESC
+          LIMIT 1`,
+        [req.agent.name, body.channel, body.identifier]
+      );
+      if (existing.rows[0]) {
+        return {
+          id: existing.rows[0].id,
+          ok: true,
+          simulated: true,
+          already_scheduled: true,
+          existing_slot_human: existing.rows[0].slot_human,
+        };
+      }
+
+      const { rows } = await pool.query<{ id: number }>(
+        `INSERT INTO simulated_meetings (agent, channel, identifier, slot_iso, slot_human, lead_email, lead_name, company, contexto)
+         VALUES ($1, $2, $3, $4::timestamptz, $5, $6, $7, $8, $9)
+         RETURNING id`,
+        [
+          req.agent.name,
+          body.channel,
+          body.identifier,
+          body.slot_iso,
+          body.slot_human,
+          body.lead_email ?? null,
+          body.lead_name ?? null,
+          body.company ?? null,
+          body.contexto ?? null,
+        ]
+      );
+      return { id: rows[0]!.id, ok: true, simulated: true };
     }
 
-    const { rows } = await pool.query<{ id: number }>(
-      `INSERT INTO simulated_meetings (agent, channel, identifier, slot_iso, slot_human, lead_email, lead_name, company, contexto)
-       VALUES ($1, $2, $3, $4::timestamptz, $5, $6, $7, $8, $9)
-       RETURNING id`,
-      [
-        req.agent.name,
-        body.channel,
-        body.identifier,
-        body.slot_iso,
-        body.slot_human,
-        body.lead_email ?? null,
-        body.lead_name ?? null,
-        body.company ?? null,
-        body.contexto ?? null,
-      ]
-    );
-    return { id: rows[0]!.id, ok: true, simulated: true };
+    const project = await getProjectBySlug(req.agent.name, body.project);
+    if (!project) return { ok: false, error: 'project not found' };
+
+    const result = await scheduleMeeting({
+      project_id: project.id,
+      agent: req.agent.name,
+      channel: body.channel,
+      identifier: body.identifier,
+      slot_iso: body.slot_iso,
+      slot_human: body.slot_human,
+      lead_email: body.lead_email,
+      lead_name: body.lead_name,
+      company: body.company,
+      contexto: body.contexto,
+    }, defaultScheduleDeps);
+
+    req.log.info({
+      op: 'sdr.schedule_meeting',
+      agent: req.agent.name,
+      project: body.project,
+      channel: body.channel,
+      identifier: body.identifier,
+      source: result.source,
+      meeting_id: result.meeting_id,
+    }, 'sdr schedule-meeting');
+
+    return result;
   });
 
   app.post('/meetings/:id/cancel', async (req) => {
     const params = z.object({ id: z.coerce.number().int() }).parse(req.params);
-    const { rowCount } = await pool.query(
-      `UPDATE simulated_meetings
-          SET status = 'cancelled', updated_at = NOW()
-        WHERE id = $1 AND agent = $2 AND status = 'scheduled'`,
-      [params.id, req.agent.name]
-    );
-    return { cancelled: (rowCount ?? 0) > 0 };
+    const body = z.object({
+      by: z.enum(['lead', 'agent', 'organizer']).default('lead'),
+      project: z.string().min(1).optional(),
+    }).parse(req.body ?? {});
+
+    // Legacy path: sem project → simulated_meetings (mantém comportamento atual).
+    if (!body.project) {
+      const { rowCount } = await pool.query(
+        `UPDATE simulated_meetings
+            SET status = 'cancelled', updated_at = NOW()
+          WHERE id = $1 AND agent = $2 AND status = 'scheduled'`,
+        [params.id, req.agent.name]
+      );
+      return { cancelled: (rowCount ?? 0) > 0 };
+    }
+
+    const result = await cancelMeeting(params.id, body.by, defaultScheduleDeps);
+    req.log.info({
+      op: 'sdr.cancel_meeting',
+      agent: req.agent.name,
+      meeting_id: params.id,
+      cancelled: result.cancelled,
+      already: result.already,
+    }, 'sdr cancel-meeting');
+    return result;
   });
 
   app.post('/meetings/:id/reschedule', async (req) => {
@@ -299,41 +353,54 @@ export async function registerSdrRoutes(app: FastifyInstance) {
       .object({
         slot_iso: z.string().datetime({ offset: true }),
         slot_human: z.string().min(1),
+        project: z.string().min(1).optional(),
       })
       .parse(req.body);
 
-    const orig = await pool.query<{ channel: string; identifier: string; lead_email: string | null; lead_name: string | null; company: string | null; contexto: string | null }>(
-      `SELECT channel, identifier, lead_email, lead_name, company, contexto
-         FROM simulated_meetings WHERE id = $1 AND agent = $2`,
-      [params.id, req.agent.name]
-    );
-    if (!orig.rows[0]) return { error: 'meeting not found' };
+    // Legacy path: sem project → simulated_meetings (mantém comportamento atual).
+    if (!body.project) {
+      const orig = await pool.query<{ channel: string; identifier: string; lead_email: string | null; lead_name: string | null; company: string | null; contexto: string | null }>(
+        `SELECT channel, identifier, lead_email, lead_name, company, contexto
+           FROM simulated_meetings WHERE id = $1 AND agent = $2`,
+        [params.id, req.agent.name]
+      );
+      if (!orig.rows[0]) return { error: 'meeting not found' };
 
-    const inserted = await pool.query<{ id: number }>(
-      `INSERT INTO simulated_meetings (agent, channel, identifier, slot_iso, slot_human, lead_email, lead_name, company, contexto)
-       VALUES ($1, $2, $3, $4::timestamptz, $5, $6, $7, $8, $9)
-       RETURNING id`,
-      [
-        req.agent.name,
-        orig.rows[0].channel,
-        orig.rows[0].identifier,
-        body.slot_iso,
-        body.slot_human,
-        orig.rows[0].lead_email,
-        orig.rows[0].lead_name,
-        orig.rows[0].company,
-        orig.rows[0].contexto,
-      ]
-    );
+      const inserted = await pool.query<{ id: number }>(
+        `INSERT INTO simulated_meetings (agent, channel, identifier, slot_iso, slot_human, lead_email, lead_name, company, contexto)
+         VALUES ($1, $2, $3, $4::timestamptz, $5, $6, $7, $8, $9)
+         RETURNING id`,
+        [
+          req.agent.name,
+          orig.rows[0].channel,
+          orig.rows[0].identifier,
+          body.slot_iso,
+          body.slot_human,
+          orig.rows[0].lead_email,
+          orig.rows[0].lead_name,
+          orig.rows[0].company,
+          orig.rows[0].contexto,
+        ]
+      );
 
-    await pool.query(
-      `UPDATE simulated_meetings
-          SET status = 'rescheduled', rescheduled_to = $2, updated_at = NOW()
-        WHERE id = $1`,
-      [params.id, inserted.rows[0]!.id]
-    );
+      await pool.query(
+        `UPDATE simulated_meetings
+            SET status = 'rescheduled', rescheduled_to = $2, updated_at = NOW()
+          WHERE id = $1`,
+        [params.id, inserted.rows[0]!.id]
+      );
 
-    return { new_id: inserted.rows[0]!.id, ok: true };
+      return { new_id: inserted.rows[0]!.id, ok: true };
+    }
+
+    const result = await rescheduleMeeting(params.id, body.slot_iso, body.slot_human, defaultScheduleDeps);
+    req.log.info({
+      op: 'sdr.reschedule_meeting',
+      agent: req.agent.name,
+      meeting_id: params.id,
+      ok: result.ok,
+    }, 'sdr reschedule-meeting');
+    return result;
   });
 
   app.get('/meetings', async (req) => {

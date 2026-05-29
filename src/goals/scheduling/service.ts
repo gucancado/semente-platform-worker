@@ -19,6 +19,8 @@ import {
   type SlotCandidate,
 } from './slot-generator.js';
 import { generateLegacyMockSlots } from './legacy-mock-slots.js';
+import { createHold } from './calendar-write.js';
+import { insertSlotHold } from './meetings-db.js';
 
 export type SuggestSlotsRequest = {
   project_id: number;
@@ -45,14 +47,20 @@ export type SuggestSlotsDeps = {
     timeMin: Date,
     timeMax: Date
   ) => Promise<BusyRange[]>;
+  createHold: typeof createHold;
+  insertSlotHold: typeof insertSlotHold;
   now: () => Date;
 };
+
+export const HOLD_TTL_MIN = 30;
 
 export const defaultDeps: SuggestSlotsDeps = {
   listAgendas: realListAgendas,
   getConnectionByProjectId: realGetConn,
   ensureFreshAccessToken: realEnsureFresh,
   freebusy: realFreebusy,
+  createHold,
+  insertSlotHold,
   now: () => new Date(),
 };
 
@@ -106,10 +114,45 @@ export async function suggestSlotsCore(
     maxResults: 3,
   });
 
+  // Criar holds tentativos pra cada slot.
+  const slotsWithHolds: typeof slots = [];
+  for (const slot of slots) {
+    try {
+      const { eventId } = await deps.createHold(conn, {
+        calendarId: agenda.person_email,
+        slotIso: slot.iso,
+        durationMin: agenda.meeting_duration_min,
+        label: `[HOLD] ${req.channel}:${req.identifier}`.slice(0, 50),
+      });
+      const expiresAt = new Date(now.getTime() + HOLD_TTL_MIN * 60 * 1000);
+      const { id: holdId } = await deps.insertSlotHold({
+        project_id: req.project_id,
+        agenda_id: agenda.id,
+        channel: req.channel,
+        identifier: req.identifier,
+        slot_iso: slot.iso,
+        google_event_id: eventId,
+        expires_at: expiresAt,
+      });
+      slotsWithHolds.push({ ...slot, hold_id: holdId });
+    } catch {
+      continue;
+    }
+  }
+
+  // Fallback: se TODOS os createHolds falharam (Google quota, network), volta pro mock.
+  if (slots.length > 0 && slotsWithHolds.length === 0) {
+    return {
+      source: 'mock',
+      fallback_reason: 'all_holds_failed',
+      slots: generateLegacyMockSlots(req.dayFilter, req.periodFilter, now),
+    };
+  }
+
   return {
     source: 'google',
     agenda: { id: agenda.id, display_label: agenda.display_label },
-    slots,
+    slots: slotsWithHolds,
   };
 }
 

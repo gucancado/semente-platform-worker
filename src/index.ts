@@ -11,6 +11,7 @@ import { registerProjectsRoutes } from './projects/routes.js';
 import { registerWebhookCloudRoutes, registerSendCloudRoute } from './webhook-cloud/routes.js';
 import { requireAgentToken } from './auth.js';
 import { startTriggerPoller } from './triggers/poller.js';
+import { startHoldsCleanupCron } from './goals/scheduling/holds-cleanup.js';
 
 async function main() {
   const app = Fastify({
@@ -98,6 +99,9 @@ async function main() {
   // Poller que processa pending_triggers (burst smoothing + quiet hours).
   // Substitui o trigger fire-and-forget inline do webhook handler.
   startTriggerPoller(app.log);
+
+  // Cron que limpa holds expirados a cada 5 minutos.
+  startHoldsCleanupCron(app.log);
 }
 
 main().catch((err) => {

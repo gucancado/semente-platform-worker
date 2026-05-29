@@ -52,6 +52,8 @@ function baseDeps(overrides: Partial<SuggestSlotsDeps> = {}): SuggestSlotsDeps {
     getConnectionByProjectId: async () => FAKE_CONN,
     ensureFreshAccessToken: async () => 'fake-access-token',
     freebusy: async () => [],
+    createHold: async () => ({ eventId: 'evt-default' }),
+    insertSlotHold: async () => ({ id: 1 }),
     now: () => NOW,
     ...overrides,
   };
@@ -143,4 +145,61 @@ test('agenda fallback mock também respeita dayFilter/periodFilter', async () =>
   for (const s of result.slots) {
     assert.ok(s.hour >= 14, `legacy mock tarde: ${s.iso}`);
   }
+});
+
+test('cria holds pra cada slot gerado', async () => {
+  const createdHolds: unknown[] = [];
+  const result = await suggestSlotsCore(BASE_REQ, baseDeps({
+    createHold: (async (_conn, args) => {
+      createdHolds.push(args);
+      return { eventId: `evt-${createdHolds.length}` };
+    }) as Parameters<typeof suggestSlotsCore>[1]['createHold'],
+    insertSlotHold: (async (_args) => ({ id: 100 + createdHolds.length })) as Parameters<typeof suggestSlotsCore>[1]['insertSlotHold'],
+  }));
+  assert.equal(result.source, 'google');
+  assert.equal(createdHolds.length, 3);
+  assert.ok(result.slots.every((s) => typeof s.hold_id === 'number'));
+});
+
+test('createHold falha pra 1 slot: retorna N-1 slots', async () => {
+  let calls = 0;
+  const result = await suggestSlotsCore(BASE_REQ, baseDeps({
+    createHold: (async () => {
+      calls++;
+      if (calls === 2) throw new Error('slot taken');
+      return { eventId: `evt-${calls}` };
+    }) as Parameters<typeof suggestSlotsCore>[1]['createHold'],
+    insertSlotHold: (async () => ({ id: 1 })) as Parameters<typeof suggestSlotsCore>[1]['insertSlotHold'],
+  }));
+  assert.equal(result.source, 'google');
+  assert.equal(result.slots.length, 2);
+});
+
+test('hold expires_at = now + 30min', async () => {
+  let captured: unknown = null;
+  await suggestSlotsCore(BASE_REQ, baseDeps({
+    createHold: (async () => ({ eventId: 'evt-1' })) as Parameters<typeof suggestSlotsCore>[1]['createHold'],
+    insertSlotHold: (async (args) => { captured = args; return { id: 1 }; }) as Parameters<typeof suggestSlotsCore>[1]['insertSlotHold'],
+  }));
+  const args = captured as { expires_at: Date };
+  const diffMin = (args.expires_at.getTime() - NOW.getTime()) / (60 * 1000);
+  assert.equal(diffMin, 30);
+});
+
+test('fallback mock NÃO chama createHold', async () => {
+  let called = false;
+  await suggestSlotsCore(BASE_REQ, baseDeps({
+    getConnectionByProjectId: async () => null,
+    createHold: (async () => { called = true; return { eventId: 'evt' }; }) as Parameters<typeof suggestSlotsCore>[1]['createHold'],
+  }));
+  assert.equal(called, false);
+});
+
+test('todos createHold falham → fallback mock com reason all_holds_failed', async () => {
+  const result = await suggestSlotsCore(BASE_REQ, baseDeps({
+    createHold: (async () => { throw new Error('quota exceeded'); }) as Parameters<typeof suggestSlotsCore>[1]['createHold'],
+  }));
+  assert.equal(result.source, 'mock');
+  if (result.source === 'mock') assert.equal(result.fallback_reason, 'all_holds_failed');
+  assert.ok(result.slots.length > 0);
 });
