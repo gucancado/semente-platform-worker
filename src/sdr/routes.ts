@@ -2,6 +2,9 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { requireAgentToken } from '../auth.js';
 import { pool } from '../db.js';
+import { generateLegacyMockSlots, type DayFilter, type PeriodFilter } from '../goals/scheduling/legacy-mock-slots.js';
+import { getProjectBySlug } from '../admin/db.js';
+import { suggestSlots } from '../goals/scheduling/service.js';
 
 const LeadKey = z.object({
   channel: z.string().min(1),
@@ -176,10 +179,55 @@ export async function registerSdrRoutes(app: FastifyInstance) {
       .object({
         day: z.enum(['qualquer', 'seg', 'ter', 'qua', 'qui', 'sex']).default('qualquer'),
         period: z.enum(['qualquer', 'manha', 'tarde']).default('qualquer'),
+        project: z.string().min(1).optional(),
+        channel: z.string().min(1).optional(),
+        identifier: z.string().min(1).optional(),
       })
       .parse(req.query);
 
-    return { slots: generateSlots(query.day, query.period) };
+    // Caminho legado: sem project/channel/identifier → continua gerador determinístico.
+    if (!query.project || !query.channel || !query.identifier) {
+      return {
+        slots: generateLegacyMockSlots(query.day as DayFilter, query.period as PeriodFilter),
+        source: 'mock' as const,
+        fallback_reason: 'missing_params',
+      };
+    }
+
+    const project = await getProjectBySlug(req.agent.name, query.project);
+    if (!project) {
+      return {
+        slots: generateLegacyMockSlots(query.day as DayFilter, query.period as PeriodFilter),
+        source: 'mock' as const,
+        fallback_reason: 'project_not_found',
+      };
+    }
+
+    const result = await suggestSlots({
+      project_id: project.id,
+      channel: query.channel,
+      identifier: query.identifier,
+      dayFilter: query.day as DayFilter,
+      periodFilter: query.period as PeriodFilter,
+    });
+
+    req.log.info({
+      op: 'sdr.suggest_slots',
+      agent: req.agent.name,
+      project: query.project,
+      channel: query.channel,
+      identifier: query.identifier,
+      source: result.source,
+      fallback_reason: result.fallback_reason,
+      slot_count: result.slots.length,
+    }, 'sdr suggest-slots');
+
+    return {
+      slots: result.slots,
+      source: result.source,
+      fallback_reason: result.fallback_reason,
+      agenda: result.agenda,
+    };
   });
 
   app.post('/meetings/schedule', async (req) => {
@@ -324,78 +372,4 @@ export async function registerSdrRoutes(app: FastifyInstance) {
     );
     return { meetings: rows };
   });
-}
-
-// ── Helpers ─────────────────────────────────────────────────────────────
-
-type Slot = { iso: string; human: string; day_label: string; hour: number; minute: number };
-
-const WEEKDAY_PT: Record<number, string> = {
-  1: 'segunda',
-  2: 'terça',
-  3: 'quarta',
-  4: 'quinta',
-  5: 'sexta',
-};
-
-const DAY_FILTER_TO_NUM: Record<string, number | null> = {
-  qualquer: null,
-  seg: 1,
-  ter: 2,
-  qua: 3,
-  qui: 4,
-  sex: 5,
-};
-
-/**
- * Gera 3 slots respeitando regras:
- * - Seg-sex, 9-12 e 14-18 fuso BRT (UTC-3).
- * - Antecedência mínima 4h.
- * - Próximos 10 dias úteis.
- * - Filtro opcional por dia/period.
- * - Espaça os 3 slots em dias diferentes quando possível.
- */
-function generateSlots(dayFilter: string, periodFilter: string): Slot[] {
-  const dayNum = DAY_FILTER_TO_NUM[dayFilter] ?? null;
-  const hours: number[] =
-    periodFilter === 'manha' ? [10, 11] :
-    periodFilter === 'tarde' ? [14, 15, 16] :
-    [10, 11, 14, 15, 16];
-
-  const now = new Date();
-  const minStart = new Date(now.getTime() + 4 * 60 * 60 * 1000); // +4h
-  const slots: Slot[] = [];
-
-  // Itera próximos 14 dias corridos pra cobrir 10 úteis
-  for (let dayOffset = 0; dayOffset < 14 && slots.length < 3; dayOffset++) {
-    const d = new Date(now);
-    d.setDate(d.getDate() + dayOffset);
-    const wd = d.getDay();
-    if (wd < 1 || wd > 5) continue; // só seg-sex
-    if (dayNum !== null && wd !== dayNum) continue;
-
-    for (const hour of hours) {
-      if (slots.length >= 3) break;
-      // Constrói slot no fuso BRT (UTC-3)
-      const yyyy = d.getFullYear();
-      const mm = String(d.getMonth() + 1).padStart(2, '0');
-      const dd = String(d.getDate()).padStart(2, '0');
-      const hh = String(hour).padStart(2, '0');
-      const iso = `${yyyy}-${mm}-${dd}T${hh}:00:00-03:00`;
-      const slotDate = new Date(iso);
-      if (slotDate < minStart) continue;
-      // segunda antes das 10h: pula 9h (regra "primeiro horário da segunda")
-      if (wd === 1 && hour < 10) continue;
-      // sexta após 17h: pula
-      if (wd === 5 && hour >= 17) continue;
-
-      const dayLabel = `${WEEKDAY_PT[wd]} (${dd}/${mm})`;
-      slots.push({ iso, human: `${dayLabel} às ${hh}h`, day_label: dayLabel, hour, minute: 0 });
-
-      // espaça: 1 slot por dia, exceto se filtro restritivo
-      if (dayFilter === 'qualquer') break;
-    }
-  }
-
-  return slots;
 }
