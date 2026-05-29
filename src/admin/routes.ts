@@ -25,6 +25,23 @@ import {
   AgendaPatchBody,
   GoalDisableBody,
 } from './schemas.js';
+import { buildAuthorizeUrl, exchangeCode, revoke as oauthRevoke } from '../integrations/google/oauth.js';
+import { encrypt, loadEncryptionKey } from '../integrations/google/crypto.js';
+import { upsertConnection, getConnectionByProjectId, deleteConnection } from '../integrations/google/db.js';
+import { ensureFreshAccessToken } from '../integrations/google/client-factory.js';
+import { testAccess as calendarTestAccess } from '../goals/scheduling/google-calendar.js';
+import { getOwnEmail } from '../goals/email/gmail-client.js';
+import {
+  InvalidStateError,
+  TokenRevokedError,
+  GoogleApiError,
+  toPublic,
+  REQUIRED_SCOPES,
+} from '../integrations/google/types.js';
+
+function guiBaseUrl(): string {
+  return process.env.GUI_BASE_URL ?? 'https://agentes.beeads.com.br';
+}
 
 /** Lê X-Acting-User do request. Não autentica — é apenas pra audit trail. */
 function actingUser(req: { headers: Record<string, string | string[] | undefined> }): string | null {
@@ -34,7 +51,22 @@ function actingUser(req: { headers: Record<string, string | string[] | undefined
 }
 
 export async function registerAdminRoutes(app: FastifyInstance) {
-  app.addHook('preHandler', requireOwnerToken);
+  app.addHook('preHandler', async (req, reply) => {
+    // Callback público — validado por HMAC no handler
+    if (req.url.startsWith('/admin/google-oauth/callback')) return;
+    const expected = process.env.OWNER_ADMIN_TOKEN;
+    if (!expected) {
+      return reply.code(500).send({ error: 'OWNER_ADMIN_TOKEN not configured' });
+    }
+    const got = req.headers['x-owner-token'];
+    if (typeof got !== 'string' || !got) {
+      return reply.code(401).send({ error: 'missing X-Owner-Token' });
+    }
+    if (got !== expected) {
+      return reply.code(401).send({ error: 'invalid X-Owner-Token' });
+    }
+    req.isOwner = true;
+  });
 
   app.setErrorHandler((err, req, reply) => {
     if (err instanceof ZodError) {
@@ -42,6 +74,15 @@ export async function registerAdminRoutes(app: FastifyInstance) {
     }
     if (err instanceof StaleWriteError) {
       return reply.code(409).send({ error: 'stale write', current: err.current });
+    }
+    if (err instanceof InvalidStateError) {
+      return reply.code(400).send({ error: 'invalid_state', detail: err.message });
+    }
+    if (err instanceof TokenRevokedError) {
+      return reply.code(401).send({ error: 'token_revoked', detail: err.message });
+    }
+    if (err instanceof GoogleApiError) {
+      return reply.code(502).send({ error: 'google_api_error', status: err.status, detail: err.bodyMessage.slice(0, 200) });
     }
     req.log.error({ err }, 'admin route error');
     return reply.code(500).send({ error: 'internal error' });
@@ -83,8 +124,17 @@ export async function registerAdminRoutes(app: FastifyInstance) {
     const params = ProjectSlugParams.parse(req.params);
     const project = await getProjectBySlug(params.agent, params.slug);
     if (!project) return reply.code(404).send({ error: 'project not found' });
-    const [goals, agendas] = await Promise.all([listGoals(project.id), listAgendas(project.id)]);
-    return { project, goals, agendas };
+    const [goals, agendas, conn] = await Promise.all([
+      listGoals(project.id),
+      listAgendas(project.id),
+      getConnectionByProjectId(project.id),
+    ]);
+    return {
+      project,
+      goals,
+      agendas,
+      google_connection: conn ? toPublic(conn) : null,
+    };
   });
 
   app.patch('/admin/agents/:agent/projects/:slug', async (req, reply) => {
@@ -229,5 +279,183 @@ export async function registerAdminRoutes(app: FastifyInstance) {
       acting_user: actingUser(req),
     }, 'admin mutation');
     return deleted;
+  });
+
+  // ── Google OAuth ───────────────────────────────────────────────────────
+
+  app.post('/admin/agents/:agent/projects/:slug/google/oauth-start', async (req, reply) => {
+    const params = ProjectSlugParams.parse(req.params);
+    const project = await getProjectBySlug(params.agent, params.slug);
+    if (!project) return reply.code(404).send({ error: 'project not found' });
+    const returnTo = `/agentes/${params.agent}/projetos/${params.slug}?tab=agendamento`;
+    const { url } = buildAuthorizeUrl({ projectId: project.id, returnTo });
+    req.log.info({
+      op: 'admin.google.oauth_start',
+      agent: params.agent,
+      slug: params.slug,
+      acting_user: actingUser(req),
+    }, 'admin mutation');
+    return { url };
+  });
+
+  app.get('/admin/google-oauth/callback', async (req, reply) => {
+    const query = z.object({
+      code: z.string().min(1).optional(),
+      state: z.string().min(1),
+      error: z.string().optional(),
+    }).parse(req.query);
+
+    // Se Google retornou ?error=access_denied (user clicou cancelar)
+    if (query.error) {
+      try {
+        const oauth = await import('../integrations/google/oauth.js');
+        const payload = oauth._internal.verifyState(query.state, process.env.GOOGLE_OAUTH_STATE_SECRET!);
+        return reply.redirect(`${guiBaseUrl()}${payload.return_to}&google=error&reason=${query.error}`);
+      } catch {
+        return reply.code(400).send({ error: 'oauth denied + invalid state' });
+      }
+    }
+
+    if (!query.code) return reply.code(400).send({ error: 'missing code' });
+
+    const result = await exchangeCode(query.code, query.state);
+    const key = loadEncryptionKey();
+    const encrypted = encrypt(result.refresh_token, key);
+    await upsertConnection({
+      project_id: result.project_id,
+      google_email: result.google_email,
+      refresh_token_encrypted: encrypted,
+      scopes: result.scopes_granted,
+    });
+
+    req.log.info({
+      op: 'admin.google.oauth_callback',
+      project_id: result.project_id,
+      google_email: result.google_email,
+      scopes_granted: result.scopes_granted,
+    }, 'admin mutation');
+
+    return reply.redirect(`${guiBaseUrl()}${result.return_to}&google=connected`);
+  });
+
+  app.post('/admin/agents/:agent/projects/:slug/google/disconnect', async (req, reply) => {
+    const params = ProjectSlugParams.parse(req.params);
+    const project = await getProjectBySlug(params.agent, params.slug);
+    if (!project) return reply.code(404).send({ error: 'project not found' });
+    const conn = await getConnectionByProjectId(project.id);
+    if (!conn) return { ok: true, already_disconnected: true };
+
+    // Tentar revogar o refresh token (swallowed errors — Google pode já ter revogado)
+    try {
+      const key = loadEncryptionKey();
+      const cryptoMod = await import('../integrations/google/crypto.js');
+      const refreshToken = cryptoMod.decrypt(conn.refresh_token_encrypted, key);
+      await oauthRevoke(refreshToken);
+    } catch (e) {
+      req.log.warn({ err: e }, 'google revoke failed (continuing with delete)');
+    }
+
+    await deleteConnection(project.id);
+
+    req.log.info({
+      op: 'admin.google.disconnect',
+      agent: params.agent,
+      slug: params.slug,
+      project_id: project.id,
+      acting_user: actingUser(req),
+    }, 'admin mutation');
+
+    return { ok: true };
+  });
+
+  app.post('/admin/agents/:agent/projects/:slug/google/test', async (req, reply) => {
+    const params = ProjectSlugParams.parse(req.params);
+    const project = await getProjectBySlug(params.agent, params.slug);
+    if (!project) return reply.code(404).send({ error: 'project not found' });
+    const conn = await getConnectionByProjectId(project.id);
+    if (!conn) return reply.code(404).send({ error: 'no google connection' });
+
+    // 1. Refresh access token (testa que token ainda é válido)
+    try {
+      await ensureFreshAccessToken(conn);
+    } catch (e) {
+      if (e instanceof TokenRevokedError) {
+        return reply.code(401).send({ error: 'token_revoked', detail: e.message });
+      }
+      throw e;
+    }
+
+    // 2. Testar Calendar (próprio calendar do agente)
+    const calendarResult = await calendarTestAccess(conn, conn.google_email);
+    const calendarOk = calendarResult.ok;
+
+    // 3. Testar Gmail (getOwnEmail funciona)
+    let gmailOk = false;
+    let gmailError: string | undefined;
+    try {
+      await getOwnEmail(conn);
+      gmailOk = true;
+    } catch (e) {
+      gmailError = (e as Error).message;
+    }
+
+    // 4. Verificar scope coverage (usa lista canônica de REQUIRED_SCOPES).
+    const scopeWarnings = REQUIRED_SCOPES.filter((s) => !conn.scopes.includes(s));
+
+    req.log.info({
+      op: 'admin.google.test',
+      agent: params.agent,
+      slug: params.slug,
+      calendar_ok: calendarOk,
+      gmail_ok: gmailOk,
+      acting_user: actingUser(req),
+    }, 'admin mutation');
+
+    return {
+      ok: calendarOk && gmailOk,
+      email: conn.google_email,
+      calendar_ok: calendarOk,
+      calendar_error: calendarOk ? undefined : calendarResult.error,
+      gmail_ok: gmailOk,
+      gmail_error: gmailError,
+      scopes_granted: conn.scopes,
+      scope_warnings: scopeWarnings,
+    };
+  });
+
+  app.post('/admin/agents/:agent/projects/:slug/agendas/:agendaId/test-access', async (req, reply) => {
+    const params = ProjectSlugParams.extend({
+      agendaId: z.coerce.number().int().positive(),
+    }).parse(req.params);
+    const project = await getProjectBySlug(params.agent, params.slug);
+    if (!project) return reply.code(404).send({ error: 'project not found' });
+    const conn = await getConnectionByProjectId(project.id);
+    if (!conn) return reply.code(404).send({ error: 'no google connection' });
+    const agenda = await getAgenda(params.agendaId);
+    if (!agenda || agenda.project_id !== project.id) {
+      return reply.code(404).send({ error: 'agenda not found for this project' });
+    }
+
+    const result = await calendarTestAccess(conn, agenda.person_email);
+
+    req.log.info({
+      op: 'admin.agenda.test_access',
+      agent: params.agent,
+      slug: params.slug,
+      agenda_id: params.agendaId,
+      person_email: agenda.person_email,
+      result: result.ok ? 'ok' : result.error,
+      acting_user: actingUser(req),
+    }, 'admin mutation');
+
+    if (result.ok) {
+      return { ok: true, calendar_metadata: result.metadata };
+    }
+    return {
+      ok: false,
+      error: result.error,
+      detail: result.detail,
+      agent_email: conn.google_email,
+    };
   });
 }
