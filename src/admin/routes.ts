@@ -29,7 +29,7 @@ import { buildAuthorizeUrl, exchangeCode, revoke as oauthRevoke } from '../integ
 import { encrypt, loadEncryptionKey } from '../integrations/google/crypto.js';
 import { upsertConnection, getConnectionByProjectId, deleteConnection } from '../integrations/google/db.js';
 import { ensureFreshAccessToken } from '../integrations/google/client-factory.js';
-import { testAccess as calendarTestAccess } from '../goals/scheduling/google-calendar.js';
+import { testAccess as calendarTestAccess, listCalendars } from '../goals/scheduling/google-calendar.js';
 import { getOwnEmail } from '../goals/email/gmail-client.js';
 import {
   InvalidStateError,
@@ -366,6 +366,32 @@ export async function registerAdminRoutes(app: FastifyInstance) {
     }, 'admin mutation');
 
     return { ok: true };
+  });
+
+  // Lista calendars acessíveis pela conexão OAuth do projeto.
+  // Usado pela GUI pra mostrar dropdown de seleção em vez de campo de texto livre.
+  app.get('/admin/agents/:agent/projects/:slug/google/calendars', async (req, reply) => {
+    const params = ProjectSlugParams.parse(req.params);
+    const project = await getProjectBySlug(params.agent, params.slug);
+    if (!project) return reply.code(404).send({ error: 'project not found' });
+    const conn = await getConnectionByProjectId(project.id);
+    if (!conn) return reply.code(404).send({ error: 'no google connection' });
+    try {
+      await ensureFreshAccessToken(conn);
+    } catch (e) {
+      if (e instanceof TokenRevokedError) {
+        return reply.code(401).send({ error: 'token_revoked', detail: e.message });
+      }
+      throw e;
+    }
+    const calendars = await listCalendars(conn);
+    // Ordena: primário primeiro, depois writable, depois readonly
+    calendars.sort((a, b) => {
+      if (a.primary !== b.primary) return a.primary ? -1 : 1;
+      if (a.writable !== b.writable) return a.writable ? -1 : 1;
+      return a.summary.localeCompare(b.summary);
+    });
+    return { calendars };
   });
 
   app.post('/admin/agents/:agent/projects/:slug/google/test', async (req, reply) => {

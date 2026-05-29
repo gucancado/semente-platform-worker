@@ -93,6 +93,43 @@ export async function getCalendarMetadata(
   };
 }
 
+export type CalendarListItem = {
+  id: string;
+  summary: string;
+  timeZone: string;
+  primary: boolean;
+  accessRole: string; // 'owner' | 'writer' | 'reader' | 'freeBusyReader'
+  writable: boolean;  // true se accessRole permite events.insert
+};
+
+/**
+ * Lista calendars acessíveis pelo usuário Google conectado.
+ * Filtra apenas writable (owner/writer) — pra GUI mostrar opções válidas pro agente.
+ */
+export async function listCalendars(
+  conn: GoogleOAuthConnection
+): Promise<CalendarListItem[]> {
+  const cal = await calClient(conn);
+  const items: CalendarListItem[] = [];
+  let pageToken: string | undefined;
+  do {
+    const res = await cal.calendarList.list({ pageToken, maxResults: 250 });
+    for (const c of res.data.items ?? []) {
+      const role = c.accessRole ?? 'reader';
+      items.push({
+        id: c.id ?? '',
+        summary: c.summary ?? '',
+        timeZone: c.timeZone ?? 'UTC',
+        primary: c.primary ?? false,
+        accessRole: role,
+        writable: role === 'owner' || role === 'writer',
+      });
+    }
+    pageToken = res.data.nextPageToken ?? undefined;
+  } while (pageToken);
+  return items;
+}
+
 export async function testAccess(
   conn: GoogleOAuthConnection,
   calendarId: string
