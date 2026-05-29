@@ -22,9 +22,35 @@ export type TestAccessResult =
   | { ok: true; metadata: CalendarMetadata }
   | { ok: false; error: 'not_shared' | 'not_found' | 'auth' | 'unknown'; detail?: string };
 
+type CalClientFactory = (conn: GoogleOAuthConnection) => Promise<calendar_v3.Calendar>;
+
+let _calClientFactory: CalClientFactory | null = null;
+
+/** Somente para testes — injeta factory alternativa. */
+export function _setCalClientFactory(f: CalClientFactory | null): void {
+  _calClientFactory = f;
+}
+
 async function calClient(conn: GoogleOAuthConnection): Promise<calendar_v3.Calendar> {
+  if (_calClientFactory) return _calClientFactory(conn);
   const auth = await getAuthedOAuth2Client(conn);
   return google.calendar({ version: 'v3', auth });
+}
+
+export async function getEvent(
+  conn: GoogleOAuthConnection,
+  calendarId: string,
+  eventId: string,
+): Promise<calendar_v3.Schema$Event | null> {
+  const cal = await calClient(conn);
+  try {
+    const res = await cal.events.get({ calendarId, eventId });
+    return res.data ?? null;
+  } catch (e: unknown) {
+    const code = (e as { code?: number })?.code;
+    if (code === 404 || code === 410) return null;
+    throw e;
+  }
 }
 
 export async function freebusy(
