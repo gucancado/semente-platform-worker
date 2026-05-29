@@ -135,9 +135,7 @@ export async function suggestSlotsCore(
         expires_at: expiresAt,
       });
       slotsWithHolds.push({ ...slot, hold_id: holdId });
-    } catch (e) {
-      // TEMP debug: ver porque createHold falha em prod
-      console.error('[suggestSlots] createHold falhou pra slot', slot.iso, ':', (e as Error).message);
+    } catch {
       continue;
     }
   }
