@@ -260,3 +260,20 @@ test('conferenceRequestId é único por chamada (timestamp Date.now)', async () 
   await scheduleMeeting({ ...BASE_REQ, identifier: '+5531998' }, deps2);
   assert.notEqual(captured1, captured2);
 });
+
+test('dedup: meeting com status rescheduled também é detectada', async () => {
+  const result = await scheduleMeeting(BASE_REQ, baseDeps({
+    findActiveMeetingForLead: async () => ({
+      id: 88, project_id: 1, agenda_id: 1, channel: 'whatsapp', identifier: '+5531999',
+      slot_iso: new Date(), slot_human: 'moved', lead_email: null, lead_name: null,
+      company: null, contexto: null, google_event_id: 'evt-moved', google_meet_link: null,
+      status: 'rescheduled', cancelled_by: null, rescheduled_to: null, last_reconciled_at: null,
+      created_at: new Date(), updated_at: new Date(),
+    }),
+  }));
+  assert.equal(result.source, 'google');
+  if (result.source === 'google') {
+    assert.equal(result.already_scheduled, true);
+    assert.equal(result.meeting_id, 88);
+  }
+});

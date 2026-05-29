@@ -140,6 +140,15 @@ export async function suggestSlotsCore(
     }
   }
 
+  // Fallback: se TODOS os createHolds falharam (Google quota, network), volta pro mock.
+  if (slots.length > 0 && slotsWithHolds.length === 0) {
+    return {
+      source: 'mock',
+      fallback_reason: 'all_holds_failed',
+      slots: generateLegacyMockSlots(req.dayFilter, req.periodFilter, now),
+    };
+  }
+
   return {
     source: 'google',
     agenda: { id: agenda.id, display_label: agenda.display_label },

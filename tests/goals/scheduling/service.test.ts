@@ -194,3 +194,12 @@ test('fallback mock NÃO chama createHold', async () => {
   }));
   assert.equal(called, false);
 });
+
+test('todos createHold falham → fallback mock com reason all_holds_failed', async () => {
+  const result = await suggestSlotsCore(BASE_REQ, baseDeps({
+    createHold: (async () => { throw new Error('quota exceeded'); }) as Parameters<typeof suggestSlotsCore>[1]['createHold'],
+  }));
+  assert.equal(result.source, 'mock');
+  if (result.source === 'mock') assert.equal(result.fallback_reason, 'all_holds_failed');
+  assert.ok(result.slots.length > 0);
+});

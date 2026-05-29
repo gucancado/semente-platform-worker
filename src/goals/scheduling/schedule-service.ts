@@ -143,7 +143,7 @@ export async function scheduleMeeting(
   deps: ScheduleMeetingDeps = defaultScheduleDeps
 ): Promise<ScheduleMeetingResult> {
   const existing = await deps.findActiveMeetingForLead({ project_id: req.project_id, channel: req.channel, identifier: req.identifier });
-  if (existing && existing.status === 'scheduled') {
+  if (existing && (existing.status === 'scheduled' || existing.status === 'rescheduled')) {
     return {
       source: 'google',
       meeting_id: existing.id,

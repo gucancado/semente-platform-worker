@@ -42,7 +42,7 @@ export async function findActiveMeetingForLead(args: {
 }): Promise<MeetingRow | null> {
   const { rows } = await pool.query<MeetingRow>(
     `SELECT * FROM meetings
-      WHERE project_id = $1 AND channel = $2 AND identifier = $3 AND status = 'scheduled'
+      WHERE project_id = $1 AND channel = $2 AND identifier = $3 AND status IN ('scheduled', 'rescheduled')
       ORDER BY created_at DESC LIMIT 1`,
     [args.project_id, args.channel, args.identifier]
   );
