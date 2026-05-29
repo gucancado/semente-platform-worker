@@ -53,7 +53,7 @@ function actingUser(req: { headers: Record<string, string | string[] | undefined
 export async function registerAdminRoutes(app: FastifyInstance) {
   app.addHook('preHandler', async (req, reply) => {
     // Callback público — validado por HMAC no handler
-    if (req.url.startsWith('/admin/google-oauth/callback')) return;
+    if (req.url.startsWith('/admin/google/callback')) return;
     const expected = process.env.OWNER_ADMIN_TOKEN;
     if (!expected) {
       return reply.code(500).send({ error: 'OWNER_ADMIN_TOKEN not configured' });
@@ -298,7 +298,7 @@ export async function registerAdminRoutes(app: FastifyInstance) {
     return { url };
   });
 
-  app.get('/admin/google-oauth/callback', async (req, reply) => {
+  app.get('/admin/google/callback', async (req, reply) => {
     const query = z.object({
       code: z.string().min(1).optional(),
       state: z.string().min(1),
