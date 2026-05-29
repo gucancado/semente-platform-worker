@@ -1,4 +1,5 @@
 import pg from 'pg';
+import type { PoolClient } from 'pg';
 import { config } from './config.js';
 
 export const pool = new pg.Pool({
@@ -366,14 +367,20 @@ export async function upsertAgentProjectConfig(args: {
 
 // ── Fase 2: pending_triggers (burst smoothing + quiet-hours fail-safe) ──
 
+export type MeetingReconcilePayload =
+  | { event: 'cancelled_by_organizer'; meeting_id: number; old_slot_iso: string }
+  | { event: 'moved_by_organizer'; meeting_id: number; old_slot_iso: string; new_slot_iso: string };
+
 export type PendingTrigger = {
   id: number;
   agent: string;
   project: string | null;
   identifier: string;
-  last_inbox_id: number;
+  last_inbox_id: number | null;
   msg_count: number;
   attempt_count: number;
+  trigger_type: 'inbox' | 'meeting_reconcile';
+  payload: MeetingReconcilePayload | null;
 };
 
 /**
@@ -431,7 +438,7 @@ export async function claimDuePendingTriggers(batchSize = 50): Promise<PendingTr
             updated_at = NOW()
        FROM due
       WHERE t.id = due.id
-      RETURNING t.id, t.agent, t.project, t.identifier, t.last_inbox_id, t.msg_count, t.attempt_count`,
+      RETURNING t.id, t.agent, t.project, t.identifier, t.last_inbox_id, t.msg_count, t.attempt_count, t.trigger_type, t.payload`,
     [batchSize]
   );
   return rows;
@@ -476,6 +483,32 @@ export async function markTriggerRetryOrFail(
     [id, String(backoffSec), error]
   );
   return { retried: true };
+}
+
+/**
+ * Enfileira um trigger de reconcile (mudança detectada via cron em meeting).
+ * NÃO usa ON CONFLICT — cada cancel/move é evento próprio, não pode ser absorvido
+ * pelo debounce de inbox. Roda dentro da transação aberta pelo caller
+ * (handleCancelled / handleMoved em reconcile.ts).
+ */
+export async function enqueueReconcileTrigger(
+  client: PoolClient,
+  args: {
+    agent: string;
+    project: string;
+    identifier: string;
+    payload: MeetingReconcilePayload;
+    scheduled_at?: Date;
+  }
+): Promise<{ id: number }> {
+  const scheduledAt = args.scheduled_at ?? new Date();
+  const { rows } = await client.query<{ id: number }>(
+    `INSERT INTO pending_triggers (agent, project, identifier, last_inbox_id, scheduled_at, trigger_type, payload, msg_count)
+     VALUES ($1, $2, $3, NULL, $4, 'meeting_reconcile', $5, 0)
+     RETURNING id`,
+    [args.agent, args.project, args.identifier, scheduledAt, args.payload]
+  );
+  return rows[0]!;
 }
 
 export async function insertLlmMetric(args: {

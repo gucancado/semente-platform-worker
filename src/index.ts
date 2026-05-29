@@ -12,6 +12,7 @@ import { registerWebhookCloudRoutes, registerSendCloudRoute } from './webhook-cl
 import { requireAgentToken } from './auth.js';
 import { startTriggerPoller } from './triggers/poller.js';
 import { startHoldsCleanupCron } from './goals/scheduling/holds-cleanup.js';
+import { startReconcileCron } from './goals/scheduling/reconcile-trigger.js';
 
 async function main() {
   const app = Fastify({
@@ -102,6 +103,9 @@ async function main() {
 
   // Cron que limpa holds expirados a cada 5 minutos.
   startHoldsCleanupCron(app.log);
+
+  // Cron que reconcilia meetings com Google Calendar a cada 1h (detecta cancel/move pelo closer).
+  startReconcileCron(app.log);
 }
 
 main().catch((err) => {
