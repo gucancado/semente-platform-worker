@@ -507,7 +507,7 @@ export async function registerAdminRoutes(app: FastifyInstance) {
       [project.id, query.channel, query.identifier]
     );
     const holds = await pool.query(
-      `SELECT id, slot_iso, status, google_event_id, expires_at, created_at
+      `SELECT id, slot_iso, consumed, google_event_id, expires_at, created_at
          FROM slot_holds
         WHERE project_id = $1 AND channel = $2 AND identifier = $3
         ORDER BY slot_iso ASC LIMIT 30`,
