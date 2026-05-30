@@ -400,10 +400,15 @@ export async function enqueuePendingTrigger(args: {
   inbox_id: number;
   scheduled_at: Date;
 }): Promise<{ id: number; msg_count: number }> {
+  // ON CONFLICT precisa bater EXATAMENTE com a expressão do índice parcial
+  // `uq_pending_triggers_pending_inbox` (migration 011), que é
+  // `WHERE status = 'pending' AND trigger_type = 'inbox'`. Sem `trigger_type`
+  // aqui o Postgres rejeita com "no unique or exclusion constraint matching the
+  // ON CONFLICT specification" e o webhook não consegue enfileirar.
   const { rows } = await pool.query<{ id: number; msg_count: number }>(
-    `INSERT INTO pending_triggers (agent, project, identifier, last_inbox_id, scheduled_at)
-     VALUES ($1, $2, $3, $4, $5)
-     ON CONFLICT (agent, identifier) WHERE status = 'pending'
+    `INSERT INTO pending_triggers (agent, project, identifier, last_inbox_id, scheduled_at, trigger_type)
+     VALUES ($1, $2, $3, $4, $5, 'inbox')
+     ON CONFLICT (agent, identifier) WHERE status = 'pending' AND trigger_type = 'inbox'
      DO UPDATE SET
        last_inbox_id = EXCLUDED.last_inbox_id,
        project = COALESCE(EXCLUDED.project, pending_triggers.project),
