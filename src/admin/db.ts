@@ -64,7 +64,8 @@ export async function updateProject(
         SET display_name = COALESCE($2, display_name),
             updated_at = NOW()
       WHERE id = $1
-        AND ($3::timestamptz IS NULL OR updated_at = $3::timestamptz)
+        AND ($3::timestamptz IS NULL
+             OR date_trunc('milliseconds', updated_at) = date_trunc('milliseconds', $3::timestamptz))
       RETURNING *`,
     [id, patch.display_name ?? null, patch.if_match_updated_at ?? null]
   );
@@ -119,7 +120,8 @@ export async function disableGoal(
   const { rows } = await pool.query<ProjectGoal>(
     `UPDATE project_goals SET enabled = FALSE, updated_at = NOW()
       WHERE project_id = $1 AND goal_type = $2
-        AND ($3::timestamptz IS NULL OR updated_at = $3::timestamptz)
+        AND ($3::timestamptz IS NULL
+             OR date_trunc('milliseconds', updated_at) = date_trunc('milliseconds', $3::timestamptz))
       RETURNING *`,
     [project_id, goal_type, if_match_updated_at ?? null]
   );
@@ -245,7 +247,8 @@ export async function updateAgenda(
        active                   = COALESCE($10, active),
        updated_at               = NOW()
      WHERE id = $1
-       AND ($11::timestamptz IS NULL OR updated_at = $11::timestamptz)
+       AND ($11::timestamptz IS NULL
+            OR date_trunc('milliseconds', updated_at) = date_trunc('milliseconds', $11::timestamptz))
      RETURNING *`,
     [
       id,
