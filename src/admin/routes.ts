@@ -527,4 +527,52 @@ export async function registerAdminRoutes(app: FastifyInstance) {
       simulated_meetings: simulated.rows,
     };
   });
+
+  // Debug: zera estado de agendamento do lead. Cancela meetings + simulated +
+  // remove holds pendentes do DB (não tenta deletar do Google — holds expiram).
+  // Útil pra destravar atalhos de cache (findSimulatedActive / findActiveMeeting).
+  app.post('/admin/agents/:agent/projects/:slug/debug/reset-lead', async (req, reply) => {
+    const params = ProjectSlugParams.parse(req.params);
+    const body = z.object({
+      channel: z.string().default('whatsapp'),
+      identifier: z.string().min(1),
+    }).parse(req.body);
+    const project = await getProjectBySlug(params.agent, params.slug);
+    if (!project) return reply.code(404).send({ error: 'project not found' });
+
+    const { pool } = await import('../db.js');
+
+    const m = await pool.query(
+      `UPDATE meetings SET status = 'cancelled', cancelled_by = 'organizer', updated_at = NOW()
+        WHERE project_id = $1 AND channel = $2 AND identifier = $3
+          AND status IN ('scheduled', 'rescheduled')`,
+      [project.id, body.channel, body.identifier]
+    );
+    const s = await pool.query(
+      `UPDATE simulated_meetings SET status = 'cancelled', updated_at = NOW()
+        WHERE agent = $1 AND channel = $2 AND identifier = $3 AND status = 'scheduled'`,
+      [params.agent, body.channel, body.identifier]
+    );
+    const h = await pool.query(
+      `DELETE FROM slot_holds
+        WHERE project_id = $1 AND channel = $2 AND identifier = $3 AND consumed = FALSE`,
+      [project.id, body.channel, body.identifier]
+    );
+
+    req.log.info({
+      op: 'admin.debug.reset_lead',
+      project: params.slug,
+      identifier: body.identifier,
+      meetings_cancelled: m.rowCount ?? 0,
+      simulated_cancelled: s.rowCount ?? 0,
+      holds_deleted: h.rowCount ?? 0,
+    }, 'admin debug reset-lead');
+
+    return {
+      ok: true,
+      meetings_cancelled: m.rowCount ?? 0,
+      simulated_cancelled: s.rowCount ?? 0,
+      holds_deleted: h.rowCount ?? 0,
+    };
+  });
 }
