@@ -173,9 +173,24 @@ export async function scheduleMeeting(
     identifier: req.identifier,
     slot_iso: req.slot_iso,
   });
+  console.log(JSON.stringify({
+    op: 'scheduleMeeting.findHold',
+    slot_iso: req.slot_iso,
+    found: !!hold,
+    hold_id: hold?.id ?? null,
+    google_event_id: hold?.google_event_id ?? null,
+  }));
+
+  // person_email do agenda pode ser um Google calendar group id (termina em
+  // @group.calendar.google.com) — nesse caso NÃO é um endereço de pessoa e
+  // não pode ser usado como attendee no convite. Mantém só endereços reais.
+  const isCalendarGroupId = (s: string) => /@group\.calendar\.google\.com$/i.test(s);
+  const attendees = [req.lead_email, agenda.person_email]
+    .filter((x): x is string => !!x)
+    .filter((x) => !isCalendarGroupId(x));
 
   const confirmFields = {
-    attendees: [req.lead_email, agenda.person_email].filter((x): x is string => !!x),
+    attendees,
     summary: `Conversa com ${agenda.display_label}${req.lead_name ? ' - ' + req.lead_name : ''}`,
     description: req.contexto ?? '',
     conferenceRequestId: `meet-${req.project_id}-${req.channel}-${req.identifier}-${deps.now().getTime()}`,
@@ -190,6 +205,14 @@ export async function scheduleMeeting(
       google_event_id = hold.google_event_id;
       google_meet_link = meetLink;
     } catch (e) {
+      console.error(JSON.stringify({
+        op: 'scheduleMeeting.confirmHold.error',
+        hold_id: hold.id,
+        google_event_id: hold.google_event_id,
+        calendar_id: agenda.person_email,
+        attendees,
+        error: (e as Error).message,
+      }));
       return fallbackToSimulated(req, `confirm_error:${(e as Error).message.slice(0, 80)}`, deps);
     }
     await deps.markHoldConsumed(hold.id);
@@ -205,6 +228,13 @@ export async function scheduleMeeting(
       google_event_id = eventId;
       google_meet_link = meetLink;
     } catch (e) {
+      console.error(JSON.stringify({
+        op: 'scheduleMeeting.createEventDirect.error',
+        calendar_id: agenda.person_email,
+        slot_iso: req.slot_iso,
+        attendees,
+        error: (e as Error).message,
+      }));
       return fallbackToSimulated(req, `create_error:${(e as Error).message.slice(0, 80)}`, deps);
     }
   }

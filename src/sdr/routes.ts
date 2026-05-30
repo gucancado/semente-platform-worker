@@ -311,8 +311,13 @@ export async function registerSdrRoutes(app: FastifyInstance) {
       project: body.project,
       channel: body.channel,
       identifier: body.identifier,
+      slot_iso: body.slot_iso,
+      slot_human: body.slot_human,
+      lead_email: body.lead_email,
       source: result.source,
       meeting_id: result.meeting_id,
+      fallback_reason: 'fallback_reason' in result ? result.fallback_reason : undefined,
+      already_scheduled: 'already_scheduled' in result ? result.already_scheduled : undefined,
     }, 'sdr schedule-meeting');
 
     return result;
