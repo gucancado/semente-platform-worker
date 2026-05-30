@@ -484,4 +484,47 @@ export async function registerAdminRoutes(app: FastifyInstance) {
       agent_email: conn.google_email,
     };
   });
+
+  // Debug: inspeciona meetings + holds + simulated_meetings de um lead.
+  // Owner-only — pra dirimir bugs sem precisar de acesso direto ao DB.
+  app.get('/admin/agents/:agent/projects/:slug/debug/lead', async (req, reply) => {
+    const params = ProjectSlugParams.parse(req.params);
+    const query = z.object({
+      channel: z.string().default('whatsapp'),
+      identifier: z.string().min(1),
+    }).parse(req.query);
+    const project = await getProjectBySlug(params.agent, params.slug);
+    if (!project) return reply.code(404).send({ error: 'project not found' });
+
+    const { pool } = await import('../db.js');
+
+    const meetings = await pool.query(
+      `SELECT id, status, slot_iso, slot_human, lead_email, lead_name, company,
+              google_event_id, google_meet_link, cancelled_by, created_at, updated_at
+         FROM meetings
+        WHERE project_id = $1 AND channel = $2 AND identifier = $3
+        ORDER BY created_at DESC LIMIT 10`,
+      [project.id, query.channel, query.identifier]
+    );
+    const holds = await pool.query(
+      `SELECT id, slot_iso, status, google_event_id, expires_at, created_at
+         FROM slot_holds
+        WHERE project_id = $1 AND channel = $2 AND identifier = $3
+        ORDER BY slot_iso ASC LIMIT 30`,
+      [project.id, query.channel, query.identifier]
+    );
+    const simulated = await pool.query(
+      `SELECT id, status, slot_iso, slot_human, lead_email, company, created_at
+         FROM simulated_meetings
+        WHERE agent = $1 AND channel = $2 AND identifier = $3
+        ORDER BY created_at DESC LIMIT 5`,
+      [params.agent, query.channel, query.identifier]
+    );
+    return {
+      project_id: project.id,
+      meetings: meetings.rows,
+      holds: holds.rows,
+      simulated_meetings: simulated.rows,
+    };
+  });
 }

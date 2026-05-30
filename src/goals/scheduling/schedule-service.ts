@@ -144,13 +144,27 @@ export async function scheduleMeeting(
 ): Promise<ScheduleMeetingResult> {
   const existing = await deps.findActiveMeetingForLead({ project_id: req.project_id, channel: req.channel, identifier: req.identifier });
   if (existing && (existing.status === 'scheduled' || existing.status === 'rescheduled')) {
-    return {
-      source: 'google',
+    // Defensivo: se a row em meetings não tem google_event_id válido, ela é
+    // "órfã" (criada num fluxo anterior que falhou). Não atalhar como
+    // already_scheduled, ou ficamos travados — marcamos como invalidated e
+    // seguimos pro fluxo normal de criar evento.
+    if (existing.google_event_id && existing.google_event_id.trim().length > 0) {
+      return {
+        source: 'google',
+        meeting_id: existing.id,
+        google_event_id: existing.google_event_id,
+        google_meet_link: existing.google_meet_link,
+        already_scheduled: true,
+      };
+    }
+    console.warn(JSON.stringify({
+      op: 'scheduleMeeting.orphanMeeting',
       meeting_id: existing.id,
-      google_event_id: existing.google_event_id ?? '',
-      google_meet_link: existing.google_meet_link,
-      already_scheduled: true,
-    };
+      status: existing.status,
+      slot_iso: existing.slot_iso,
+      reason: 'google_event_id_missing',
+    }));
+    await deps.updateMeetingStatus(existing.id, 'cancelled_by_organizer');
   }
 
   const agendas = await deps.listAgendas(req.project_id, { activeOnly: true });
