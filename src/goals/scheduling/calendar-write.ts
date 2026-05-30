@@ -151,6 +151,38 @@ export async function patchEvent(
   });
 }
 
+/**
+ * Lista eventos do calendar com title começando por `summaryPrefix`,
+ * limitado à janela [timeMin, timeMax]. Usa events.list (já com `q` pra
+ * filtragem server-side) e adiciona filtro client-side por prefixo exato
+ * já que `q` é full-text fuzzy. Sem paginação — limit hard 250.
+ */
+export async function listEventsBySummaryPrefix(
+  conn: GoogleOAuthConnection,
+  calendarId: string,
+  summaryPrefix: string,
+  timeMin: Date,
+  timeMax: Date
+): Promise<Array<{ id: string; summary: string; start: string | null }>> {
+  const cal = await calClient(conn);
+  const res = await cal.events.list({
+    calendarId,
+    q: summaryPrefix,
+    timeMin: timeMin.toISOString(),
+    timeMax: timeMax.toISOString(),
+    singleEvents: true,
+    maxResults: 250,
+  });
+  const items = res.data.items ?? [];
+  return items
+    .filter((it) => typeof it.summary === 'string' && it.summary.startsWith(summaryPrefix) && typeof it.id === 'string')
+    .map((it) => ({
+      id: it.id!,
+      summary: it.summary!,
+      start: it.start?.dateTime ?? it.start?.date ?? null,
+    }));
+}
+
 export async function deleteEvent(
   conn: GoogleOAuthConnection,
   calendarId: string,

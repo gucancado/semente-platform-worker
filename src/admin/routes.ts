@@ -30,6 +30,7 @@ import { encrypt, loadEncryptionKey } from '../integrations/google/crypto.js';
 import { upsertConnection, getConnectionByProjectId, deleteConnection } from '../integrations/google/db.js';
 import { ensureFreshAccessToken } from '../integrations/google/client-factory.js';
 import { testAccess as calendarTestAccess, listCalendars } from '../goals/scheduling/google-calendar.js';
+import { listEventsBySummaryPrefix, deleteEvent as deleteCalEvent } from '../goals/scheduling/calendar-write.js';
 import { getOwnEmail } from '../goals/email/gmail-client.js';
 import {
   InvalidStateError,
@@ -573,6 +574,58 @@ export async function registerAdminRoutes(app: FastifyInstance) {
       meetings_cancelled: m.rowCount ?? 0,
       simulated_cancelled: s.rowCount ?? 0,
       holds_deleted: h.rowCount ?? 0,
+    };
+  });
+
+  // Debug: limpa eventos órfãos no Google Calendar com prefixo [HOLD]
+  // dentro de uma janela curta (próximos 14 dias). Usado quando o DB
+  // perde a referência aos holds (ex: reset-lead) e o cron de cleanup
+  // não pega mais. Owner-only.
+  app.post('/admin/agents/:agent/projects/:slug/debug/cleanup-google-holds', async (req, reply) => {
+    const params = ProjectSlugParams.parse(req.params);
+    const project = await getProjectBySlug(params.agent, params.slug);
+    if (!project) return reply.code(404).send({ error: 'project not found' });
+
+    const { pool } = await import('../db.js');
+    const { rows: agendas } = await pool.query<{ id: string; person_email: string }>(
+      `SELECT id, person_email FROM scheduling_agendas WHERE project_id = $1 AND active = TRUE`,
+      [project.id]
+    );
+    if (agendas.length === 0) return { ok: false, error: 'no active agenda' };
+
+    const conn = await getConnectionByProjectId(project.id);
+    if (!conn) return { ok: false, error: 'no google connection' };
+
+    const now = new Date();
+    const horizon = new Date(now.getTime() + 14 * 24 * 60 * 60 * 1000);
+
+    const results: Array<{ calendar: string; event_id: string; summary: string; deleted: boolean; error?: string }> = [];
+    for (const agenda of agendas) {
+      let events: Array<{ id: string; summary: string; start: string | null }> = [];
+      try {
+        events = await listEventsBySummaryPrefix(conn, agenda.person_email, '[HOLD]', now, horizon);
+      } catch (e) {
+        results.push({ calendar: agenda.person_email, event_id: '-', summary: '-', deleted: false, error: (e as Error).message });
+        continue;
+      }
+      for (const ev of events) {
+        try {
+          await deleteCalEvent(conn, agenda.person_email, ev.id, { sendUpdates: 'none' });
+          results.push({ calendar: agenda.person_email, event_id: ev.id, summary: ev.summary, deleted: true });
+        } catch (e) {
+          results.push({ calendar: agenda.person_email, event_id: ev.id, summary: ev.summary, deleted: false, error: (e as Error).message });
+        }
+      }
+    }
+
+    req.log.info({ op: 'admin.debug.cleanup_google_holds', project: params.slug, deleted: results.filter(r => r.deleted).length, errors: results.filter(r => !r.deleted).length }, 'admin debug cleanup-google-holds');
+
+    return {
+      ok: true,
+      total: results.length,
+      deleted: results.filter((r) => r.deleted).length,
+      errors: results.filter((r) => !r.deleted).length,
+      results,
     };
   });
 }
