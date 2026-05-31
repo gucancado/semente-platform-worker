@@ -144,27 +144,62 @@ export async function scheduleMeeting(
 ): Promise<ScheduleMeetingResult> {
   const existing = await deps.findActiveMeetingForLead({ project_id: req.project_id, channel: req.channel, identifier: req.identifier });
   if (existing && (existing.status === 'scheduled' || existing.status === 'rescheduled')) {
-    // Defensivo: se a row em meetings não tem google_event_id válido, ela é
-    // "órfã" (criada num fluxo anterior que falhou). Não atalhar como
-    // already_scheduled, ou ficamos travados — marcamos como invalidated e
-    // seguimos pro fluxo normal de criar evento.
-    if (existing.google_event_id && existing.google_event_id.trim().length > 0) {
+    const existingIso = new Date(existing.slot_iso).toISOString();
+    const reqIso = new Date(req.slot_iso).toISOString();
+    const sameSlot = existingIso === reqIso;
+    const hasValidEvent = !!existing.google_event_id && existing.google_event_id.trim().length > 0;
+
+    // Mesmo slot + evento Google válido: atalho de dedupe (idempotência real).
+    if (sameSlot && hasValidEvent) {
+      const validEventId = existing.google_event_id as string;
       return {
         source: 'google',
         meeting_id: existing.id,
-        google_event_id: existing.google_event_id,
+        google_event_id: validEventId,
         google_meet_link: existing.google_meet_link,
         already_scheduled: true,
       };
     }
-    console.warn(JSON.stringify({
-      op: 'scheduleMeeting.orphanMeeting',
-      meeting_id: existing.id,
-      status: existing.status,
-      slot_iso: existing.slot_iso,
-      reason: 'google_event_id_missing',
-    }));
-    await deps.updateMeetingStatus(existing.id, 'cancelled_by_organizer');
+
+    // Slot diferente + evento Google válido: reschedule transparente.
+    // Cancela evento velho no Google e marca a row antiga como rescheduled.
+    // Depois segue o fluxo normal pra criar a nova meeting.
+    if (!sameSlot && hasValidEvent) {
+      const oldEventId = existing.google_event_id as string;
+      console.warn(JSON.stringify({
+        op: 'scheduleMeeting.reschedule',
+        meeting_id: existing.id,
+        from_slot_iso: existingIso,
+        to_slot_iso: reqIso,
+      }));
+      try {
+        const agendasForDelete = await deps.listAgendas(req.project_id, { activeOnly: true });
+        const agendaForDelete = agendasForDelete[0];
+        const connForDelete = await deps.getConnectionByProjectId(req.project_id);
+        if (agendaForDelete && connForDelete) {
+          try { await deps.ensureFreshAccessToken(connForDelete); } catch {}
+          try {
+            await deps.deleteEvent(connForDelete, agendaForDelete.person_email, oldEventId, { sendUpdates: 'none' });
+          } catch (e) {
+            console.warn(JSON.stringify({
+              op: 'scheduleMeeting.reschedule.deleteEventFailed',
+              error: (e as Error).message,
+            }));
+          }
+        }
+      } catch {}
+      await deps.updateMeetingStatus(existing.id, 'rescheduled');
+    } else {
+      // Evento órfão (sem google_event_id válido): marca como cancelled e segue.
+      console.warn(JSON.stringify({
+        op: 'scheduleMeeting.orphanMeeting',
+        meeting_id: existing.id,
+        status: existing.status,
+        slot_iso: existing.slot_iso,
+        reason: 'google_event_id_missing',
+      }));
+      await deps.updateMeetingStatus(existing.id, 'cancelled_by_organizer');
+    }
   }
 
   const agendas = await deps.listAgendas(req.project_id, { activeOnly: true });

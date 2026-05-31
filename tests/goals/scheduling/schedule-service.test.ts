@@ -93,11 +93,11 @@ test('hold expirou: cria evento direto', async () => {
   }
 });
 
-test('dedup: meeting já scheduled retornado', async () => {
+test('dedup: meeting já scheduled no MESMO slot retorna atalho', async () => {
   const result = await scheduleMeeting(BASE_REQ, baseDeps({
     findActiveMeetingForLead: async () => ({
       id: 77, project_id: 1, agenda_id: 1, channel: 'whatsapp', identifier: '+5531999',
-      slot_iso: new Date(), slot_human: 'old', lead_email: null, lead_name: null,
+      slot_iso: new Date(BASE_REQ.slot_iso), slot_human: 'segunda às 10h', lead_email: null, lead_name: null,
       company: null, contexto: null, google_event_id: 'evt-old', google_meet_link: 'https://meet.google.com/old',
       status: 'scheduled', cancelled_by: null, rescheduled_to: null, last_reconciled_at: null,
       created_at: new Date(), updated_at: new Date(),
@@ -108,6 +108,33 @@ test('dedup: meeting já scheduled retornado', async () => {
     assert.equal(result.already_scheduled, true);
     assert.equal(result.meeting_id, 77);
   }
+});
+
+test('slot diferente do existing: reschedule transparente', async () => {
+  const calls: { updatedStatus?: { id: number; status: string }; deletedEvent?: { calendarId: string; eventId: string } } = {};
+  const result = await scheduleMeeting(BASE_REQ, baseDeps({
+    findActiveMeetingForLead: async () => ({
+      id: 77, project_id: 1, agenda_id: 1, channel: 'whatsapp', identifier: '+5531999',
+      slot_iso: new Date('2026-06-01T14:00:00-03:00'), slot_human: 'segunda (01/06) às 14h',
+      lead_email: null, lead_name: null,
+      company: null, contexto: null, google_event_id: 'evt-old', google_meet_link: 'https://meet.google.com/old',
+      status: 'scheduled', cancelled_by: null, rescheduled_to: null, last_reconciled_at: null,
+      created_at: new Date(), updated_at: new Date(),
+    }),
+    updateMeetingStatus: async (id, status) => { calls.updatedStatus = { id, status }; },
+    deleteEvent: async (_c, calendarId, eventId) => { calls.deletedEvent = { calendarId, eventId }; },
+  }));
+  assert.equal(result.source, 'google');
+  if (result.source === 'google') {
+    // Nova meeting deve ser criada (id=999 do mock insertMeeting), não a 77 antiga
+    assert.equal(result.meeting_id, 999);
+    assert.notEqual(result.already_scheduled, true);
+  }
+  // Velha foi marcada como rescheduled
+  assert.equal(calls.updatedStatus?.id, 77);
+  assert.equal(calls.updatedStatus?.status, 'rescheduled');
+  // Evento velho foi removido do Google
+  assert.equal(calls.deletedEvent?.eventId, 'evt-old');
 });
 
 test('fallback no_oauth: simulated_meetings + simulated=true', async () => {
