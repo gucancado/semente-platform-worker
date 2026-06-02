@@ -7,7 +7,7 @@ import {
   lookupContact,
   logWebhook,
 } from '../db.js';
-import { parseEvolutionPayload, shouldCreateTask } from './evolution.js';
+import { parseEvolutionPayload, shouldIngest } from './evolution.js';
 import { createTask } from '../bloquim/client.js';
 import { computeScheduledAt } from '../triggers/quiet-hours.js';
 
@@ -39,14 +39,17 @@ export async function registerWebhookRoutes(app: FastifyInstance) {
       );
     }
 
-    if (!shouldCreateTask(msg)) {
-      return { ignored: true, reason: 'not-DM-or-mention' };
-    }
-
     const agentCfg = config.AGENT_TOKENS_JSON[msg.agent];
     if (!agentCfg) {
       req.log.warn({ agent: msg.agent, instance: msg.instance }, 'webhook recebido para agente desconhecido');
       return reply.code(404).send({ error: 'unknown agent' });
+    }
+
+    // Gate de ingestão por modo do agente. Grupos só entram p/ agentes 'sweep'
+    // (auditor). Agentes 'reactive' (SDR) seguem ignorando grupos.
+    const mode = agentCfg.mode;
+    if (!shouldIngest(msg, mode)) {
+      return { ignored: true, reason: msg.isGroup ? 'group-not-audited' : 'not-DM' };
     }
 
     // Resolve workspace por remetente (opcional — só relevante se Bloquim sync ligado)
@@ -56,8 +59,10 @@ export async function registerWebhookRoutes(app: FastifyInstance) {
 
     // Bloquim sync é OPCIONAL agora (v0.6). Só roda se agente tem bloquim_token + fallback_workspace_id.
     // Sem Bloquim: webhook_logs vira a inbox, agente lê via MCP `inbox_list_unread`.
+    // Task Bloquim por mensagem é só do fluxo reativo (SDR). Auditor (sweep) age
+    // por regra no tick, não cria task por mensagem de grupo.
     let bloquimTaskId: string | null = null;
-    if (agentCfg.bloquim_token && workspaceId) {
+    if (mode === 'reactive' && agentCfg.bloquim_token && workspaceId) {
       const tagBase = [`canal:${msg.channel}`];
       if (fallbackUsed) tagBase.push('triagem-necessaria');
       const preview = (msg.messageText ?? '').slice(0, 80) || '(sem texto)';
@@ -96,6 +101,7 @@ export async function registerWebhookRoutes(app: FastifyInstance) {
       channel: msg.channel,
       instance: msg.instance,
       identifier: msg.identifier,
+      author: msg.author,
       push_name: msg.pushName,
       message_text: msg.messageText,
       workspace_id: workspaceId,
@@ -115,6 +121,7 @@ export async function registerWebhookRoutes(app: FastifyInstance) {
           project: msg.project,
           channel: msg.channel,
           identifier: msg.identifier,
+          author: msg.author,
           direction: 'inbound',
           text: msg.messageText,
           evolution_event_id: msg.rawEventId,
@@ -146,7 +153,9 @@ export async function registerWebhookRoutes(app: FastifyInstance) {
     // silenciada e o horário cai dentro, scheduled_at vira o fim da janela.
     let triggerQueued = false;
     let triggerError: string | null = null;
-    if (!agentCfg.trigger_url) {
+    if (mode !== 'reactive') {
+      // sweep (auditor): não dispara trigger reativo — saturno varre por cron.
+    } else if (!agentCfg.trigger_url) {
       req.log.warn({ agent: msg.agent }, 'agentCfg.trigger_url não está setado em AGENT_TOKENS_JSON');
       triggerError = 'no trigger_url configured';
     } else if (!msg.identifier) {

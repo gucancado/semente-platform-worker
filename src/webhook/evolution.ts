@@ -12,6 +12,7 @@ export const EvolutionMessageSchema = z.object({
       remoteJid: z.string(),                      // '5531999998888@s.whatsapp.net' ou '...@g.us' (grupo)
       fromMe: z.boolean(),
       id: z.string(),
+      participant: z.string().nullable().optional(), // em grupo: JID de quem enviou
     }),
     message: z.record(z.string(), z.unknown()).nullable().optional(),
     pushName: z.string().nullable().optional(),
@@ -25,7 +26,8 @@ export type ParsedMessage = {
   project: string | null;    // slug do projeto (sufixo da instance após o primeiro '-'); null se instance não tiver hífen
   instance: string;          // nome bruto da instância (mercurio-metido-a-gente)
   channel: 'whatsapp';
-  identifier: string;        // E.164: '+5531999998888'
+  identifier: string;        // E.164 do remetente em DM; em grupo: '+<id-do-grupo>' (JID do grupo)
+  author: string | null;    // em grupo: E.164 de quem enviou (participant); null em DM
   isGroup: boolean;
   fromMe: boolean;
   pushName: string | null;
@@ -48,6 +50,14 @@ export function parseEvolutionPayload(raw: unknown): ParsedMessage | null {
 
   if (!identifier) return null;
 
+  // Em grupo, `identifier` é o JID do grupo — quem realmente enviou está em
+  // `key.participant`. Em DM, participant é ausente e author fica null.
+  let author: string | null = null;
+  if (isGroup) {
+    const participantPart = (ev.data.key.participant ?? '').split('@')[0] ?? '';
+    author = participantPart ? `+${participantPart}` : null;
+  }
+
   // Extrai texto da mensagem cobrindo os envelopes mais comuns do Baileys.
   // Cobertura best-effort; tipos não cobertos ficam null e disparam warning no
   // webhook handler.
@@ -66,6 +76,7 @@ export function parseEvolutionPayload(raw: unknown): ParsedMessage | null {
     instance: ev.instance,
     channel: 'whatsapp',
     identifier,
+    author,
     isGroup,
     fromMe: false,
     pushName: ev.data.pushName ?? null,
@@ -116,12 +127,13 @@ export function extractMessageText(msg: unknown): string | null {
 }
 
 /**
- * Filtra mensagens que devem virar tarefa:
- * - DM (não-grupo) sempre.
- * - Em grupo, apenas se mencionado @<número do agente> (futura — placeholder).
+ * Decide se a mensagem deve ser INGERIDA (gravada na inbox/timeline), conforme
+ * o modo do agente:
+ *  - DM (não-grupo): sempre ingere.
+ *  - Grupo (@g.us): só ingere em agentes 'sweep' (auditor/saturno). Agentes
+ *    'reactive' (SDR/mercurio) continuam ignorando grupos.
  */
-export function shouldCreateTask(msg: ParsedMessage, _agentJid: string | null = null): boolean {
+export function shouldIngest(msg: ParsedMessage, mode: 'reactive' | 'sweep'): boolean {
   if (!msg.isGroup) return true;
-  // TODO: detectar @mention para mensagens em grupo
-  return false;
+  return mode === 'sweep';
 }

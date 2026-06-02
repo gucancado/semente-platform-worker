@@ -104,6 +104,7 @@ export async function logWebhook(args: {
   push_name?: string | null;
   message_text?: string | null;
   workspace_id?: string | null;
+  author?: string | null;
 }): Promise<{ id: number; duplicate: boolean }> {
   // Dedup: índice único parcial em (agent, evolution_event_id). Se Evolution
   // re-emite o mesmo evento, ON CONFLICT cai no DO NOTHING e a query principal
@@ -111,8 +112,8 @@ export async function logWebhook(args: {
   const insert = await pool.query<{ id: number }>(
     `INSERT INTO webhook_logs
        (agent, channel, identifier, evolution_event_id, payload_summary, bloquim_task_id, fallback_used,
-        instance, push_name, message_text, workspace_id)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+        instance, push_name, message_text, workspace_id, author)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
      ON CONFLICT (agent, evolution_event_id) WHERE evolution_event_id IS NOT NULL
      DO NOTHING
      RETURNING id`,
@@ -128,6 +129,7 @@ export async function logWebhook(args: {
       args.push_name ?? null,
       args.message_text ?? null,
       args.workspace_id ?? null,
+      args.author ?? null,
     ]
   );
   if (insert.rows[0]) {
@@ -146,6 +148,7 @@ export type InboxItem = {
   channel: string;
   instance: string | null;
   identifier: string | null;
+  author: string | null;
   push_name: string | null;
   message_text: string | null;
   workspace_id: string | null;
@@ -169,7 +172,7 @@ export async function listUnreadInbox(
     where += ` AND instance = $3`;
   }
   const { rows } = await pool.query<InboxItem>(
-    `SELECT id, agent, channel, instance, identifier, push_name, message_text,
+    `SELECT id, agent, channel, instance, identifier, author, push_name, message_text,
             workspace_id, evolution_event_id, created_at
        FROM webhook_logs
       WHERE ${where}
@@ -230,6 +233,7 @@ export async function insertMessage(args: {
   project?: string | null;
   channel: string;
   identifier: string;
+  author?: string | null;
   direction: 'inbound' | 'outbound';
   text: string;
   evolution_event_id?: string | null;
@@ -246,13 +250,13 @@ export async function insertMessage(args: {
   if (args.direction === 'inbound' && args.evolution_event_id) {
     const insert = await pool.query<{ id: number }>(
       `INSERT INTO messages
-         (agent, project, channel, identifier, direction, text, evolution_event_id)
-       VALUES ($1, $2, $3, $4, 'inbound', $5, $6)
+         (agent, project, channel, identifier, author, direction, text, evolution_event_id)
+       VALUES ($1, $2, $3, $4, $5, 'inbound', $6, $7)
        ON CONFLICT (agent, evolution_event_id)
          WHERE direction = 'inbound' AND evolution_event_id IS NOT NULL
          DO NOTHING
        RETURNING id`,
-      [args.agent, args.project ?? null, args.channel, args.identifier, args.text, args.evolution_event_id]
+      [args.agent, args.project ?? null, args.channel, args.identifier, args.author ?? null, args.text, args.evolution_event_id]
     );
     if (insert.rows[0]) return { id: insert.rows[0].id, duplicate: false };
 
@@ -267,16 +271,17 @@ export async function insertMessage(args: {
 
   const { rows } = await pool.query<{ id: number }>(
     `INSERT INTO messages
-       (agent, project, channel, identifier, direction, text,
+       (agent, project, channel, identifier, author, direction, text,
         evolution_event_id, evolution_send_id,
         tier, model, provider, classifier_intent, cost_usd, latency_ms)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
      RETURNING id`,
     [
       args.agent,
       args.project ?? null,
       args.channel,
       args.identifier,
+      args.author ?? null,
       args.direction,
       args.text,
       args.evolution_event_id ?? null,
