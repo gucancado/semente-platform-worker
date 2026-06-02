@@ -15,6 +15,9 @@ import {
   updateAgenda,
   softDeleteAgenda,
   StaleWriteError,
+  listWhatsappGroups,
+  upsertWhatsappGroups,
+  assignWhatsappGroupProject,
 } from './db.js';
 import {
   ProjectCreateBody,
@@ -627,5 +630,49 @@ export async function registerAdminRoutes(app: FastifyInstance) {
       errors: results.filter((r) => !r.deleted).length,
       results,
     };
+  });
+
+  // ── WhatsApp groups (monitoramento de grupos pelo auditor) ──────────────
+
+  // Lista grupos do agente (catálogo + contagem de mensagens).
+  app.get('/admin/agents/:agent/groups', async (req) => {
+    const { agent } = req.params as { agent: string };
+    const groups = await listWhatsappGroups(agent);
+    return { agent, count: groups.length, groups };
+  });
+
+  // Importa/atualiza nomes de grupos em lote (jid + subject).
+  app.post('/admin/agents/:agent/groups/import', async (req, reply) => {
+    const { agent } = req.params as { agent: string };
+    const Body = z.object({
+      groups: z.array(z.object({ jid: z.string().min(1), subject: z.string().nullable().optional() })).min(1),
+    });
+    let body;
+    try {
+      body = Body.parse(req.body);
+    } catch (e) {
+      if (e instanceof ZodError) return reply.code(400).send({ error: 'invalid body', issues: e.issues });
+      throw e;
+    }
+    const n = await upsertWhatsappGroups(agent, body.groups.map((g) => ({ jid: g.jid, subject: g.subject ?? null })));
+    req.log.info({ op: 'admin.groups.import', agent, count: n }, 'whatsapp groups imported');
+    return { ok: true, imported: n };
+  });
+
+  // Associa um grupo a um projeto (project=null desassocia).
+  app.post('/admin/agents/:agent/groups/:jid/project', async (req, reply) => {
+    const { agent, jid } = req.params as { agent: string; jid: string };
+    const Body = z.object({ project: z.string().min(1).nullable() });
+    let body;
+    try {
+      body = Body.parse(req.body);
+    } catch (e) {
+      if (e instanceof ZodError) return reply.code(400).send({ error: 'invalid body', issues: e.issues });
+      throw e;
+    }
+    const decodedJid = decodeURIComponent(jid);
+    const row = await assignWhatsappGroupProject(agent, decodedJid, body.project);
+    req.log.info({ op: 'admin.groups.assign', agent, jid: decodedJid, project: body.project }, 'whatsapp group project assigned');
+    return { ok: true, group: row };
   });
 }

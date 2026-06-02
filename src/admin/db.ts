@@ -276,3 +276,77 @@ export async function updateAgenda(
 export async function softDeleteAgenda(id: number): Promise<SchedulingAgenda> {
   return updateAgenda(id, { active: false });
 }
+
+// ── WhatsApp groups (catálogo de grupos monitorados pelo auditor) ──────────
+
+export type WhatsappGroup = {
+  agent: string;
+  jid: string;
+  subject: string | null;
+  project: string | null;
+  msg_count: number;
+  last_at: Date | null;
+};
+
+/**
+ * Lista os grupos do agente: união do catálogo (whatsapp_groups) com os JIDs
+ * que aparecem em messages (mensagens de grupo têm author != null). Traz
+ * contagem de mensagens e a última, pra GUI de monitoramento.
+ */
+export async function listWhatsappGroups(agent: string): Promise<WhatsappGroup[]> {
+  const { rows } = await pool.query<WhatsappGroup>(
+    `SELECT COALESCE(g.agent, m.agent) AS agent,
+            COALESCE(g.jid, m.identifier) AS jid,
+            g.subject AS subject,
+            g.project AS project,
+            COALESCE(m.cnt, 0)::int AS msg_count,
+            m.last_at AS last_at
+       FROM whatsapp_groups g
+       FULL OUTER JOIN (
+         SELECT agent, identifier, COUNT(*) AS cnt, MAX(created_at) AS last_at
+           FROM messages
+          WHERE agent = $1 AND direction = 'inbound' AND author IS NOT NULL
+          GROUP BY agent, identifier
+       ) m ON m.agent = g.agent AND m.identifier = g.jid
+      WHERE COALESCE(g.agent, m.agent) = $1
+      ORDER BY last_at DESC NULLS LAST, subject ASC NULLS LAST`,
+    [agent]
+  );
+  return rows;
+}
+
+/** Upsert em lote de grupos (jid + subject). Preserva `project` existente. */
+export async function upsertWhatsappGroups(
+  agent: string,
+  groups: Array<{ jid: string; subject: string | null }>
+): Promise<number> {
+  let n = 0;
+  for (const g of groups) {
+    await pool.query(
+      `INSERT INTO whatsapp_groups (agent, jid, subject, updated_at)
+       VALUES ($1, $2, $3, NOW())
+       ON CONFLICT (agent, jid) DO UPDATE SET
+         subject = COALESCE(EXCLUDED.subject, whatsapp_groups.subject),
+         updated_at = NOW()`,
+      [agent, g.jid, g.subject ?? null]
+    );
+    n++;
+  }
+  return n;
+}
+
+/** Associa (ou desassocia, project=null) um grupo a um projeto. */
+export async function assignWhatsappGroupProject(
+  agent: string,
+  jid: string,
+  project: string | null
+): Promise<WhatsappGroup | null> {
+  const { rows } = await pool.query<WhatsappGroup>(
+    `INSERT INTO whatsapp_groups (agent, jid, project, updated_at)
+     VALUES ($1, $2, $3, NOW())
+     ON CONFLICT (agent, jid) DO UPDATE SET project = $3, updated_at = NOW()
+     RETURNING agent, jid, subject, project, 0 AS msg_count, NULL::timestamptz AS last_at`,
+    [agent, jid, project]
+  );
+  return rows[0] ?? null;
+}
