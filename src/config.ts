@@ -10,6 +10,12 @@ const AgentTokensSchema = z.record(
     // v0.7 trigger-based: worker faz POST aqui quando webhook chega.
     trigger_url: z.string().url().optional(),
     trigger_secret: z.string().min(8).optional(),
+    // Modo de operação do agente:
+    //  - 'reactive' (default): responde inbound 1:1 (SDR/mercurio). Cria task
+    //    Bloquim + enfileira trigger; ignora mensagens de grupo.
+    //  - 'sweep': agente auditor (saturno). INGERE mensagens de grupo (@g.us)
+    //    pra inbox, NÃO cria task nem dispara trigger reativo (varre por cron).
+    mode: z.enum(['reactive', 'sweep']).default('reactive'),
   })
 );
 
