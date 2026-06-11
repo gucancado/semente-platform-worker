@@ -4,6 +4,7 @@ const QUERY = `
 query Transcripts($limit: Int, $skip: Int, $fromDate: DateTime, $toDate: DateTime) {
   transcripts(limit: $limit, skip: $skip, fromDate: $fromDate, toDate: $toDate) {
     id title date duration host_email organizer_email participants audio_url
+    meeting_attendees { displayName email name phoneNumber location }
     sentences { index speaker_name text raw_text start_time end_time }
   }
 }`;
