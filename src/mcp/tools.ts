@@ -8,6 +8,7 @@ import {
   listUnreadInbox,
   markInboxRead,
 } from '../db.js';
+import { listEpisodes, getEpisode } from '../episodes/db.js';
 
 /**
  * Registra todas as tools no `server` com o `agent` baked-in via closure.
@@ -127,6 +128,44 @@ export function registerTools(server: McpServer, agent: string): void {
       return {
         content: [{ type: 'text', text: JSON.stringify({ marked: updated }) }],
       };
+    }
+  );
+
+  // ── episodes_list ──────────────────────────────────────────────────────
+  server.registerTool(
+    'episodes_list',
+    {
+      description: 'Lista episódios de conversa (reuniões/WhatsApp) por workspace/período. Retorna cabeçalhos sem turnos; use episodes_get pro conteúdo.',
+      inputSchema: {
+        workspace_id: z.string().nullish(),
+        fonte: z.enum(['reuniao', 'whatsapp']).nullish(),
+        since: z.string().nullish().describe('ISO date'),
+        until: z.string().nullish().describe('ISO date'),
+        orphans: z.boolean().nullish().describe('true = só episódios sem projeto'),
+        limit: z.number().int().positive().max(200).nullish(),
+        cursor: z.string().nullish(),
+      },
+    },
+    async (input): Promise<CallToolResult> => {
+      const page = await listEpisodes({
+        workspace_id: input.workspace_id ?? undefined, fonte: input.fonte ?? undefined,
+        since: input.since ? new Date(input.since) : undefined, until: input.until ? new Date(input.until) : undefined,
+        orphans: input.orphans ?? undefined, limit: input.limit ?? undefined, cursor: input.cursor ?? undefined,
+      });
+      return { content: [{ type: 'text', text: JSON.stringify({ schema: 'episodio_v1', ...page }) }] };
+    }
+  );
+
+  // ── episodes_get ───────────────────────────────────────────────────────
+  server.registerTool(
+    'episodes_get',
+    {
+      description: 'Busca um episódio completo (turnos nomeados + proveniência) pelo id.',
+      inputSchema: { id: z.number().int().positive() },
+    },
+    async ({ id }): Promise<CallToolResult> => {
+      const ep = await getEpisode(id);
+      return { content: [{ type: 'text', text: ep ? JSON.stringify({ schema: 'episodio_v1', ...ep }) : 'null' }] };
     }
   );
 }
