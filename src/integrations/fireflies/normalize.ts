@@ -49,16 +49,16 @@ export function sentencesToTurns(sentences: FirefliesSentence[]): EpisodeTurnInp
 function buildParticipants(
   participants: string[] | null | undefined,
   attendees: FirefliesAttendee[] | null | undefined,
-): Array<{ name: string | null; email: string | null }> {
+): Array<{ name?: string; email?: string | null }> {
   // mapa keyed por email lowercased; emails de participants entram primeiro (sem nome)
-  const byEmail = new Map<string, { name: string | null; email: string | null }>();
+  const byEmail = new Map<string, { name?: string; email?: string | null }>();
   for (const email of participants ?? []) {
-    byEmail.set(email.toLowerCase(), { name: null, email });
+    byEmail.set(email.toLowerCase(), { email });
   }
   // attendees com email: overlay o nome se ainda não tiver
-  const noEmailAttendees: Array<{ name: string | null; email: string | null }> = [];
+  const noEmailAttendees: Array<{ name?: string; email?: string | null }> = [];
   for (const a of attendees ?? []) {
-    const resolvedName = a.displayName ?? a.name ?? null;
+    const resolvedName = a.displayName ?? a.name ?? undefined;
     if (a.email) {
       const key = a.email.toLowerCase();
       const existing = byEmail.get(key);

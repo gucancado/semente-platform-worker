@@ -51,7 +51,8 @@ test('meeting_attendees enriquece participants com displayName; fallback para na
   const ana = input.participants!.find((p) => p.email === 'ana@tagless.com.br');
   const g = input.participants!.find((p) => p.email === 'g@beeads.com.br');
   assert.equal(ana!.name, 'Ana Souza');
-  assert.equal(g!.name, null);
+  // participante sem attendee correspondente não tem name (undefined)
+  assert.equal(g!.name, undefined);
 });
 
 test('meeting_attendees sem email é incluído como entrada extra (name-only)', () => {
