@@ -39,3 +39,51 @@ test('transcriptToEpisodeInput monta EpisodeInput completo', () => {
   assert.equal(input.turns.length, 1);
   assert.equal(input.raw_r2_key, 'fireflies/ff-9.json');
 });
+
+test('meeting_attendees enriquece participants com displayName; fallback para name null quando sem attendee', () => {
+  const input = transcriptToEpisodeInput({
+    id: 'ff-10', title: 'Demo', date: 1746100800000, duration: 45,
+    participants: ['ana@tagless.com.br', 'g@beeads.com.br'],
+    meeting_attendees: [{ displayName: 'Ana Souza', email: 'ana@tagless.com.br' }],
+    sentences: [],
+  }, null);
+  assert.equal(input.participants!.length, 2);
+  const ana = input.participants!.find((p) => p.email === 'ana@tagless.com.br');
+  const g = input.participants!.find((p) => p.email === 'g@beeads.com.br');
+  assert.equal(ana!.name, 'Ana Souza');
+  assert.equal(g!.name, null);
+});
+
+test('meeting_attendees sem email é incluído como entrada extra (name-only)', () => {
+  const input = transcriptToEpisodeInput({
+    id: 'ff-11', title: 'Demo', date: 1746100800000, duration: 10,
+    participants: ['g@beeads.com.br'],
+    meeting_attendees: [
+      { displayName: 'Convidado Externo', email: null },
+      { displayName: null, name: 'Outro', email: 'g@beeads.com.br' },
+    ],
+    sentences: [],
+  }, null);
+  // g@beeads.com.br enriquecido via name (displayName null → cai para name)
+  const g = input.participants!.find((p) => p.email === 'g@beeads.com.br');
+  assert.equal(g!.name, 'Outro');
+  // attendee sem email deve aparecer
+  const noEmail = input.participants!.find((p) => p.email == null);
+  assert.ok(noEmail, 'attendee sem email deve estar presente');
+  assert.equal(noEmail!.name, 'Convidado Externo');
+});
+
+test('dedupe por email case-insensitive; metadata.attendees preserva raw', () => {
+  const attendees = [{ displayName: 'Ana Souza', email: 'Ana@Tagless.com.br' }];
+  const input = transcriptToEpisodeInput({
+    id: 'ff-12', title: 'Demo', date: 1746100800000, duration: 10,
+    participants: ['ana@tagless.com.br'],
+    meeting_attendees: attendees,
+    sentences: [],
+  }, null);
+  // sem duplicata
+  assert.equal(input.participants!.length, 1);
+  assert.equal(input.participants![0]!.name, 'Ana Souza');
+  // raw preservado
+  assert.deepEqual((input.metadata as Record<string, unknown>).attendees, attendees);
+});
