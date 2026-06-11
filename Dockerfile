@@ -1,8 +1,10 @@
 FROM node:24-slim AS deps
 WORKDIR /app
-COPY package.json ./
+# Lockfile no build: sem ele cada deploy resolve deps do zero e drift de
+# transitivas quebra o build (ex.: google-auth-library 10.5 vs 10.7, 2026-06-11).
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 RUN npm install -g pnpm@10 \
-    && pnpm install --prod=false
+    && pnpm install --frozen-lockfile --prod=false
 
 FROM node:24-slim AS build
 WORKDIR /app
@@ -15,8 +17,8 @@ FROM node:24-slim AS runtime
 ENV NODE_ENV=production
 WORKDIR /app
 RUN npm install -g pnpm@10
-COPY package.json ./
-RUN pnpm install --prod
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+RUN pnpm install --frozen-lockfile --prod
 COPY --from=build /app/dist ./dist
 COPY migrations ./migrations
 
