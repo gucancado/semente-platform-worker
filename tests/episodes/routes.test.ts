@@ -177,3 +177,30 @@ test('GET /admin/outbox/dead → 200 com items: []', async () => {
   assert.ok(Array.isArray(body.items));
   assert.equal(body.items.length, 0);
 });
+
+// 8. GET /episodes/abc → 400 (id inválido)
+test('GET /episodes/abc → 400 id inválido', async () => {
+  const app = buildApp();
+  const res = await app.inject({
+    method: 'GET',
+    url: '/episodes/abc',
+    headers: agentAuth,
+  });
+  assert.equal(res.statusCode, 400);
+  const body = JSON.parse(res.body);
+  assert.equal(body.error, 'id inválido');
+});
+
+// 9. GET /episodes?cursor=%%% → 400 cursor inválido
+test('GET /episodes?cursor=%%% → 400 cursor inválido', async () => {
+  const app = buildApp();
+  // %%% is not valid base64url and produces no pipe character when decoded
+  const res = await app.inject({
+    method: 'GET',
+    url: '/episodes?cursor=%25%25%25',
+    headers: agentAuth,
+  });
+  assert.equal(res.statusCode, 400);
+  const body = JSON.parse(res.body);
+  assert.equal(body.error, 'cursor inválido');
+});

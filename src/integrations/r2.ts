@@ -5,12 +5,14 @@ export function r2Configured(): boolean {
   return Boolean(config.R2_ENDPOINT && config.R2_ACCESS_KEY_ID && config.R2_SECRET_ACCESS_KEY && config.R2_BUCKET_EPISODES);
 }
 
+let _client: S3Client | null = null;
 function client(): S3Client {
-  return new S3Client({
+  if (!_client) _client = new S3Client({
     region: 'auto',
     endpoint: config.R2_ENDPOINT!,
     credentials: { accessKeyId: config.R2_ACCESS_KEY_ID!, secretAccessKey: config.R2_SECRET_ACCESS_KEY! },
   });
+  return _client;
 }
 
 /** Upload com key determinística + verificação por HEAD (content-length). Retry sobrescreve o mesmo objeto. */

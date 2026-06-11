@@ -53,29 +53,67 @@ test('claimDueReceipts: claim incrementa attempt_count; segundo claim imediato r
 
 // ── Case 3: markReceiptRetryOrDead ────────────────────────────────────────────
 test('markReceiptRetryOrDead: abaixo do max → {dead:false} status=failed com next_attempt futuro; no max → {dead:true} status=dead', async () => {
-  const { id } = await insertReceipt({
+  const { id: idRetry } = await insertReceipt({
     provider: 'recall',
-    external_event_id: 'evt-003',
+    external_event_id: 'evt-003a',
     payload: { y: 2 },
   });
 
+  const claimedRetry = await claimDueReceipts('w1');
+  assert.equal(claimedRetry.length, 1);
+  const rowRetry = claimedRetry[0]!;
+
   // currentAttempt=1, maxAttempts=3 → não morreu ainda
-  const r1 = await markReceiptRetryOrDead(id, 1, 3, 'timeout');
+  const r1 = await markReceiptRetryOrDead(idRetry, rowRetry.attempt_count, 3, 'timeout', rowRetry.claimed_by!, rowRetry.attempt_count);
   assert.equal(r1.dead, false);
+  assert.equal(r1.stale, undefined);
 
   const { rows: [row1] } = await pool.query(
-    `SELECT status, next_attempt_at FROM webhook_receipts WHERE id=$1`, [id]
+    `SELECT status, next_attempt_at FROM webhook_receipts WHERE id=$1`, [idRetry]
   );
   assert.equal(row1!.status, 'failed');
   assert.ok(new Date(row1!.next_attempt_at) > new Date(), 'next_attempt_at deve ser no futuro');
 
-  // currentAttempt=3, maxAttempts=3 → morreu
-  const r2 = await markReceiptRetryOrDead(id, 3, 3, 'fatal');
+  // Usar um segundo receipt para testar o caminho dead (evita esperar next_attempt_at)
+  const { id: idDead } = await insertReceipt({
+    provider: 'recall',
+    external_event_id: 'evt-003b',
+    payload: { y: 3 },
+  });
+  const claimedDead = await claimDueReceipts('w1');
+  assert.equal(claimedDead.length, 1);
+  const rowDead = claimedDead[0]!;
+
+  // currentAttempt>=maxAttempts → morreu
+  const r2 = await markReceiptRetryOrDead(idDead, 3, 3, 'fatal', rowDead.claimed_by!, rowDead.attempt_count);
   assert.equal(r2.dead, true);
 
   const { rows: [row2] } = await pool.query(
-    `SELECT status, last_error FROM webhook_receipts WHERE id=$1`, [id]
+    `SELECT status, last_error FROM webhook_receipts WHERE id=$1`, [idDead]
   );
   assert.equal(row2!.status, 'dead');
   assert.equal(row2!.last_error, 'fatal');
+});
+
+// ── Case 4: stale-write guard ─────────────────────────────────────────────────
+test('markReceiptProcessed com attempt_count stale retorna false e status inalterado', async () => {
+  const { id } = await insertReceipt({
+    provider: 'recall',
+    external_event_id: 'evt-004',
+    payload: { z: 3 },
+  });
+
+  const claimed = await claimDueReceipts('w1');
+  assert.equal(claimed.length, 1);
+  const row = claimed[0]!;
+
+  // Chamar com attempt_count+1 (stale)
+  const ok = await markReceiptProcessed(id, row.claimed_by!, row.attempt_count + 1);
+  assert.equal(ok, false);
+
+  // Status deve continuar sendo 'received' (não 'processed')
+  const { rows: [current] } = await pool.query(
+    `SELECT status FROM webhook_receipts WHERE id=$1`, [id]
+  );
+  assert.equal(current!.status, 'received');
 });

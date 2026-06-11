@@ -12,7 +12,7 @@ const ListQuery = z.object({
   since: z.coerce.date().optional(),
   until: z.coerce.date().optional(),
   q: z.string().optional(),
-  orphans: z.coerce.boolean().optional(),
+  orphans: z.enum(['true', 'false']).transform((v) => v === 'true').optional(),
   limit: z.coerce.number().int().positive().max(200).optional(),
   cursor: z.string().optional(),
 });
@@ -26,12 +26,21 @@ export async function registerEpisodesRoutes(app: FastifyInstance): Promise<void
     scope.get('/episodes', async (req, reply) => {
       const q = ListQuery.safeParse(req.query);
       if (!q.success) return reply.code(400).send({ error: q.error.message });
-      const page = await listEpisodes(q.data);
-      return { schema: 'episodio_v1', ...page };
+      try {
+        const page = await listEpisodes(q.data);
+        return { schema: 'episodio_v1', ...page };
+      } catch (err) {
+        if (err instanceof Error && err.message === 'cursor inválido') {
+          return reply.code(400).send({ error: 'cursor inválido' });
+        }
+        throw err;
+      }
     });
 
     scope.get('/episodes/:id', async (req, reply) => {
-      const id = Number((req.params as { id: string }).id);
+      const rawId = (req.params as { id: string }).id;
+      if (!/^\d+$/.test(rawId)) return reply.code(400).send({ error: 'id inválido' });
+      const id = Number(rawId);
       const ep = await getEpisode(id);
       if (!ep) return reply.code(404).send({ error: 'episódio não encontrado' });
       const { external_source, external_id, raw_r2_key, audio_r2_key, ...rest } = ep;
@@ -43,7 +52,9 @@ export async function registerEpisodesRoutes(app: FastifyInstance): Promise<void
     });
 
     scope.get('/episodes/:id/turns', async (req, reply) => {
-      const id = Number((req.params as { id: string }).id);
+      const rawId = (req.params as { id: string }).id;
+      if (!/^\d+$/.test(rawId)) return reply.code(400).send({ error: 'id inválido' });
+      const id = Number(rawId);
       const { from, to } = req.query as { from?: string; to?: string };
       const { rows } = await pool.query(
         `SELECT turn_index, speaker_name, speaker_label, started_at_ms, ended_at_ms, text
@@ -64,6 +75,8 @@ export async function registerEpisodesRoutes(app: FastifyInstance): Promise<void
     scope.addHook('preHandler', requireOwnerToken);
 
     scope.patch('/admin/episodes/:id/attribution', async (req, reply) => {
+      const rawId = (req.params as { id: string }).id;
+      if (!/^\d+$/.test(rawId)) return reply.code(400).send({ error: 'id inválido' });
       const Body = z.object({
         workspace_id: z.string().min(1),
         project_slug: z.string().nullish(),
@@ -71,7 +84,7 @@ export async function registerEpisodesRoutes(app: FastifyInstance): Promise<void
       const b = Body.safeParse(req.body);
       if (!b.success) return reply.code(400).send({ error: b.error.message });
       const ok = await updateEpisodeAttribution(
-        Number((req.params as { id: string }).id),
+        Number(rawId),
         { ...b.data, by: 'owner' }
       );
       if (!ok) return reply.code(404).send({ error: 'episódio não encontrado' });
@@ -83,7 +96,9 @@ export async function registerEpisodesRoutes(app: FastifyInstance): Promise<void
     }));
 
     scope.post('/admin/outbox/deliveries/:id/replay', async (req, reply) => {
-      const ok = await requeueDelivery(Number((req.params as { id: string }).id));
+      const rawId = (req.params as { id: string }).id;
+      if (!/^\d+$/.test(rawId)) return reply.code(400).send({ error: 'id inválido' });
+      const ok = await requeueDelivery(Number(rawId));
       if (!ok) return reply.code(404).send({ error: 'delivery não encontrada ou não está dead' });
       return { ok: true };
     });

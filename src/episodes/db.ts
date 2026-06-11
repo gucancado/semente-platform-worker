@@ -127,9 +127,12 @@ export async function listEpisodes(f: {
   if (f.cursor) {
     const decoded = Buffer.from(f.cursor, 'base64url').toString();
     const pipeIdx = decoded.lastIndexOf('|');
+    if (pipeIdx < 0) throw new Error('cursor inválido');
     const iso = decoded.slice(0, pipeIdx);
-    const id = decoded.slice(pipeIdx + 1);
-    where.push(`(occurred_at, id) < (${p(new Date(iso))}, ${p(Number(id))})`);
+    const idPart = decoded.slice(pipeIdx + 1);
+    if (Number.isNaN(Date.parse(iso))) throw new Error('cursor inválido');
+    if (!/^\d+$/.test(idPart)) throw new Error('cursor inválido');
+    where.push(`(occurred_at, id) < (${p(new Date(iso))}, ${p(Number(idPart))})`);
   }
   const sql = `SELECT * FROM episodes ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
                ORDER BY occurred_at DESC, id DESC LIMIT ${p(limit + 1)}`;

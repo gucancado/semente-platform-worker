@@ -39,20 +39,32 @@ export async function claimDueReceipts(workerId: string, batchSize = 10): Promis
   return rows;
 }
 
-export async function markReceiptProcessed(id: number): Promise<void> {
-  await pool.query(`UPDATE webhook_receipts SET status='processed', processed_at=NOW(), claimed_at=NULL, last_error=NULL WHERE id=$1`, [id]);
+export async function markReceiptProcessed(id: number, claimedBy: string, attemptCount: number): Promise<boolean> {
+  const { rowCount } = await pool.query(
+    `UPDATE webhook_receipts SET status='processed', processed_at=NOW(), claimed_at=NULL, last_error=NULL
+     WHERE id=$1 AND claimed_by=$2 AND attempt_count=$3`,
+    [id, claimedBy, attemptCount]
+  );
+  return (rowCount ?? 0) > 0;
 }
 
-export async function markReceiptRetryOrDead(id: number, currentAttempt: number, maxAttempts: number, error: string): Promise<{ dead: boolean }> {
+export async function markReceiptRetryOrDead(id: number, currentAttempt: number, maxAttempts: number, error: string, claimedBy: string, attemptCount: number): Promise<{ dead: boolean; stale?: boolean }> {
   if (currentAttempt >= maxAttempts) {
-    await pool.query(`UPDATE webhook_receipts SET status='dead', claimed_at=NULL, last_error=$2 WHERE id=$1`, [id, error]);
+    const { rowCount } = await pool.query(
+      `UPDATE webhook_receipts SET status='dead', claimed_at=NULL, last_error=$2
+       WHERE id=$1 AND claimed_by=$3 AND attempt_count=$4`,
+      [id, error, claimedBy, attemptCount]
+    );
+    if ((rowCount ?? 0) === 0) return { dead: false, stale: true };
     return { dead: true };
   }
   const backoffSec = Math.min(currentAttempt * 30, 300);
-  await pool.query(
+  const { rowCount } = await pool.query(
     `UPDATE webhook_receipts SET status='failed', claimed_at=NULL, last_error=$3,
-        next_attempt_at = NOW() + ($2 || ' seconds')::INTERVAL WHERE id=$1`,
-    [id, String(backoffSec), error]
+        next_attempt_at = NOW() + ($2 || ' seconds')::INTERVAL
+     WHERE id=$1 AND claimed_by=$4 AND attempt_count=$5`,
+    [id, String(backoffSec), error, claimedBy, attemptCount]
   );
+  if ((rowCount ?? 0) === 0) return { dead: false, stale: true };
   return { dead: false };
 }

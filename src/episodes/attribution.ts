@@ -74,15 +74,16 @@ export async function loadDomainRules(): Promise<Map<string, DomainRule>> {
 
 export async function upsertDomainRule(args: { domain: string; workspace_id: string; project_slug?: string | null; notes?: string | null }): Promise<void> {
   const { pool } = await import('../db.js');
-  // PK global: conflito com workspace DIFERENTE deve falhar alto (spec §9) — por isso
-  // só atualizamos quando o workspace é o MESMO; divergência lança erro claro.
-  const { rows } = await pool.query<{ workspace_id: string }>(`SELECT workspace_id FROM workspace_domains WHERE domain=$1`, [args.domain.toLowerCase()]);
-  if (rows[0] && rows[0].workspace_id !== args.workspace_id) {
-    throw new Error(`workspace_domains: '${args.domain}' já mapeado pra workspace ${rows[0].workspace_id} — ambiguidade de domínio exige resolução manual`);
-  }
-  await pool.query(
+  const { rows } = await pool.query<{ workspace_id: string }>(
     `INSERT INTO workspace_domains (domain, workspace_id, project_slug, notes) VALUES ($1,$2,$3,$4)
-     ON CONFLICT (domain) DO UPDATE SET project_slug=COALESCE(EXCLUDED.project_slug, workspace_domains.project_slug), notes=COALESCE(EXCLUDED.notes, workspace_domains.notes)`,
+     ON CONFLICT (domain) DO UPDATE SET
+       project_slug = COALESCE(EXCLUDED.project_slug, workspace_domains.project_slug),
+       notes = COALESCE(EXCLUDED.notes, workspace_domains.notes)
+     WHERE workspace_domains.workspace_id = EXCLUDED.workspace_id
+     RETURNING workspace_id`,
     [args.domain.toLowerCase(), args.workspace_id, args.project_slug ?? null, args.notes ?? null]
   );
+  if (!rows[0]) {
+    throw new Error(`workspace_domains: '${args.domain}' já mapeado pra outro workspace — ambiguidade de domínio exige resolução manual`);
+  }
 }
