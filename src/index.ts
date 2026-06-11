@@ -9,10 +9,12 @@ import { registerSdrRoutes } from './sdr/routes.js';
 import { registerTimelineRoutes } from './timeline/routes.js';
 import { registerProjectsRoutes } from './projects/routes.js';
 import { registerWebhookCloudRoutes, registerSendCloudRoute } from './webhook-cloud/routes.js';
+import { registerEpisodesRoutes } from './episodes/routes.js';
 import { requireAgentToken } from './auth.js';
 import { startTriggerPoller } from './triggers/poller.js';
 import { startHoldsCleanupCron } from './goals/scheduling/holds-cleanup.js';
 import { startReconcileCron } from './goals/scheduling/reconcile-trigger.js';
+import { startOutboxDispatcher } from './events/dispatcher.js';
 
 async function main() {
   const app = Fastify({
@@ -88,6 +90,11 @@ async function main() {
     await registerProjectsRoutes(scope);
   });
 
+  // Episódios (transcrições): leitura por X-Agent-Token + admin por X-Owner-Token.
+  await app.register(async (scope) => {
+    await registerEpisodesRoutes(scope);
+  });
+
   // Admin endpoints: CRUD de projects/goals/agendas. Auth: X-Owner-Token (env OWNER_ADMIN_TOKEN).
   // Consumido pela GUI agentes.beeads.com.br.
   await app.register(async (scope) => {
@@ -100,6 +107,9 @@ async function main() {
   // Poller que processa pending_triggers (burst smoothing + quiet hours).
   // Substitui o trigger fire-and-forget inline do webhook handler.
   startTriggerPoller(app.log);
+
+  // Dispatcher do outbox de eventos (expansão + entrega HTTP com retry/dead-letter).
+  startOutboxDispatcher(app.log);
 
   // Cron que limpa holds expirados a cada 5 minutos.
   startHoldsCleanupCron(app.log);

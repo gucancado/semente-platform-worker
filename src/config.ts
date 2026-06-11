@@ -91,6 +91,34 @@ const EnvSchema = z.object({
   TRIGGER_POLLER_MAX_ATTEMPTS: z.coerce.number().int().positive().default(3),
   // Quantos triggers o poller processa por ciclo.
   TRIGGER_POLLER_BATCH_SIZE: z.coerce.number().int().positive().default(50),
+
+  // ── Outbox de eventos (spec transcrições §4) ──
+  // JSON: { "<event_type>": { "<subscriber_key>": { "url": "...", "secrets": ["ativo","anterior?"] } } }
+  EVENT_SUBSCRIBERS_JSON: z.string().optional().transform((s, ctx) => {
+    if (!s) return {} as Record<string, Record<string, { url: string; secrets: string[] }>>;
+    try {
+      return z.record(z.string(), z.record(z.string(), z.object({
+        url: z.string().url(),
+        secrets: z.array(z.string().min(8)).min(1),
+      }))).parse(JSON.parse(s));
+    } catch (e) {
+      ctx.addIssue({ code: 'custom', message: `EVENT_SUBSCRIBERS_JSON inválido: ${(e as Error).message}` });
+      return z.NEVER;
+    }
+  }),
+  OUTBOX_POLLER_INTERVAL_MS: z.coerce.number().int().positive().default(5_000),
+  OUTBOX_POLLER_BATCH_SIZE: z.coerce.number().int().positive().default(50),
+  OUTBOX_MAX_ATTEMPTS: z.coerce.number().int().positive().default(8),
+
+  // ── Repositório de transcrições ──
+  FIREFLIES_API_KEY: z.string().optional(),
+  R2_ENDPOINT: z.string().url().optional(),
+  R2_ACCESS_KEY_ID: z.string().optional(),
+  R2_SECRET_ACCESS_KEY: z.string().optional(),
+  R2_BUCKET_EPISODES: z.string().optional(),
+  INTERNAL_WORKSPACE_ID: z.string().optional(),
+  INTERNAL_DOMAINS: z.string().default('beeads.com.br').transform((s) => s.split(',').map((d) => d.trim()).filter(Boolean)),
+  FREEMAIL_DOMAINS_EXTRA: z.string().optional().transform((s) => (s ? s.split(',').map((d) => d.trim()).filter(Boolean) : [])),
 });
 
 export const config = EnvSchema.parse(process.env);
