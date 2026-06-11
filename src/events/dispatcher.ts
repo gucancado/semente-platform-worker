@@ -50,7 +50,8 @@ export function startOutboxDispatcher(log: FastifyBaseLogger): NodeJS.Timeout {
     try {
       await expandPendingEvents(config.EVENT_SUBSCRIBERS_JSON, config.OUTBOX_POLLER_BATCH_SIZE);
       const due = await claimDueDeliveries(config.OUTBOX_POLLER_BATCH_SIZE);
-      if (due.length) await Promise.all(due.map((d) => deliver(d, log)));
+      // allSettled: falha de DB num deliver não pode abortar o tratamento das demais entregas do ciclo
+      if (due.length) await Promise.allSettled(due.map((d) => deliver(d, log)));
     } catch (err) {
       log.error({ err: (err as Error).message }, 'outbox: ciclo falhou');
     } finally {
