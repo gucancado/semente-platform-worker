@@ -12,7 +12,8 @@
     "test": "node --test --import tsx tests/**/*.test.ts",
     "test:watch": "node --test --watch --import tsx tests/**/*.test.ts",
     "typecheck": "tsc --noEmit",
-    "lint": "eslint src/**/*.ts"
+    "lint": "eslint src/**/*.ts",
+    "import:fireflies": "tsx src/cli/import-fireflies.ts"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1065.0",
