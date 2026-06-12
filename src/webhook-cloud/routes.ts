@@ -9,6 +9,7 @@ import {
 import { computeScheduledAt } from '../triggers/quiet-hours.js';
 import { parseCloudPayload, verifyHmacSignature } from './parser.js';
 import { parseCommand, dispatchCommand } from '../commands/registry.js';
+import { resolveByWhatsapp } from '../commands/identity.js';
 import { sendCloudText } from './send.js';
 
 /**
@@ -108,10 +109,13 @@ export async function registerWebhookCloudRoutes(app: FastifyInstance) {
       const command = parseCommand(msg.messageText);
       if (command) {
         try {
+          // Resolve identidade Bloquim (graceful: null se desconhecido/indisponível).
+          const ruser = await resolveByWhatsapp(msg.identifier);
           const reply = await dispatchCommand(command, {
             agent: msg.agent,
             from: msg.identifier,
-            displayName: msg.pushName,
+            displayName: ruser?.name ?? msg.pushName,
+            user: ruser,
           });
           await sendCloudText(msg.phoneNumberId, msg.identifier, reply);
           req.log.info(

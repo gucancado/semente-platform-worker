@@ -24,10 +24,13 @@ export function parseCommand(text: string | null | undefined): ParsedCommand | n
   return { name, args: parts.slice(1), raw: trimmed };
 }
 
+import type { ResolvedUser } from './identity.js';
+
 export type CommandContext = {
   agent: string;
   from: string; // E.164 do remetente
   displayName?: string | null; // pushName do WhatsApp ou nome resolvido no Bloquim
+  user?: ResolvedUser | null; // identidade Bloquim resolvida (null se desconhecido)
 };
 
 export type CommandHandler = (ctx: CommandContext) => Promise<string> | string;

@@ -34,6 +34,9 @@ const EnvSchema = z.object({
   LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
   DATABASE_URL: z.string().url(),
   BLOQUIM_API_URL: z.string().url(),
+  // Segredo compartilhado p/ chamar rotas internas do bloquim-api
+  // (/api/internal/*), ex.: resolve-by-whatsapp. Mesmo valor no bloquim-api.
+  INTERNAL_API_SECRET: z.string().optional(),
   AGENT_TOKENS_JSON: z.string().transform((s, ctx) => {
     try {
       return AgentTokensSchema.parse(JSON.parse(s));
