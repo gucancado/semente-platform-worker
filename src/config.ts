@@ -115,6 +115,9 @@ const EnvSchema = z.object({
 
   // ── Repositório de transcrições ──
   FIREFLIES_API_KEY: z.string().optional(),
+  // ── Lua (memória) ── chave OpenAI p/ embeddings (text-embedding-3-large@1024).
+  // Opcional: ausente não quebra startup; só o batch/bootstrap reais a exigem.
+  OPENAI_API_KEY: z.string().optional(),
   R2_ENDPOINT: z.string().url().optional(),
   R2_ACCESS_KEY_ID: z.string().optional(),
   R2_SECRET_ACCESS_KEY: z.string().optional(),
