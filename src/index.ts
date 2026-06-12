@@ -10,6 +10,7 @@ import { registerTimelineRoutes } from './timeline/routes.js';
 import { registerProjectsRoutes } from './projects/routes.js';
 import { registerWebhookCloudRoutes, registerSendCloudRoute } from './webhook-cloud/routes.js';
 import { registerEpisodesRoutes } from './episodes/routes.js';
+import { registerMemoriaRoutes } from './lua/routes.js';
 import { requireAgentToken } from './auth.js';
 import { startTriggerPoller } from './triggers/poller.js';
 import { startHoldsCleanupCron } from './goals/scheduling/holds-cleanup.js';
@@ -93,6 +94,11 @@ async function main() {
   // Episódios (transcrições): leitura por X-Agent-Token + admin por X-Owner-Token.
   await app.register(async (scope) => {
     await registerEpisodesRoutes(scope);
+  });
+
+  // Memória da Lua (busca híbrida): leitura por X-Agent-Token.
+  await app.register(async (scope) => {
+    await registerMemoriaRoutes(scope);
   });
 
   // Admin endpoints: CRUD de projects/goals/agendas. Auth: X-Owner-Token (env OWNER_ADMIN_TOKEN).

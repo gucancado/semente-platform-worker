@@ -9,6 +9,8 @@ import {
   markInboxRead,
 } from '../db.js';
 import { listEpisodes, getEpisode } from '../episodes/db.js';
+import { searchMemoria } from '../lua/search.js';
+import { getEmbeddingClient } from '../lua/embedding-provider.js';
 
 /**
  * Registra todas as tools no `server` com o `agent` baked-in via closure.
@@ -166,6 +168,31 @@ export function registerTools(server: McpServer, agent: string): void {
     async ({ id }): Promise<CallToolResult> => {
       const ep = await getEpisode(id);
       return { content: [{ type: 'text', text: ep ? JSON.stringify({ schema: 'episodio_v1', ...ep }) : 'null' }] };
+    }
+  );
+
+  // ── search_memoria ─────────────────────────────────────────────────────
+  server.registerTool(
+    'search_memoria',
+    {
+      description:
+        'Busca híbrida (vetorial + lexical, fusão RRF) na memória de um workspace. Retorna chunks de episódios e/ou fatos com proveniência. Tudo filtrado por workspace_id. Sem OPENAI_API_KEY degrada para lexical_only.',
+      inputSchema: {
+        workspace_id: z.string(),
+        query: z.string(),
+        k: z.number().int().optional(),
+        scope: z.enum(['episodios', 'fatos', 'ambos']).optional(),
+        since: z.string().optional().describe('ISO date'),
+        until: z.string().optional().describe('ISO date'),
+      },
+    },
+    async ({ workspace_id, query, k, scope, since, until }): Promise<CallToolResult> => {
+      const result = await searchMemoria(
+        { workspaceId: workspace_id, query },
+        { k, scope, since, until },
+        { embeddingClient: getEmbeddingClient() }
+      );
+      return { content: [{ type: 'text', text: JSON.stringify(result) }] };
     }
   );
 }
