@@ -8,6 +8,8 @@ import {
 } from '../db.js';
 import { computeScheduledAt } from '../triggers/quiet-hours.js';
 import { parseCloudPayload, verifyHmacSignature } from './parser.js';
+import { parseCommand, dispatchCommand } from '../commands/registry.js';
+import { sendCloudText } from './send.js';
 
 /**
  * Rotas do webhook WhatsApp Cloud API (Meta).
@@ -98,6 +100,31 @@ export async function registerWebhookCloudRoutes(app: FastifyInstance) {
       const agentCfg = config.AGENT_TOKENS_JSON[msg.agent];
       if (!agentCfg) {
         req.log.warn({ agent: msg.agent, phoneNumberId: msg.phoneNumberId }, 'cloud webhook: agente desconhecido');
+        continue;
+      }
+
+      // Comando `!...` (padrão do ecossistema): resposta determinística via B.
+      // NÃO entra no fluxo de inbox/trigger — não é mensagem pro agente processar.
+      const command = parseCommand(msg.messageText);
+      if (command) {
+        try {
+          const reply = await dispatchCommand(command, {
+            agent: msg.agent,
+            from: msg.identifier,
+            displayName: msg.pushName,
+          });
+          await sendCloudText(msg.phoneNumberId, msg.identifier, reply);
+          req.log.info(
+            { agent: msg.agent, cmd: command.name, from: msg.identifier },
+            'comando processado e respondido via B',
+          );
+        } catch (err) {
+          req.log.warn(
+            { err: (err as Error).message, cmd: command.name },
+            'falha ao processar/responder comando',
+          );
+        }
+        results.push({ inbox_id: -1, duplicate: false });
         continue;
       }
 
@@ -216,39 +243,17 @@ export async function registerSendCloudRoute(app: FastifyInstance) {
       return reply.code(400).send({ error: 'phone_number_id, to, text obrigatórios' });
     }
 
-    const url = `https://graph.facebook.com/${config.WHATSAPP_CLOUD_GRAPH_VERSION}/${encodeURIComponent(body.phone_number_id)}/messages`;
-    const payload = {
-      messaging_product: 'whatsapp',
-      to: body.to.replace(/^\+/, ''),
-      type: 'text',
-      text: { body: body.text },
-    };
-
     try {
       const t0 = Date.now();
-      const r = await fetch(url, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${token}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(payload),
-        signal: AbortSignal.timeout(15000),
-      });
-      const respBody = await r.json().catch(() => ({}));
+      const res = await sendCloudText(body.phone_number_id, body.to, body.text);
       const latencyMs = Date.now() - t0;
 
-      if (!r.ok) {
-        req.log.warn({ status: r.status, respBody }, 'cloud sendText falhou');
-        return reply.code(502).send({ error: 'cloud send failed', status: r.status, detail: respBody });
+      if (!res.ok) {
+        req.log.warn({ status: res.status, detail: res.detail }, 'cloud sendText falhou');
+        return reply.code(502).send({ error: 'cloud send failed', status: res.status, detail: res.detail });
       }
 
-      const sendId =
-        (respBody as any)?.messages?.[0]?.id ||
-        (respBody as any)?.message_id ||
-        null;
-
-      return reply.code(200).send({ ok: true, send_id: sendId, latency_ms: latencyMs });
+      return reply.code(200).send({ ok: true, send_id: res.send_id, latency_ms: latencyMs });
     } catch (err) {
       req.log.error({ err: (err as Error).message }, 'cloud send exception');
       return reply.code(502).send({ error: (err as Error).message });
