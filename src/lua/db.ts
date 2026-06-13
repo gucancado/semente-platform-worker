@@ -42,6 +42,41 @@ export type ChunkInput = {
   embeddingModel: string;
 };
 
+export type FactType =
+  | 'decisao'
+  | 'preferencia'
+  | 'restricao'
+  | 'compromisso'
+  | 'contexto'
+  | 'objetivo'
+  | 'ameaca'
+  | 'oportunidade'
+  | 'marco'
+  | 'papel';
+
+/** Linha de fato no formato de leitura (`get_fatos`, §8.3 / kind `fato` §8.2). */
+export type FactRow = {
+  id: number;
+  schema_version: string;
+  workspace_id: string;
+  fact_type: string;
+  statement: string;
+  attributes: Record<string, unknown>;
+  confidence: number;
+  valid_at: string;
+  invalid_at: string | null;
+  superseded_by_fact_id: number | null;
+  invalidation_reason: string | null;
+  needs_review: boolean;
+  review_note: string | null;
+  episode_id: number;
+  episode_revision: number;
+  turn_start: number;
+  turn_end: number;
+  extracted_by: string;
+  created_at: string;
+};
+
 export type FactInput = {
   workspaceId: string;
   factType: string;
@@ -440,4 +475,315 @@ export async function finishRun(
       WHERE id = $1`,
     [id, status, JSON.stringify(stats), error ?? null]
   );
+}
+
+// ── 12. Leitura de fatos — as-of bi-temporal + keyset cursor (spec §8.3) ────
+
+/** Serializa a linha crua de `facts` no formato de leitura (§8.3). */
+function mapFactRow(r: Record<string, unknown>): FactRow {
+  return {
+    id: Number(r.id),
+    schema_version: r.schema_version as string,
+    workspace_id: r.workspace_id as string,
+    fact_type: r.fact_type as string,
+    statement: r.statement as string,
+    attributes: (r.attributes as Record<string, unknown>) ?? {},
+    confidence: Number(r.confidence),
+    valid_at: (r.valid_at as Date).toISOString(),
+    invalid_at: r.invalid_at ? (r.invalid_at as Date).toISOString() : null,
+    superseded_by_fact_id:
+      r.superseded_by_fact_id != null ? Number(r.superseded_by_fact_id) : null,
+    invalidation_reason: (r.invalidation_reason as string | null) ?? null,
+    needs_review: r.needs_review as boolean,
+    review_note: (r.review_note as string | null) ?? null,
+    episode_id: Number(r.episode_id),
+    episode_revision: Number(r.episode_revision),
+    turn_start: Number(r.turn_start),
+    turn_end: Number(r.turn_end),
+    extracted_by: r.extracted_by as string,
+    created_at: (r.created_at as Date).toISOString(),
+  };
+}
+
+export type GetFatosFilters = {
+  types?: FactType[];
+  /** As-of bi-temporal (default: agora). */
+  vigenteEm?: Date | string;
+  /** Inclui fatos invalidos (ignora a janela as-of). Default false. */
+  includeInvalid?: boolean;
+  /** Filtro lexical (`websearch_to_tsquery`). */
+  q?: string;
+  episodeId?: number;
+  limit?: number;
+  cursor?: string;
+};
+
+const FATOS_DEFAULT_LIMIT = 50;
+const FATOS_MAX_LIMIT = 200;
+
+/**
+ * Lista fatos de um workspace com janela as-of bi-temporal (§8.3):
+ *   valid_at <= $t AND (invalid_at IS NULL OR invalid_at > $t)
+ * `includeInvalid` desliga a janela (retorna histórico). Keyset cursor
+ * `(valid_at DESC, id DESC)`, base64url — mesma codificação das rotas de
+ * episódios (`occurred_at_iso|id`), aqui `valid_at_iso|id`. `needs_review` e
+ * `superseded_by_fact_id` SEMPRE presentes no payload (o consumidor precisa
+ * ver a suspeita e a cadeia).
+ */
+export async function getFatos(
+  workspaceId: string,
+  filters: GetFatosFilters
+): Promise<{ fatos: FactRow[]; next_cursor: string | null }> {
+  const limit = Math.min(filters.limit ?? FATOS_DEFAULT_LIMIT, FATOS_MAX_LIMIT);
+  const where: string[] = ['workspace_id = $1'];
+  const args: unknown[] = [workspaceId];
+  const p = (v: unknown) => {
+    args.push(v);
+    return `$${args.length}`;
+  };
+
+  if (!filters.includeInvalid) {
+    const t = filters.vigenteEm ?? new Date();
+    const tp = p(t);
+    where.push(`valid_at <= ${tp}::timestamptz`);
+    where.push(`(invalid_at IS NULL OR invalid_at > ${tp}::timestamptz)`);
+  }
+  if (filters.types && filters.types.length) {
+    where.push(`fact_type = ANY(${p(filters.types)})`);
+  }
+  if (filters.q) {
+    where.push(`tsv @@ websearch_to_tsquery('portuguese', ${p(filters.q)})`);
+  }
+  if (filters.episodeId != null) {
+    where.push(`episode_id = ${p(filters.episodeId)}`);
+  }
+  if (filters.cursor) {
+    const decoded = Buffer.from(filters.cursor, 'base64url').toString();
+    const pipeIdx = decoded.lastIndexOf('|');
+    if (pipeIdx < 0) throw new Error('cursor inválido');
+    const iso = decoded.slice(0, pipeIdx);
+    const idPart = decoded.slice(pipeIdx + 1);
+    if (Number.isNaN(Date.parse(iso))) throw new Error('cursor inválido');
+    if (!/^\d+$/.test(idPart)) throw new Error('cursor inválido');
+    where.push(`(valid_at, id) < (${p(new Date(iso))}, ${p(Number(idPart))})`);
+  }
+
+  const sql = `SELECT * FROM facts WHERE ${where.join(' AND ')}
+               ORDER BY valid_at DESC, id DESC LIMIT ${p(limit + 1)}`;
+  const { rows } = await pool.query(sql, args);
+  const fatos = rows.slice(0, limit).map(mapFactRow);
+  const last = fatos[fatos.length - 1];
+  const next_cursor =
+    rows.length > limit && last
+      ? Buffer.from(`${last.valid_at}|${last.id}`).toString('base64url')
+      : null;
+  return { fatos, next_cursor };
+}
+
+// ── 13. Status vigente do projeto (spec §8.5) ──────────────────────────────
+
+export type ProjectStatusView = {
+  workspace_id: string;
+  content_md: string;
+  generated_at: string;
+  sources: Array<{ fact_id: number; episode_id: number | null }>;
+};
+
+/**
+ * Status descritivo vigente: a linha mais recente de `project_status` do
+ * workspace + suas fontes (com o episode_id do fato citado, p/ proveniência).
+ * null quando o workspace ainda não tem status (a Central mostra vazio honesto).
+ */
+export async function getStatusVigente(
+  workspaceId: string
+): Promise<ProjectStatusView | null> {
+  const { rows } = await pool.query<{
+    id: string;
+    content_md: string;
+    created_at: Date;
+  }>(
+    `SELECT id, content_md, created_at
+       FROM project_status
+      WHERE workspace_id = $1
+      ORDER BY created_at DESC
+      LIMIT 1`,
+    [workspaceId]
+  );
+  if (!rows[0]) return null;
+  const statusId = Number(rows[0].id);
+  const { rows: srcRows } = await pool.query<{
+    fact_id: string;
+    episode_id: string | null;
+  }>(
+    `SELECT pss.fact_id, f.episode_id
+       FROM project_status_sources pss
+       LEFT JOIN facts f ON f.id = pss.fact_id
+      WHERE pss.status_id = $1
+      ORDER BY pss.fact_id ASC`,
+    [statusId]
+  );
+  return {
+    workspace_id: workspaceId,
+    content_md: rows[0].content_md,
+    generated_at: rows[0].created_at.toISOString(),
+    sources: srcRows.map((s) => ({
+      fact_id: Number(s.fact_id),
+      episode_id: s.episode_id != null ? Number(s.episode_id) : null,
+    })),
+  };
+}
+
+// ── 14. Admin: observabilidade, DLQ e triagem (spec §7) ────────────────────
+
+export type RunRow = {
+  id: number;
+  kind: string;
+  run_date: string;
+  started_at: string;
+  finished_at: string | null;
+  status: string;
+  stats: Record<string, unknown>;
+  error: string | null;
+};
+
+/** Últimos runs com stats (mais recentes primeiro). */
+export async function listRuns(limit = 20): Promise<RunRow[]> {
+  const lim = Math.min(Math.max(limit, 1), 200);
+  const { rows } = await pool.query(
+    `SELECT id, kind, run_date, started_at, finished_at, status, stats, error
+       FROM lua_runs
+      ORDER BY started_at DESC
+      LIMIT $1`,
+    [lim]
+  );
+  return rows.map((r) => ({
+    id: Number(r.id),
+    kind: r.kind,
+    run_date:
+      r.run_date instanceof Date
+        ? r.run_date.toISOString().slice(0, 10)
+        : String(r.run_date),
+    started_at: (r.started_at as Date).toISOString(),
+    finished_at: r.finished_at ? (r.finished_at as Date).toISOString() : null,
+    status: r.status,
+    stats: r.stats ?? {},
+    error: r.error ?? null,
+  }));
+}
+
+/** Fila/DLQ de processamento, opcionalmente filtrada por status. */
+export async function listProcessing(args: {
+  status?: ProcessingStatus;
+  limit?: number;
+}): Promise<ProcessingRow[]> {
+  const lim = Math.min(Math.max(args.limit ?? 100, 1), 500);
+  const params: unknown[] = [];
+  let whereSql = '';
+  if (args.status) {
+    params.push(args.status);
+    whereSql = `WHERE status = $1`;
+  }
+  params.push(lim);
+  const { rows } = await pool.query<ProcessingRow>(
+    `SELECT * FROM lua_processing ${whereSql}
+      ORDER BY id DESC LIMIT $${params.length}`,
+    params
+  );
+  return rows;
+}
+
+/**
+ * Replay de DLQ (§7): `dead` → `pending`, zera attempt_count, libera lease,
+ * agenda imediato e PRESERVA last_error (rastro do que matou a linha). Só age
+ * sobre linhas `dead`. Retorna true se afetou.
+ */
+export async function replayDead(id: number): Promise<boolean> {
+  const { rowCount } = await pool.query(
+    `UPDATE lua_processing
+        SET status = 'pending', attempt_count = 0,
+            claimed_at = NULL, claimed_by = NULL, next_attempt_at = NOW()
+      WHERE id = $1 AND status = 'dead'`,
+    [id]
+  );
+  return (rowCount ?? 0) > 0;
+}
+
+/**
+ * Força reprocessamento de um episódio (§7, semântica de revision §4.6):
+ * enfileira/reseta a linha de processing da revision ATUAL do episódio para
+ * `pending` (attempt zerado, lease liberado, due agora). UPSERT por
+ * (episode_id, episode_revision). Retorna false se o episódio não existe.
+ */
+export async function forceReprocess(episodeId: number): Promise<boolean> {
+  const { rowCount } = await pool.query(
+    `INSERT INTO lua_processing (episode_id, episode_revision)
+     SELECT e.id, e.revision FROM episodes e WHERE e.id = $1
+     ON CONFLICT (episode_id, episode_revision) DO UPDATE
+        SET status = 'pending', attempt_count = 0,
+            claimed_at = NULL, claimed_by = NULL,
+            last_error = NULL, next_attempt_at = NOW()`,
+    [episodeId]
+  );
+  return (rowCount ?? 0) > 0;
+}
+
+/** Fatos flagados de um workspace para triagem (§7). */
+export async function listReviewFacts(workspaceId: string): Promise<FactRow[]> {
+  const { rows } = await pool.query(
+    `SELECT * FROM facts
+      WHERE workspace_id = $1 AND needs_review = TRUE
+      ORDER BY created_at DESC, id DESC`,
+    [workspaceId]
+  );
+  return rows.map(mapFactRow);
+}
+
+export type ResolveFactAction =
+  | { action: 'confirm' }
+  | { action: 'invalidate' }
+  | { action: 'supersede_by'; targetId: number };
+
+/**
+ * Resolução manual de um fato flagado (§7, auditoria implícita):
+ *  - confirm: limpa needs_review (o fato é legítimo).
+ *  - invalidate: invalid_at=NOW(), reason='manual', limpa needs_review.
+ *  - supersede_by: invalida apontando para o fato sucessor (reason='manual').
+ * Retorna true se afetou a linha.
+ */
+export async function resolveFact(
+  id: number,
+  resolution: ResolveFactAction
+): Promise<boolean> {
+  if (resolution.action === 'confirm') {
+    const { rowCount } = await pool.query(
+      `UPDATE facts SET needs_review = FALSE WHERE id = $1`,
+      [id]
+    );
+    return (rowCount ?? 0) > 0;
+  }
+  if (resolution.action === 'invalidate') {
+    const { rowCount } = await pool.query(
+      `UPDATE facts
+          SET invalid_at = NOW(), invalidation_reason = 'manual',
+              needs_review = FALSE
+        WHERE id = $1`,
+      [id]
+    );
+    return (rowCount ?? 0) > 0;
+  }
+  // supersede_by
+  const { rowCount } = await pool.query(
+    `UPDATE facts
+        SET invalid_at = NOW(), invalidation_reason = 'manual',
+            superseded_by_fact_id = $2, needs_review = FALSE
+      WHERE id = $1`,
+    [id, resolution.targetId]
+  );
+  return (rowCount ?? 0) > 0;
+}
+
+/** Apaga um recap (§14 #16: regenerar exige delete admin). */
+export async function deleteRecap(id: number): Promise<boolean> {
+  const { rowCount } = await pool.query(`DELETE FROM recaps WHERE id = $1`, [id]);
+  return (rowCount ?? 0) > 0;
 }

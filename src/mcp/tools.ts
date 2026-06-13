@@ -11,6 +11,7 @@ import {
 import { listEpisodes, getEpisode } from '../episodes/db.js';
 import { searchMemoria } from '../lua/search.js';
 import { getEmbeddingClient } from '../lua/embedding-provider.js';
+import { getFatos, getStatusVigente, type FactType } from '../lua/db.js';
 
 /**
  * Registra todas as tools no `server` com o `agent` baked-in via closure.
@@ -193,6 +194,73 @@ export function registerTools(server: McpServer, agent: string): void {
         { embeddingClient: getEmbeddingClient() }
       );
       return { content: [{ type: 'text', text: JSON.stringify(result) }] };
+    }
+  );
+
+  // ── get_fatos ──────────────────────────────────────────────────────────
+  server.registerTool(
+    'get_fatos',
+    {
+      description:
+        'Lista fatos tipados de um workspace (memória semântica). As-of bi-temporal: por padrão só os vigentes agora; `vigente_em` consulta "o que valia em T"; `include_invalid` traz o histórico. Cada fato carrega proveniência, `needs_review` (suspeita) e `superseded_by_fact_id` (cadeia). Keyset cursor para paginar.',
+      inputSchema: {
+        workspace_id: z.string(),
+        types: z.array(z.string()).optional(),
+        vigente_em: z.string().optional().describe('ISO timestamp (as-of)'),
+        include_invalid: z.boolean().optional(),
+        q: z.string().optional().describe('filtro lexical (tsquery PT-BR)'),
+        episode_id: z.number().int().optional(),
+        limit: z.number().int().optional(),
+        cursor: z.string().optional(),
+      },
+    },
+    async (input): Promise<CallToolResult> => {
+      const { fatos, next_cursor } = await getFatos(input.workspace_id, {
+        types: input.types as FactType[] | undefined,
+        vigenteEm: input.vigente_em,
+        includeInvalid: input.include_invalid,
+        q: input.q,
+        episodeId: input.episode_id,
+        limit: input.limit,
+        cursor: input.cursor,
+      });
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify({ schema: 'memoria_fatos_v1', fatos, next_cursor }),
+          },
+        ],
+      };
+    }
+  );
+
+  // ── get_status ─────────────────────────────────────────────────────────
+  server.registerTool(
+    'get_status',
+    {
+      description:
+        'Status descritivo vigente do projeto (poucas frases, objetivo — onde o projeto está agora). Consumo: visão geral da Central. Retorna content_md null quando o workspace ainda não tem status.',
+      inputSchema: { workspace_id: z.string() },
+    },
+    async ({ workspace_id }): Promise<CallToolResult> => {
+      const status = await getStatusVigente(workspace_id);
+      const payload = status
+        ? {
+            schema: 'status_v1',
+            workspace_id: status.workspace_id,
+            content_md: status.content_md,
+            generated_at: status.generated_at,
+            sources: status.sources,
+          }
+        : {
+            schema: 'status_v1',
+            workspace_id,
+            content_md: null,
+            generated_at: null,
+            sources: [],
+          };
+      return { content: [{ type: 'text', text: JSON.stringify(payload) }] };
     }
   );
 }

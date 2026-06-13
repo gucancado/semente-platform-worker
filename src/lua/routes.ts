@@ -1,8 +1,22 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { requireAgentToken } from '../auth.js';
+import { requireOwnerToken } from '../admin/auth.js';
 import { searchMemoria } from './search.js';
 import { getEmbeddingClient } from './embedding-provider.js';
+import {
+  getFatos,
+  getStatusVigente,
+  listRuns,
+  listProcessing,
+  replayDead,
+  forceReprocess,
+  listReviewFacts,
+  resolveFact,
+  deleteRecap,
+  type FactType,
+  type ProcessingStatus,
+} from './db.js';
 
 // Espelho REST de `search_memoria` (spec §8.6). Auth: X-Agent-Token (Lua,
 // Saturno, GUI). `q` e `workspace_id` obrigatorios; o resto opcional.
@@ -13,6 +27,55 @@ const SearchQuery = z.object({
   scope: z.enum(['episodios', 'fatos', 'ambos']).optional(),
   since: z.string().optional(),
   until: z.string().optional(),
+});
+
+const FACT_TYPES = [
+  'decisao', 'preferencia', 'restricao', 'compromisso', 'contexto',
+  'objetivo', 'ameaca', 'oportunidade', 'marco', 'papel',
+] as const;
+
+// `GET /memoria/fatos` (spec §8.3). types vem como CSV ou multi-valor.
+const FatosQuery = z.object({
+  workspace_id: z.string().min(1),
+  types: z
+    .union([z.string(), z.array(z.string())])
+    .optional()
+    .transform((v) =>
+      v == null
+        ? undefined
+        : (Array.isArray(v) ? v : v.split(',')).map((s) => s.trim()).filter(Boolean)
+    )
+    .pipe(z.array(z.enum(FACT_TYPES)).optional()),
+  vigente_em: z.string().optional(),
+  include_invalid: z
+    .enum(['true', 'false'])
+    .transform((v) => v === 'true')
+    .optional(),
+  q: z.string().optional(),
+  episode_id: z.coerce.number().int().positive().optional(),
+  limit: z.coerce.number().int().positive().max(200).optional(),
+  cursor: z.string().optional(),
+});
+
+const StatusQuery = z.object({ workspace_id: z.string().min(1) });
+
+// Admin (spec §7).
+const ProcessingQuery = z.object({
+  status: z
+    .enum(['pending', 'chunked', 'done', 'failed', 'dead', 'skipped'])
+    .optional(),
+  limit: z.coerce.number().int().positive().max(500).optional(),
+});
+const RunsQuery = z.object({
+  limit: z.coerce.number().int().positive().max(200).optional(),
+});
+const FactsAdminQuery = z.object({
+  workspace_id: z.string().min(1),
+  needs_review: z.enum(['true', 'false']).optional(),
+});
+const ResolveBody = z.object({
+  action: z.enum(['confirm', 'invalidate', 'supersede_by']),
+  targetId: z.number().int().positive().optional(),
 });
 
 export async function registerMemoriaRoutes(app: FastifyInstance): Promise<void> {
@@ -30,6 +93,124 @@ export async function registerMemoriaRoutes(app: FastifyInstance): Promise<void>
         { embeddingClient: getEmbeddingClient() }
       );
       return result;
+    });
+
+    // ── GET /memoria/fatos (§8.3) ─────────────────────────────────────────
+    scope.get('/memoria/fatos', async (req, reply) => {
+      const parsed = FatosQuery.safeParse(req.query);
+      if (!parsed.success) return reply.code(400).send({ error: parsed.error.message });
+      const d = parsed.data;
+      try {
+        const { fatos, next_cursor } = await getFatos(d.workspace_id, {
+          types: d.types as FactType[] | undefined,
+          vigenteEm: d.vigente_em,
+          includeInvalid: d.include_invalid,
+          q: d.q,
+          episodeId: d.episode_id,
+          limit: d.limit,
+          cursor: d.cursor,
+        });
+        return { schema: 'memoria_fatos_v1', workspace_id: d.workspace_id, fatos, next_cursor };
+      } catch (err) {
+        if (err instanceof Error && err.message === 'cursor inválido') {
+          return reply.code(400).send({ error: 'cursor inválido' });
+        }
+        throw err;
+      }
+    });
+
+    // ── GET /memoria/status (§8.5) ────────────────────────────────────────
+    scope.get('/memoria/status', async (req, reply) => {
+      const parsed = StatusQuery.safeParse(req.query);
+      if (!parsed.success) return reply.code(400).send({ error: parsed.error.message });
+      const status = await getStatusVigente(parsed.data.workspace_id);
+      if (!status) {
+        return {
+          schema: 'status_v1',
+          workspace_id: parsed.data.workspace_id,
+          content_md: null,
+          generated_at: null,
+          sources: [],
+        };
+      }
+      return {
+        schema: 'status_v1',
+        workspace_id: status.workspace_id,
+        content_md: status.content_md,
+        generated_at: status.generated_at,
+        sources: status.sources,
+      };
+    });
+  });
+
+  // ── Admin: X-Owner-Token (observabilidade, DLQ, triagem — §7) ───────────
+  app.register(async (scope) => {
+    scope.addHook('preHandler', requireOwnerToken);
+
+    scope.get('/admin/lua/runs', async (req, reply) => {
+      const parsed = RunsQuery.safeParse(req.query);
+      if (!parsed.success) return reply.code(400).send({ error: parsed.error.message });
+      return { runs: await listRuns(parsed.data.limit ?? 20) };
+    });
+
+    scope.get('/admin/lua/processing', async (req, reply) => {
+      const parsed = ProcessingQuery.safeParse(req.query);
+      if (!parsed.success) return reply.code(400).send({ error: parsed.error.message });
+      return {
+        processing: await listProcessing({
+          status: parsed.data.status as ProcessingStatus | undefined,
+          limit: parsed.data.limit,
+        }),
+      };
+    });
+
+    scope.post('/admin/lua/processing/:id/replay', async (req, reply) => {
+      const rawId = (req.params as { id: string }).id;
+      if (!/^\d+$/.test(rawId)) return reply.code(400).send({ error: 'id inválido' });
+      const ok = await replayDead(Number(rawId));
+      if (!ok) return reply.code(404).send({ error: 'linha não encontrada ou não está dead' });
+      return { ok: true };
+    });
+
+    scope.post('/admin/lua/episodes/:id/reprocess', async (req, reply) => {
+      const rawId = (req.params as { id: string }).id;
+      if (!/^\d+$/.test(rawId)) return reply.code(400).send({ error: 'id inválido' });
+      const ok = await forceReprocess(Number(rawId));
+      if (!ok) return reply.code(404).send({ error: 'episódio não encontrado' });
+      return { ok: true };
+    });
+
+    scope.get('/admin/lua/facts', async (req, reply) => {
+      const parsed = FactsAdminQuery.safeParse(req.query);
+      if (!parsed.success) return reply.code(400).send({ error: parsed.error.message });
+      // v1: o filtro de triagem é needs_review=true (§7). Sem o flag, devolve
+      // a mesma lista de flagados (a triagem é o único caso de uso admin hoje).
+      return { facts: await listReviewFacts(parsed.data.workspace_id) };
+    });
+
+    scope.patch('/admin/lua/facts/:id', async (req, reply) => {
+      const rawId = (req.params as { id: string }).id;
+      if (!/^\d+$/.test(rawId)) return reply.code(400).send({ error: 'id inválido' });
+      const parsed = ResolveBody.safeParse(req.body);
+      if (!parsed.success) return reply.code(400).send({ error: parsed.error.message });
+      const { action, targetId } = parsed.data;
+      if (action === 'supersede_by' && targetId == null) {
+        return reply.code(400).send({ error: 'targetId obrigatório para supersede_by' });
+      }
+      const ok =
+        action === 'supersede_by'
+          ? await resolveFact(Number(rawId), { action, targetId: targetId! })
+          : await resolveFact(Number(rawId), { action });
+      if (!ok) return reply.code(404).send({ error: 'fato não encontrado' });
+      return { ok: true };
+    });
+
+    scope.delete('/admin/lua/recaps/:id', async (req, reply) => {
+      const rawId = (req.params as { id: string }).id;
+      if (!/^\d+$/.test(rawId)) return reply.code(400).send({ error: 'id inválido' });
+      const ok = await deleteRecap(Number(rawId));
+      if (!ok) return reply.code(404).send({ error: 'recap não encontrado' });
+      return { ok: true };
     });
   });
 }
