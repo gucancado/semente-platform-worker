@@ -121,6 +121,19 @@ const EnvSchema = z.object({
   // ── Lua (memória) ── chave Anthropic p/ extração/judge/narrativa (Sonnet, spec §5.4).
   // Opcional: ausente não quebra startup; só o batch/bootstrap reais a exigem.
   ANTHROPIC_API_KEY: z.string().optional(),
+  // ── Lua (memória) ── parâmetros do subsistema. Todos com default sensato pra
+  // que o startup nunca quebre por falta de env. Modelos default Sonnet (§5.4).
+  // Master switch: default OFF — nada roda até o gate de eval + OK humano.
+  LUA_ENABLED: z.coerce.boolean().default(false),
+  // Janela noturna (hora local America/Sao_Paulo) [start, end).
+  LUA_WINDOW_START: z.coerce.number().int().min(0).max(23).default(2),
+  LUA_WINDOW_END: z.coerce.number().int().min(1).max(24).default(5),
+  LUA_CONCURRENCY: z.coerce.number().int().positive().default(2),
+  LUA_MAX_ATTEMPTS: z.coerce.number().int().positive().default(4),
+  LUA_EXTRACTION_MODEL: z.string().default('claude-sonnet-4-6'),
+  LUA_JUDGE_MODEL: z.string().default('claude-sonnet-4-6'),
+  LUA_RECAP_MODEL: z.string().default('claude-sonnet-4-6'),
+  LUA_EXTRACTION_MAX_INPUT: z.coerce.number().int().positive().default(60_000),
   R2_ENDPOINT: z.string().url().optional(),
   R2_ACCESS_KEY_ID: z.string().optional(),
   R2_SECRET_ACCESS_KEY: z.string().optional(),
