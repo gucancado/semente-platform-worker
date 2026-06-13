@@ -114,7 +114,7 @@ const EnvSchema = z.object({
   OUTBOX_MAX_ATTEMPTS: z.coerce.number().int().positive().default(8),
 
   // ── Repositório de transcrições ──
-  FIREFLIES_API_KEY: z.string().optional(),
+  FIREFLIES_API_KEY: z.string().optional().transform((s) => s?.trim() || undefined),
   // ── Lua (memória) ── chave OpenAI p/ embeddings (text-embedding-3-large@1024).
   // Opcional: ausente não quebra startup; só o batch/bootstrap reais a exigem.
   OPENAI_API_KEY: z.string().optional(),
