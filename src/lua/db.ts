@@ -1047,3 +1047,361 @@ export async function getWeekFacts(
     status: r.status as 'novo' | 'invalidado',
   }));
 }
+
+// ── 16. Ciclo de condutas (spec §9 / migration 022) ─────────────────────────
+// Toda transicao de estado de conduta roda dentro de uma TX que abre com o
+// advisory lock por workspace (pg_advisory_xact_lock(hashtext('conduta:'||ws)))
+// — serializa propostas/aprovacoes concorrentes (corrida no max(version)+1 e nos
+// indices parciais one_active/one_proposed, achados Codex #8/#9). Os helpers
+// abaixo recebem o PoolClient ja dentro dessa TX travada.
+
+export type CondutaStatus = 'proposed' | 'active' | 'rejected' | 'superseded';
+
+export type CondutaRow = {
+  id: number;
+  workspace_id: string;
+  version: number;
+  status: CondutaStatus;
+  content_md: string;
+  proposed_by: string;
+  approval_task_id: string | null;
+  approved_by: string | null;
+  approved_at: string | null;
+  rejection_note: string | null;
+  created_at: string;
+};
+
+export type EligibleConductaFact = {
+  id: number;
+  fact_type: string;
+  statement: string;
+  attributes: Record<string, unknown>;
+  valid_at: string;
+  episode_id: number;
+  turn_start: number;
+  turn_end: number;
+};
+
+/** Abre o advisory lock transacional por workspace (spec §9.3, Codex #8/#9). */
+export async function lockCondutaWorkspace(
+  client: PoolClient,
+  workspaceId: string
+): Promise<void> {
+  await client.query(`SELECT pg_advisory_xact_lock(hashtext('conduta:' || $1))`, [
+    workspaceId,
+  ]);
+}
+
+/**
+ * Fatos elegiveis para disparar/embasar uma proposta de conduta (spec §9.1):
+ * vigentes (invalid_at IS NULL) de tipo `preferencia`/`restricao`/`decisao`
+ * criados/alterados DESDE a ultima conduta (proposta ou ativa) do workspace.
+ * `since` = created_at da conduta mais recente (null no 1o ciclo => todos).
+ * Decisao sobre processo entra via `decisao`; o gatilho semanal e o filtro de
+ * tipo cobrem "decisao recorrente sobre processo" no nivel da proposta.
+ */
+export async function getEligibleFactsForConduta(
+  workspaceId: string,
+  since: Date | string | null
+): Promise<EligibleConductaFact[]> {
+  const params: unknown[] = [workspaceId];
+  let sinceClause = '';
+  if (since != null) {
+    params.push(since);
+    sinceClause = `AND created_at > $2::timestamptz`;
+  }
+  const { rows } = await pool.query(
+    `SELECT id, fact_type, statement, attributes, valid_at,
+            episode_id, turn_start, turn_end
+       FROM facts
+      WHERE workspace_id = $1
+        AND invalid_at IS NULL
+        AND fact_type IN ('preferencia', 'restricao', 'decisao')
+        ${sinceClause}
+      ORDER BY
+        CASE fact_type
+          WHEN 'preferencia' THEN 1
+          WHEN 'restricao'   THEN 1
+          WHEN 'decisao'     THEN 2
+          ELSE 3
+        END ASC,
+        valid_at ASC, id ASC`,
+    params
+  );
+  return rows.map((r) => ({
+    id: Number(r.id),
+    fact_type: r.fact_type as string,
+    statement: r.statement as string,
+    attributes: (r.attributes as Record<string, unknown>) ?? {},
+    valid_at: (r.valid_at as Date).toISOString(),
+    episode_id: Number(r.episode_id),
+    turn_start: Number(r.turn_start),
+    turn_end: Number(r.turn_end),
+  }));
+}
+
+/**
+ * created_at da conduta mais recente do workspace (qualquer status) — serve de
+ * marco "desde a ultima proposta/versao" para o gatilho (spec §9.1). null se o
+ * workspace nunca teve conduta.
+ */
+export async function lastCondutaCreatedAt(
+  workspaceId: string
+): Promise<Date | null> {
+  const { rows } = await pool.query<{ created_at: Date }>(
+    `SELECT created_at FROM condutas
+      WHERE workspace_id = $1
+      ORDER BY created_at DESC, id DESC
+      LIMIT 1`,
+    [workspaceId]
+  );
+  return rows[0] ? rows[0].created_at : null;
+}
+
+/**
+ * Valida que todos os fact_ids citados existem, sao vigentes e do workspace
+ * certo (spec §9.2). Retorna a lista dos validos; o caller compara contagem
+ * para detectar citacao inventada e descartar a proposta.
+ */
+export async function validateConductaFactIds(
+  workspaceId: string,
+  factIds: number[]
+): Promise<Set<number>> {
+  if (factIds.length === 0) return new Set();
+  const { rows } = await pool.query<{ id: string }>(
+    `SELECT id FROM facts
+      WHERE id = ANY($1::bigint[])
+        AND workspace_id = $2
+        AND invalid_at IS NULL`,
+    [factIds, workspaceId]
+  );
+  return new Set(rows.map((r) => Number(r.id)));
+}
+
+/** Proxima versao monotonica de conduta do workspace (dentro da TX travada). */
+export async function nextCondutaVersion(
+  client: PoolClient,
+  workspaceId: string
+): Promise<number> {
+  const { rows } = await client.query<{ v: number | null }>(
+    `SELECT MAX(version) AS v FROM condutas WHERE workspace_id = $1`,
+    [workspaceId]
+  );
+  return (rows[0]?.v ?? 0) + 1;
+}
+
+/**
+ * Rejeita a proposta pendente anterior do workspace (spec §9.3): status
+ * `rejected`, rejection_note `superseded_by_newer_proposal`. Roda ANTES do
+ * INSERT da nova (a ordem inversa violaria idx_condutas_one_proposed).
+ */
+export async function rejectPendingProposalsTx(
+  client: PoolClient,
+  workspaceId: string
+): Promise<void> {
+  await client.query(
+    `UPDATE condutas
+        SET status = 'rejected', rejection_note = 'superseded_by_newer_proposal'
+      WHERE workspace_id = $1 AND status = 'proposed'`,
+    [workspaceId]
+  );
+}
+
+/** Insere a conduta `proposed` nova (dentro da TX travada). Retorna o id. */
+export async function insertProposedCondutaTx(
+  client: PoolClient,
+  args: { workspaceId: string; version: number; contentMd: string }
+): Promise<number> {
+  const { rows } = await client.query<{ id: string }>(
+    `INSERT INTO condutas (workspace_id, version, status, content_md, proposed_by)
+     VALUES ($1, $2, 'proposed', $3, 'lua')
+     RETURNING id`,
+    [args.workspaceId, args.version, args.contentMd]
+  );
+  return Number(rows[0]!.id);
+}
+
+/** Insere uma regra + suas fontes (fact_ids) de uma conduta (TX travada). */
+export async function insertCondutaRuleTx(
+  client: PoolClient,
+  args: { condutaId: number; ruleIndex: number; text: string; factIds: number[] }
+): Promise<void> {
+  const { rows } = await client.query<{ id: string }>(
+    `INSERT INTO conduta_rules (conduta_id, rule_index, text)
+     VALUES ($1, $2, $3) RETURNING id`,
+    [args.condutaId, args.ruleIndex, args.text]
+  );
+  const ruleId = Number(rows[0]!.id);
+  for (const factId of args.factIds) {
+    await client.query(
+      `INSERT INTO conduta_rule_sources (rule_id, fact_id)
+       VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+      [ruleId, factId]
+    );
+  }
+}
+
+/** Grava o id da tarefa Bloquim (portao) na conduta (spec §9.4). */
+export async function setCondutaApprovalTaskTx(
+  client: PoolClient,
+  condutaId: number,
+  approvalTaskId: string
+): Promise<void> {
+  await client.query(
+    `UPDATE condutas SET approval_task_id = $2 WHERE id = $1`,
+    [condutaId, approvalTaskId]
+  );
+}
+
+/** Conduta por id (qualquer status). null se nao existe. */
+export async function getCondutaById(id: number): Promise<CondutaRow | null> {
+  const { rows } = await pool.query(
+    `SELECT id, workspace_id, version, status, content_md, proposed_by,
+            approval_task_id, approved_by, approved_at, rejection_note, created_at
+       FROM condutas WHERE id = $1`,
+    [id]
+  );
+  if (!rows[0]) return null;
+  const r = rows[0];
+  return {
+    id: Number(r.id),
+    workspace_id: r.workspace_id as string,
+    version: Number(r.version),
+    status: r.status as CondutaStatus,
+    content_md: r.content_md as string,
+    proposed_by: r.proposed_by as string,
+    approval_task_id: (r.approval_task_id as string | null) ?? null,
+    approved_by: (r.approved_by as string | null) ?? null,
+    approved_at: r.approved_at ? (r.approved_at as Date).toISOString() : null,
+    rejection_note: (r.rejection_note as string | null) ?? null,
+    created_at: (r.created_at as Date).toISOString(),
+  };
+}
+
+/**
+ * Supersede a conduta ativa anterior do workspace (spec §9.5): status
+ * `superseded`. Roda ANTES de ativar a proposta (a ordem inversa violaria
+ * idx_condutas_one_active).
+ */
+export async function supersedeActiveCondutaTx(
+  client: PoolClient,
+  workspaceId: string,
+  exceptId: number
+): Promise<void> {
+  await client.query(
+    `UPDATE condutas
+        SET status = 'superseded'
+      WHERE workspace_id = $1 AND status = 'active' AND id <> $2`,
+    [workspaceId, exceptId]
+  );
+}
+
+/**
+ * Ativa uma conduta `proposed` (spec §9.5): status `active`, approved_by,
+ * approved_at=NOW(); opcionalmente substitui o content_md (emenda humana) e
+ * marca proposed_by='human:<id>' (o humano e autor da emenda). Dentro da TX
+ * travada, DEPOIS de supersedeActiveCondutaTx.
+ */
+export async function activateCondutaTx(
+  client: PoolClient,
+  args: { id: number; approvedBy: string; contentMdOverride?: string }
+): Promise<void> {
+  if (args.contentMdOverride !== undefined) {
+    await client.query(
+      `UPDATE condutas
+          SET status = 'active', approved_by = $2, approved_at = NOW(),
+              content_md = $3, proposed_by = $4
+        WHERE id = $1`,
+      [args.id, args.approvedBy, args.contentMdOverride, `human:${args.approvedBy}`]
+    );
+  } else {
+    await client.query(
+      `UPDATE condutas
+          SET status = 'active', approved_by = $2, approved_at = NOW()
+        WHERE id = $1`,
+      [args.id, args.approvedBy]
+    );
+  }
+}
+
+/** Rejeita uma conduta (spec §9.5): status `rejected`, rejection_note. */
+export async function rejectCondutaTx(
+  client: PoolClient,
+  id: number,
+  note: string
+): Promise<void> {
+  await client.query(
+    `UPDATE condutas SET status = 'rejected', rejection_note = $2 WHERE id = $1`,
+    [id, note]
+  );
+}
+
+/** Regra de conduta no formato de leitura (get_condutas, §8.1). */
+export type CondutaRuleView = {
+  rule_index: number;
+  text: string;
+  sources: Array<{
+    fact_id: number;
+    episode_id: number;
+    turn_start: number;
+    turn_end: number;
+  }>;
+};
+
+export type ActiveCondutaView = {
+  workspace_id: string;
+  version: number;
+  approved_at: string | null;
+  content_md: string;
+  rules: CondutaRuleView[];
+};
+
+/**
+ * Conduta ATIVA do workspace com regras + fontes (proveniencia fato→episodio+
+ * janela de turnos), para get_condutas (§8.1). null se nao ha ativa.
+ */
+export async function getActiveConduta(
+  workspaceId: string
+): Promise<ActiveCondutaView | null> {
+  const { rows } = await pool.query(
+    `SELECT id, version, approved_at, content_md
+       FROM condutas
+      WHERE workspace_id = $1 AND status = 'active'
+      LIMIT 1`,
+    [workspaceId]
+  );
+  if (!rows[0]) return null;
+  const condutaId = Number(rows[0].id);
+  const { rows: ruleRows } = await pool.query(
+    `SELECT cr.id, cr.rule_index, cr.text,
+            crs.fact_id, f.episode_id, f.turn_start, f.turn_end
+       FROM conduta_rules cr
+       LEFT JOIN conduta_rule_sources crs ON crs.rule_id = cr.id
+       LEFT JOIN facts f ON f.id = crs.fact_id
+      WHERE cr.conduta_id = $1
+      ORDER BY cr.rule_index ASC, crs.fact_id ASC`,
+    [condutaId]
+  );
+  const byRule = new Map<number, CondutaRuleView>();
+  for (const r of ruleRows) {
+    const idx = Number(r.rule_index);
+    if (!byRule.has(idx)) {
+      byRule.set(idx, { rule_index: idx, text: r.text as string, sources: [] });
+    }
+    if (r.fact_id != null) {
+      byRule.get(idx)!.sources.push({
+        fact_id: Number(r.fact_id),
+        episode_id: Number(r.episode_id),
+        turn_start: Number(r.turn_start),
+        turn_end: Number(r.turn_end),
+      });
+    }
+  }
+  return {
+    workspace_id: workspaceId,
+    version: Number(rows[0].version),
+    approved_at: rows[0].approved_at ? (rows[0].approved_at as Date).toISOString() : null,
+    content_md: rows[0].content_md as string,
+    rules: Array.from(byRule.values()).sort((a, b) => a.rule_index - b.rule_index),
+  };
+}

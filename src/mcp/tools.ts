@@ -11,7 +11,7 @@ import {
 import { listEpisodes, getEpisode } from '../episodes/db.js';
 import { searchMemoria } from '../lua/search.js';
 import { getEmbeddingClient } from '../lua/embedding-provider.js';
-import { getFatos, getStatusVigente, getRecapByWeek, type FactType } from '../lua/db.js';
+import { getFatos, getStatusVigente, getRecapByWeek, getActiveConduta, type FactType } from '../lua/db.js';
 import { resolveRecapPeriodStart } from '../lua/narrativa.js';
 
 /**
@@ -260,6 +260,36 @@ export function registerTools(server: McpServer, agent: string): void {
             content_md: null,
             generated_at: null,
             sources: [],
+          };
+      return { content: [{ type: 'text', text: JSON.stringify(payload) }] };
+    }
+  );
+
+  // ── get_condutas ───────────────────────────────────────────────────────
+  server.registerTool(
+    'get_condutas',
+    {
+      description:
+        'Conduta ativa (memória procedural) de um workspace: o documento de modo de agir INJETADO no contexto do agente ao iniciar trabalho no projeto. Retorna version, content_md e rules[] (cada regra com proveniência: fact_id + episódio + janela de turnos). content_md/version null quando não há conduta ativa.',
+      inputSchema: { workspace_id: z.string() },
+    },
+    async ({ workspace_id }): Promise<CallToolResult> => {
+      const conduta = await getActiveConduta(workspace_id);
+      const payload = conduta
+        ? {
+            schema: 'conduta_v1',
+            workspace_id: conduta.workspace_id,
+            version: conduta.version,
+            approved_at: conduta.approved_at,
+            content_md: conduta.content_md,
+            rules: conduta.rules,
+          }
+        : {
+            schema: 'conduta_v1',
+            workspace_id,
+            version: null,
+            content_md: null,
+            rules: [],
           };
       return { content: [{ type: 'text', text: JSON.stringify(payload) }] };
     }

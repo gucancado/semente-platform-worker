@@ -8,6 +8,7 @@ import {
   getFatos,
   getStatusVigente,
   getRecapByWeek,
+  getActiveConduta,
   listRuns,
   listProcessing,
   replayDead,
@@ -18,6 +19,7 @@ import {
   type FactType,
   type ProcessingStatus,
 } from './db.js';
+import { approveConduta, rejectConduta } from './condutas.js';
 import { resolveRecapPeriodStart } from './narrativa.js';
 
 // Espelho REST de `search_memoria` (spec §8.6). Auth: X-Agent-Token (Lua,
@@ -88,6 +90,13 @@ const ResolveBody = z.object({
   targetId: z.number().int().positive().optional(),
 });
 
+const CondutasQuery = z.object({ workspace_id: z.string().min(1) });
+const ApproveCondutaBody = z.object({
+  approved_by: z.string().min(1),
+  content_md: z.string().min(1).optional(),
+});
+const RejectCondutaBody = z.object({ note: z.string().min(1) });
+
 export async function registerMemoriaRoutes(app: FastifyInstance): Promise<void> {
   // ── Leitura: X-Agent-Token (Lua, Saturno, GUI) ──────────────────────────
   app.register(async (scope) => {
@@ -149,6 +158,30 @@ export async function registerMemoriaRoutes(app: FastifyInstance): Promise<void>
         content_md: status.content_md,
         generated_at: status.generated_at,
         sources: status.sources,
+      };
+    });
+
+    // ── GET /memoria/condutas (§8.1) ──────────────────────────────────────
+    scope.get('/memoria/condutas', async (req, reply) => {
+      const parsed = CondutasQuery.safeParse(req.query);
+      if (!parsed.success) return reply.code(400).send({ error: parsed.error.message });
+      const conduta = await getActiveConduta(parsed.data.workspace_id);
+      if (!conduta) {
+        return {
+          schema: 'conduta_v1',
+          workspace_id: parsed.data.workspace_id,
+          version: null,
+          content_md: null,
+          rules: [],
+        };
+      }
+      return {
+        schema: 'conduta_v1',
+        workspace_id: conduta.workspace_id,
+        version: conduta.version,
+        approved_at: conduta.approved_at,
+        content_md: conduta.content_md,
+        rules: conduta.rules,
       };
     });
 
@@ -251,6 +284,42 @@ export async function registerMemoriaRoutes(app: FastifyInstance): Promise<void>
       if (!/^\d+$/.test(rawId)) return reply.code(400).send({ error: 'id inválido' });
       const ok = await deleteRecap(Number(rawId));
       if (!ok) return reply.code(404).send({ error: 'recap não encontrado' });
+      return { ok: true };
+    });
+
+    // ── Portao de conduta (§9.5): aprovar / rejeitar sob X-Owner-Token ──────
+    scope.post('/admin/condutas/:id/approve', async (req, reply) => {
+      const rawId = (req.params as { id: string }).id;
+      if (!/^\d+$/.test(rawId)) return reply.code(400).send({ error: 'id inválido' });
+      const parsed = ApproveCondutaBody.safeParse(req.body);
+      if (!parsed.success) return reply.code(400).send({ error: parsed.error.message });
+      try {
+        await approveConduta(Number(rawId), {
+          approvedBy: parsed.data.approved_by,
+          contentMdOverride: parsed.data.content_md,
+        });
+      } catch (err) {
+        if (err instanceof Error && err.message === 'conduta nao encontrada') {
+          return reply.code(404).send({ error: 'conduta não encontrada' });
+        }
+        throw err;
+      }
+      return { ok: true };
+    });
+
+    scope.post('/admin/condutas/:id/reject', async (req, reply) => {
+      const rawId = (req.params as { id: string }).id;
+      if (!/^\d+$/.test(rawId)) return reply.code(400).send({ error: 'id inválido' });
+      const parsed = RejectCondutaBody.safeParse(req.body);
+      if (!parsed.success) return reply.code(400).send({ error: parsed.error.message });
+      try {
+        await rejectConduta(Number(rawId), { note: parsed.data.note });
+      } catch (err) {
+        if (err instanceof Error && err.message === 'conduta nao encontrada') {
+          return reply.code(404).send({ error: 'conduta não encontrada' });
+        }
+        throw err;
+      }
       return { ok: true };
     });
   });
