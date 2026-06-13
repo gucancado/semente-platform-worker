@@ -281,8 +281,16 @@ async function reconcileIntraEpisode(
         // do episodio; o supersede vale a partir do momento do episodio).
         const earlier = a.turnStart <= b.turnStart ? a : b;
         const later = earlier === a ? b : a;
-        earlier.bornInvalid = { invalidAt: occurred, reason: 'superseded' };
-        supersedePairs.push({ earlierIdx: earlier.index, laterIdx: later.index });
+        // §6.5: candidato com confidence < 0.5 NUNCA age como N de supersede
+        // automatico (espelha o guard inter-episodio). Rebaixa para contradicts
+        // (ambos vigentes + needs_review) — conflito visivel > invalidacao silenciosa.
+        if (later.confidence < LOW_CONFIDENCE) {
+          a.needsReview = true;
+          b.needsReview = true;
+        } else {
+          earlier.bornInvalid = { invalidAt: occurred, reason: 'superseded' };
+          supersedePairs.push({ earlierIdx: earlier.index, laterIdx: later.index });
+        }
       } else if (verdict === 'contradicts') {
         // Ambos mantidos, ambos needs_review (§6.4 #4).
         a.needsReview = true;

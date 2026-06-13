@@ -552,6 +552,32 @@ test('intra-episodio supersedes: o de turn_start MAIOR vence; o anterior nasce i
   assert.equal(anterior.invalidation_reason, 'superseded');
 });
 
+test('intra-episodio supersedes com winner confidence < 0.5: NAO invalida; ambos vigentes + needs_review (§6.5)', async () => {
+  const ep = await seedEpisode({ externalId: 'a', workspaceId: WS, occurredAt: '2026-05-01T00:00:00Z' });
+  const res = await runReconcile(
+    {
+      workspaceId: WS, episodeId: ep, occurredAt: '2026-05-01T00:00:00Z',
+      candidates: [
+        candidate({ statement: 'verba de 5k', turn_start: 10, turn_end: 11, confidence: 0.9 }), // anterior, alta confianca
+        candidate({ statement: 'talvez 6k', turn_start: 40, turn_end: 41, confidence: 0.4 }), // posterior, baixa: NAO pode vencer como N
+      ],
+    },
+    {
+      embeddingClient: makeFakeEmbedding({ 'verba de 5k': 21, 'talvez 6k': 21 }),
+      judge: makeFakeJudge({ 'verba de 5k::talvez 6k': 'supersedes' }),
+    }
+  );
+
+  assert.equal(res.inserted, 2, 'ambas preservadas');
+  const facts = await fetchFacts(WS);
+  const anterior = facts.find((f) => f.statement === 'verba de 5k')!;
+  const posterior = facts.find((f) => f.statement === 'talvez 6k')!;
+  assert.equal(anterior.invalid_at, null, 'alta confianca NAO invalidada por candidato de baixa confianca');
+  assert.equal(posterior.invalid_at, null, 'baixa confianca nao age como N de supersede');
+  assert.equal(anterior.needs_review, true, 'conflito visivel (needs_review) em vez de invalidacao silenciosa');
+  assert.equal(posterior.needs_review, true);
+});
+
 // ── 11. confidence < 0.5 → needs_review e nunca supersede automático como N ─
 
 test('confianca < 0.5: insere com needs_review e NUNCA invalida outro como N', async () => {
