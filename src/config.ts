@@ -118,6 +118,9 @@ const EnvSchema = z.object({
   // ── Lua (memória) ── chave OpenAI p/ embeddings (text-embedding-3-large@1024).
   // Opcional: ausente não quebra startup; só o batch/bootstrap reais a exigem.
   OPENAI_API_KEY: z.string().optional(),
+  // ── Lua (memória) ── chave Anthropic p/ extração/judge/narrativa (Sonnet, spec §5.4).
+  // Opcional: ausente não quebra startup; só o batch/bootstrap reais a exigem.
+  ANTHROPIC_API_KEY: z.string().optional(),
   R2_ENDPOINT: z.string().url().optional(),
   R2_ACCESS_KEY_ID: z.string().optional(),
   R2_SECRET_ACCESS_KEY: z.string().optional(),
