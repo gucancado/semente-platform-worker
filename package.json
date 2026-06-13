@@ -13,7 +13,8 @@
     "test:watch": "node --test --watch --import tsx tests/**/*.test.ts",
     "typecheck": "tsc --noEmit",
     "lint": "eslint src/**/*.ts",
-    "import:fireflies": "tsx src/cli/import-fireflies.ts"
+    "import:fireflies": "tsx src/cli/import-fireflies.ts",
+    "lua:bootstrap": "tsx src/cli/lua-bootstrap.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.104.1",
