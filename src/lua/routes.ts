@@ -7,6 +7,7 @@ import { getEmbeddingClient } from './embedding-provider.js';
 import {
   getFatos,
   getStatusVigente,
+  getRecapByWeek,
   listRuns,
   listProcessing,
   replayDead,
@@ -17,6 +18,7 @@ import {
   type FactType,
   type ProcessingStatus,
 } from './db.js';
+import { resolveRecapPeriodStart } from './narrativa.js';
 
 // Espelho REST de `search_memoria` (spec §8.6). Auth: X-Agent-Token (Lua,
 // Saturno, GUI). `q` e `workspace_id` obrigatorios; o resto opcional.
@@ -58,6 +60,14 @@ const FatosQuery = z.object({
 });
 
 const StatusQuery = z.object({ workspace_id: z.string().min(1) });
+
+// `GET /memoria/recap` (spec §8.4). `week` (YYYY-Www) ou `start` (YYYY-MM-DD);
+// default: semana ISO anterior. Resposta recap_v1 (content_md null se nao gerado).
+const RecapQuery = z.object({
+  workspace_id: z.string().min(1),
+  week: z.string().optional(),
+  start: z.string().optional(),
+});
 
 // Admin (spec §7).
 const ProcessingQuery = z.object({
@@ -139,6 +149,37 @@ export async function registerMemoriaRoutes(app: FastifyInstance): Promise<void>
         content_md: status.content_md,
         generated_at: status.generated_at,
         sources: status.sources,
+      };
+    });
+
+    // ── GET /memoria/recap (§8.4) ─────────────────────────────────────────
+    scope.get('/memoria/recap', async (req, reply) => {
+      const parsed = RecapQuery.safeParse(req.query);
+      if (!parsed.success) return reply.code(400).send({ error: parsed.error.message });
+      let periodStart: string;
+      try {
+        periodStart = resolveRecapPeriodStart({ week: parsed.data.week, start: parsed.data.start });
+      } catch {
+        return reply.code(400).send({ error: 'periodo inválido' });
+      }
+      const recap = await getRecapByWeek(parsed.data.workspace_id, periodStart);
+      if (!recap) {
+        return {
+          schema: 'recap_v1',
+          workspace_id: parsed.data.workspace_id,
+          period_start: periodStart,
+          period_end: null,
+          content_md: null,
+          sources: [],
+        };
+      }
+      return {
+        schema: 'recap_v1',
+        workspace_id: recap.workspace_id,
+        period_start: recap.period_start,
+        period_end: recap.period_end,
+        content_md: recap.content_md,
+        sources: recap.sources,
       };
     });
   });

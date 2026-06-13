@@ -11,7 +11,8 @@ import {
 import { listEpisodes, getEpisode } from '../episodes/db.js';
 import { searchMemoria } from '../lua/search.js';
 import { getEmbeddingClient } from '../lua/embedding-provider.js';
-import { getFatos, getStatusVigente, type FactType } from '../lua/db.js';
+import { getFatos, getStatusVigente, getRecapByWeek, type FactType } from '../lua/db.js';
+import { resolveRecapPeriodStart } from '../lua/narrativa.js';
 
 /**
  * Registra todas as tools no `server` com o `agent` baked-in via closure.
@@ -258,6 +259,42 @@ export function registerTools(server: McpServer, agent: string): void {
             workspace_id,
             content_md: null,
             generated_at: null,
+            sources: [],
+          };
+      return { content: [{ type: 'text', text: JSON.stringify(payload) }] };
+    }
+  );
+
+  // ── get_recap ──────────────────────────────────────────────────────────
+  server.registerTool(
+    'get_recap',
+    {
+      description:
+        'Recap semanal (narradora) de um workspace. `week` (YYYY-Www) ou `start` (YYYY-MM-DD da segunda); default: semana ISO anterior. Retorna recap_v1 com content_md e sources (episode_ids); content_md null quando não gerado.',
+      inputSchema: {
+        workspace_id: z.string(),
+        week: z.string().optional().describe('semana ISO (YYYY-Www)'),
+        start: z.string().optional().describe('segunda-feira da semana (YYYY-MM-DD)'),
+      },
+    },
+    async ({ workspace_id, week, start }): Promise<CallToolResult> => {
+      const periodStart = resolveRecapPeriodStart({ week, start });
+      const recap = await getRecapByWeek(workspace_id, periodStart);
+      const payload = recap
+        ? {
+            schema: 'recap_v1',
+            workspace_id: recap.workspace_id,
+            period_start: recap.period_start,
+            period_end: recap.period_end,
+            content_md: recap.content_md,
+            sources: recap.sources,
+          }
+        : {
+            schema: 'recap_v1',
+            workspace_id,
+            period_start: periodStart,
+            period_end: null,
+            content_md: null,
             sources: [],
           };
       return { content: [{ type: 'text', text: JSON.stringify(payload) }] };

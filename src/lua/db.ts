@@ -787,3 +787,263 @@ export async function deleteRecap(id: number): Promise<boolean> {
   const { rowCount } = await pool.query(`DELETE FROM recaps WHERE id = $1`, [id]);
   return (rowCount ?? 0) > 0;
 }
+
+// ── 15. Narradora: status do projeto + recap semanal (spec §10) ─────────────
+
+/** Linha de fato como insumo da narradora (sem embedding/tsv). */
+export type StatusFactRow = {
+  id: number;
+  fact_type: string;
+  statement: string;
+  attributes: Record<string, unknown>;
+  valid_at: string;
+};
+
+/**
+ * Fatos VIGENTES (invalid_at IS NULL) e NAO-flagados (needs_review=false) de um
+ * workspace, priorizados por tipo para a sintese do status (spec §10.2):
+ *   objetivo/decisao (parametros atuais) -> compromisso (due dates) ->
+ *   ameaca/oportunidade -> marco (recente) -> papel.
+ * Status NAO publica suspeita, entao `needs_review` fica de fora.
+ * Empate de prioridade: valid_at DESC (mais recente primeiro).
+ */
+export async function getVigenteFactsForStatus(
+  workspaceId: string
+): Promise<StatusFactRow[]> {
+  const { rows } = await pool.query(
+    `SELECT id, fact_type, statement, attributes, valid_at
+       FROM facts
+      WHERE workspace_id = $1
+        AND invalid_at IS NULL
+        AND needs_review = FALSE
+      ORDER BY
+        CASE fact_type
+          WHEN 'objetivo'     THEN 1
+          WHEN 'decisao'      THEN 1
+          WHEN 'compromisso'  THEN 2
+          WHEN 'ameaca'       THEN 3
+          WHEN 'oportunidade' THEN 3
+          WHEN 'marco'        THEN 4
+          WHEN 'papel'        THEN 5
+          ELSE 6
+        END ASC,
+        valid_at DESC, id DESC`,
+    [workspaceId]
+  );
+  return rows.map((r) => ({
+    id: Number(r.id),
+    fact_type: r.fact_type as string,
+    statement: r.statement as string,
+    attributes: (r.attributes as Record<string, unknown>) ?? {},
+    valid_at: (r.valid_at as Date).toISOString(),
+  }));
+}
+
+/**
+ * Append-only de um status de projeto (spec §10.2 / §4.4). Insere a linha de
+ * `project_status` + as fontes (`project_status_sources`, fatos usados) numa TX.
+ * Retorna o id novo.
+ */
+export async function insertProjectStatus(args: {
+  workspaceId: string;
+  contentMd: string;
+  model: string;
+  runId?: number | null;
+  factIds: number[];
+}): Promise<number> {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const { rows } = await client.query<{ id: string }>(
+      `INSERT INTO project_status (workspace_id, content_md, model, run_id)
+       VALUES ($1, $2, $3, $4) RETURNING id`,
+      [args.workspaceId, args.contentMd, args.model, args.runId ?? null]
+    );
+    const statusId = Number(rows[0]!.id);
+    for (const factId of args.factIds) {
+      await client.query(
+        `INSERT INTO project_status_sources (status_id, fact_id)
+         VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+        [statusId, factId]
+      );
+    }
+    await client.query('COMMIT');
+    return statusId;
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+/** Recap persistido (formato de leitura get_recap, §8.4). */
+export type RecapRow = {
+  id: number;
+  workspace_id: string;
+  period_start: string;
+  period_end: string;
+  content_md: string;
+  sources: number[];
+};
+
+function mapRecapRow(
+  r: { id: string; workspace_id: string; period_start: Date | string; period_end: Date | string; content_md: string },
+  sources: number[]
+): RecapRow {
+  const toDate = (v: Date | string) =>
+    v instanceof Date ? v.toISOString().slice(0, 10) : String(v).slice(0, 10);
+  return {
+    id: Number(r.id),
+    workspace_id: r.workspace_id,
+    period_start: toDate(r.period_start),
+    period_end: toDate(r.period_end),
+    content_md: r.content_md,
+    sources,
+  };
+}
+
+/** Recap de uma semana (workspace + period_start). null se nao existir. */
+export async function getRecapByWeek(
+  workspaceId: string,
+  periodStart: string
+): Promise<RecapRow | null> {
+  const { rows } = await pool.query(
+    `SELECT id, workspace_id, period_start, period_end, content_md
+       FROM recaps
+      WHERE workspace_id = $1 AND period_start = $2::date`,
+    [workspaceId, periodStart]
+  );
+  if (!rows[0]) return null;
+  const id = Number(rows[0].id);
+  const { rows: src } = await pool.query<{ episode_id: string }>(
+    `SELECT episode_id FROM recap_sources WHERE recap_id = $1 ORDER BY episode_id`,
+    [id]
+  );
+  return mapRecapRow(rows[0] as never, src.map((s) => Number(s.episode_id)));
+}
+
+/**
+ * Insere um recap idempotente por semana (spec §10.1 / UNIQUE workspace+period_start):
+ * ON CONFLICT DO NOTHING. Retorna o id (novo OU o existente, sem reescrever o
+ * conteudo). `created` indica se a linha foi de fato inserida agora — o caller
+ * usa isso para NAO regravar fontes de um recap pre-existente.
+ */
+export async function insertRecap(args: {
+  workspaceId: string;
+  periodStart: string;
+  periodEnd: string;
+  contentMd: string;
+  model: string;
+  runId?: number | null;
+  episodeIds: number[];
+}): Promise<{ id: number; created: boolean }> {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const ins = await client.query<{ id: string }>(
+      `INSERT INTO recaps (workspace_id, period_start, period_end, content_md, model, run_id)
+       VALUES ($1, $2::date, $3::date, $4, $5, $6)
+       ON CONFLICT (workspace_id, period_start) DO NOTHING
+       RETURNING id`,
+      [args.workspaceId, args.periodStart, args.periodEnd, args.contentMd, args.model, args.runId ?? null]
+    );
+    if (!ins.rows[0]) {
+      // Ja existia: busca o id existente, NAO toca em conteudo/fontes.
+      const { rows } = await client.query<{ id: string }>(
+        `SELECT id FROM recaps WHERE workspace_id = $1 AND period_start = $2::date`,
+        [args.workspaceId, args.periodStart]
+      );
+      await client.query('COMMIT');
+      return { id: Number(rows[0]!.id), created: false };
+    }
+    const recapId = Number(ins.rows[0].id);
+    for (const episodeId of args.episodeIds) {
+      await client.query(
+        `INSERT INTO recap_sources (recap_id, episode_id)
+         VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+        [recapId, episodeId]
+      );
+    }
+    await client.query('COMMIT');
+    return { id: recapId, created: true };
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+export type WeekActivity = {
+  episodes: { id: number; title: string | null; occurred_at: string }[];
+  factsChanged: number; // fatos criados OU invalidados na janela
+};
+
+/**
+ * Atividade de um workspace numa janela [start, end] (spec §10.1):
+ *  - episodios cujo occurred_at cai na janela (insumo + gate de atividade);
+ *  - contagem de fatos novos (valid_at na janela) OU invalidados (invalid_at na
+ *    janela) — o segundo braco do gate (atividade pode existir sem episodio novo).
+ * A janela e inclusiva nas duas pontas (datas locais; ::date no boundary).
+ */
+export async function getWeekActivity(
+  workspaceId: string,
+  start: string,
+  end: string
+): Promise<WeekActivity> {
+  const { rows: eps } = await pool.query(
+    `SELECT id, title, occurred_at
+       FROM episodes
+      WHERE workspace_id = $1
+        AND occurred_at >= $2::date
+        AND occurred_at < ($3::date + INTERVAL '1 day')
+      ORDER BY occurred_at ASC, id ASC`,
+    [workspaceId, start, end]
+  );
+  const { rows: fc } = await pool.query<{ n: string }>(
+    `SELECT count(*) AS n FROM facts
+      WHERE workspace_id = $1
+        AND (
+          (valid_at >= $2::date AND valid_at < ($3::date + INTERVAL '1 day'))
+          OR (invalid_at >= $2::date AND invalid_at < ($3::date + INTERVAL '1 day'))
+        )`,
+    [workspaceId, start, end]
+  );
+  return {
+    episodes: eps.map((e) => ({
+      id: Number(e.id),
+      title: (e.title as string | null) ?? null,
+      occurred_at: (e.occurred_at as Date).toISOString(),
+    })),
+    factsChanged: Number(fc[0]!.n),
+  };
+}
+
+/** Fatos novos/supersedidos na janela (insumo de tom do recap, §10.1). */
+export async function getWeekFacts(
+  workspaceId: string,
+  start: string,
+  end: string
+): Promise<{ statement: string; fact_type: string; status: 'novo' | 'invalidado' }[]> {
+  const { rows } = await pool.query(
+    `SELECT statement, fact_type,
+            CASE WHEN invalid_at IS NOT NULL
+                 AND invalid_at >= $2::date
+                 AND invalid_at < ($3::date + INTERVAL '1 day')
+                 THEN 'invalidado' ELSE 'novo' END AS status
+       FROM facts
+      WHERE workspace_id = $1
+        AND (
+          (valid_at >= $2::date AND valid_at < ($3::date + INTERVAL '1 day'))
+          OR (invalid_at >= $2::date AND invalid_at < ($3::date + INTERVAL '1 day'))
+        )
+      ORDER BY valid_at ASC, id ASC`,
+    [workspaceId, start, end]
+  );
+  return rows.map((r) => ({
+    statement: r.statement as string,
+    fact_type: r.fact_type as string,
+    status: r.status as 'novo' | 'invalidado',
+  }));
+}
