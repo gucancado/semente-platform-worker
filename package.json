@@ -14,7 +14,9 @@
     "typecheck": "tsc --noEmit",
     "lint": "eslint src/**/*.ts",
     "import:fireflies": "tsx src/cli/import-fireflies.ts",
-    "lua:bootstrap": "tsx src/cli/lua-bootstrap.ts"
+    "lua:bootstrap": "tsx src/cli/lua-bootstrap.ts",
+    "lua:sample": "tsx eval/lua/sample.ts",
+    "eval:lua": "tsx eval/lua/run.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.104.1",
