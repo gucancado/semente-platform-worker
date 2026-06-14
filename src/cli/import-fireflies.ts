@@ -80,6 +80,13 @@ if (isMain) {
   const since = process.argv.find((a) => a.startsWith('--since='))?.split('=')[1];
   if (!config.FIREFLIES_API_KEY) { console.error('FIREFLIES_API_KEY não configurada'); process.exit(1); }
   const client = new FirefliesClient(config.FIREFLIES_API_KEY);
+  if (args.has('--check')) {
+    client.ping().then(({ status, body }) => {
+      console.log(`HTTP ${status}`);
+      console.log(body);
+      process.exit(status === 200 ? 0 : 1);
+    });
+  } else
   runImport(client.iterateAll({ fromDate: since ? new Date(since).toISOString() : undefined }), {
     dryRun: args.has('--dry-run'), force: args.has('--force'), internalWorkspaceId: config.INTERNAL_WORKSPACE_ID,
   }).then((report) => {

@@ -8,6 +8,9 @@ importers:
 
   .:
     dependencies:
+      '@anthropic-ai/sdk':
+        specifier: ^0.104.1
+        version: 0.104.1(zod@3.25.76)
       '@aws-sdk/client-s3':
         specifier: ^3.1065.0
         version: 3.1065.0
@@ -26,6 +29,9 @@ importers:
       luxon:
         specifier: ^3.7.2
         version: 3.7.2
+      openai:
+        specifier: ^6.42.0
+        version: 6.42.0(zod@3.25.76)
       pg:
         specifier: ^8.13.0
         version: 8.21.0
@@ -47,6 +53,15 @@ importers:
         version: 5.9.3
 
 packages:
+
+  '@anthropic-ai/sdk@0.104.1':
+    resolution: {integrity: sha512-gGACa/+IaiXzRRmF96aOhamoBgapKRBiFWbmmTFP8aMkpaEcuStF+Q61bjo4vPxBM7gqWJNZqsngslRdnLHv0Q==}
+    hasBin: true
+    peerDependencies:
+      zod: ^3.25.0 || ^4.0.0
+    peerDependenciesMeta:
+      zod:
+        optional: true
 
   '@aws-crypto/crc32@5.2.0':
     resolution: {integrity: sha512-nLbCWqQNgUiwwtFsen1AdzAtvuLRsQS8rYgMuxCrdKf9kOssamGLuPwyTY9wyYblNr9+1XM8v6zoDTPPSIeANg==}
@@ -150,6 +165,10 @@ packages:
   '@aws/lambda-invoke-store@0.2.4':
     resolution: {integrity: sha512-iY8yvjE0y651BixKNPgmv1WrQc+GZ142sb0z4gYnChDDY2YqI4P/jsSopBWrKfAt7LOJAkOXt7rC/hms+WclQQ==}
     engines: {node: '>=18.0.0'}
+
+  '@babel/runtime@7.29.7':
+    resolution: {integrity: sha512-Nq8OhGWiZIZGV6hLHoyAKLLcJihP/xFeBMGJoUrxTX2psI8dCifzLhZISFb+VWS3wFMRDmCGw5R+dOySCqPLhw==}
+    engines: {node: '>=6.9.0'}
 
   '@esbuild/aix-ppc64@0.28.0':
     resolution: {integrity: sha512-lhRUCeuOyJQURhTxl4WkpFTjIsbDayJHih5kZC1giwE+MhIzAb7mEsQMqMf18rHLsrb5qI1tafG20mLxEWcWlA==}
@@ -383,6 +402,9 @@ packages:
     resolution: {integrity: sha512-R8Rdn8Hy72KKcebgLiv8jQcQkXoLMOGGv5uI1/k0l+snqkOzQ1R0ChUBCxWMlBsFMekWjq0wRudIweFs7sKT5A==}
     engines: {node: '>=14.0.0'}
 
+  '@stablelib/base64@1.0.1':
+    resolution: {integrity: sha512-1bnPQqSxSuc3Ii6MhBysoWCg58j97aUjuCSZrGSmDxNqtytIi0k8utUenAwTZN4V5mXXYGsVUI9zeBqy+jBOSQ==}
+
   '@types/luxon@3.7.1':
     resolution: {integrity: sha512-H3iskjFIAn5SlJU7OuxUmTEpebK6TKB8rxZShDslBMZJ5u9S//KM1sbdAisiSrqwLQncVjnpi2OK2J51h+4lsg==}
 
@@ -576,6 +598,9 @@ packages:
   fast-querystring@1.1.2:
     resolution: {integrity: sha512-g6KuKWmFXc0fID8WWH0jit4g0AGBoJhCkJMb1RmbsSEUNvQ+ZC8D6CUZ+GtF8nMzSPXnhiePyyqqipzNNEnHjg==}
 
+  fast-sha256@1.3.0:
+    resolution: {integrity: sha512-n11RGP/lrWEFI/bWdygLxhI+pVeo1ZYIVwvvPkW7azl/rOy+F3HYRZ2K5zeE9mmkhQppyv9sQFx0JM9UabnpPQ==}
+
   fast-uri@3.1.2:
     resolution: {integrity: sha512-rVjf7ArG3LTk+FS6Yw81V1DLuZl1bRbNrev6Tmd/9RaroeeRRJhAt7jg/6YFxbvAQXUCavSoZhPPj6oOx+5KjQ==}
 
@@ -714,6 +739,10 @@ packages:
   json-schema-ref-resolver@3.0.0:
     resolution: {integrity: sha512-hOrZIVL5jyYFjzk7+y7n5JDzGlU8rfWDuYyHwGa2WA8/pcmMHezp2xsVwxrebD/Q9t8Nc5DboieySDpCp4WG4A==}
 
+  json-schema-to-ts@3.1.1:
+    resolution: {integrity: sha512-+DWg8jCJG2TEnpy7kOm/7/AxaYoaRbjVB4LFZLySZlWn8exGs3A4OLJR966cVvU26N7X9TWxl+Jsw7dzAqKT6g==}
+    engines: {node: '>=16'}
+
   json-schema-traverse@1.0.0:
     resolution: {integrity: sha512-NM8/P9n3XjXhIZn1lLhkFaACTOURQXjWhV4BA/RnOv8xvgqtqpAX9IO4mRQxSx1Rlo4tqzeqb0sOlruaOy3dug==}
 
@@ -787,6 +816,17 @@ packages:
 
   once@1.4.0:
     resolution: {integrity: sha512-lNaJgI+2Q5URQBkccEKHTQOPaXdUxnZZElQTZY0MFUAuaEqe1E+Nyvgdz/aIyNi6Z9MzO5dv1H8n58/GELp3+w==}
+
+  openai@6.42.0:
+    resolution: {integrity: sha512-1WFEt/uXMXOLhYRNkgJWo08Y2YNvNwpVU72K7ibrWgWpNOXd4VojXLbe6SQ4bLiUQ3Y8jz4IiyVkylJCL1DtZg==}
+    peerDependencies:
+      ws: ^8.18.0
+      zod: ^3.25 || ^4.0
+    peerDependenciesMeta:
+      ws:
+        optional: true
+      zod:
+        optional: true
 
   parseurl@1.3.3:
     resolution: {integrity: sha512-CiyeOxFT/JZyN5m0z9PfXw4SCBJ6Sygz1Dpl0wqjlhDEGGBP1GnsUVEL0p63hoG1fcj3fHynXi9NYO4nWOL+qQ==}
@@ -985,6 +1025,9 @@ packages:
     resolution: {integrity: sha512-UcjcJOWknrNkF6PLX83qcHM6KHgVKNkV62Y8a5uYDVv9ydGQVwAHMKqHdJje1VTWpljG0WYpCDhrCdAOYH4TWg==}
     engines: {node: '>= 10.x'}
 
+  standardwebhooks@1.0.0:
+    resolution: {integrity: sha512-BbHGOQK9olHPMvQNHWul6MYlrRTAOKn03rOe4A8O3CLWhNf4YHBqq2HJKKC+sfqpxiBY52pNeesD6jIiLDz8jg==}
+
   statuses@2.0.2:
     resolution: {integrity: sha512-DvEy55V3DB7uknRo+4iOGT5fP1slR8wQohVdknigZPMpMstaKJQWhwiYBACJE3Ul2pTnATihhBYnRhZQHGBiRw==}
     engines: {node: '>= 0.8'}
@@ -1003,6 +1046,9 @@ packages:
   toidentifier@1.0.1:
     resolution: {integrity: sha512-o5sSPKEkg/DIQNmH43V0/uerLrpzVedkUh8tGNvaeXpfpuwjKenlSox/2O/BTlZUtEe+JG7s5YhEz608PlAHRA==}
     engines: {node: '>=0.6'}
+
+  ts-algebra@2.0.0:
+    resolution: {integrity: sha512-FPAhNPFMrkwz76P7cdjdmiShwMynZYN6SgOujD1urY4oNm80Ou9oMdmbR45LotcKOXoy7wSmHkRFE6Mxbrhefw==}
 
   tslib@2.8.1:
     resolution: {integrity: sha512-oJFu94HQb+KVduSUQL7wnpmqnfmLsOA/nAh6b6EH0wCEoK0/mPeXU6c3wKDV83MkOuHPRHtSXKKU99IBazS/2w==}
@@ -1064,6 +1110,13 @@ packages:
     resolution: {integrity: sha512-gzUt/qt81nXsFGKIFcC3YnfEAx5NkunCfnDlvuBSSFS02bcXu4Lmea0AFIUwbLWxWPx3d9p8S5QoaujKcNQxcQ==}
 
 snapshots:
+
+  '@anthropic-ai/sdk@0.104.1(zod@3.25.76)':
+    dependencies:
+      json-schema-to-ts: 3.1.1
+      standardwebhooks: 1.0.0
+    optionalDependencies:
+      zod: 3.25.76
 
   '@aws-crypto/crc32@5.2.0':
     dependencies:
@@ -1295,6 +1348,8 @@ snapshots:
 
   '@aws/lambda-invoke-store@0.2.4': {}
 
+  '@babel/runtime@7.29.7': {}
+
   '@esbuild/aix-ppc64@0.28.0':
     optional: true
 
@@ -1473,6 +1528,8 @@ snapshots:
     dependencies:
       '@smithy/util-buffer-from': 2.2.0
       tslib: 2.8.1
+
+  '@stablelib/base64@1.0.1': {}
 
   '@types/luxon@3.7.1': {}
 
@@ -1700,6 +1757,8 @@ snapshots:
     dependencies:
       fast-decode-uri-component: 1.0.1
 
+  fast-sha256@1.3.0: {}
+
   fast-uri@3.1.2: {}
 
   fast-xml-builder@1.2.0:
@@ -1886,6 +1945,11 @@ snapshots:
     dependencies:
       dequal: 2.0.3
 
+  json-schema-to-ts@3.1.1:
+    dependencies:
+      '@babel/runtime': 7.29.7
+      ts-algebra: 2.0.0
+
   json-schema-traverse@1.0.0: {}
 
   json-schema-typed@8.0.2: {}
@@ -1946,6 +2010,10 @@ snapshots:
   once@1.4.0:
     dependencies:
       wrappy: 1.0.2
+
+  openai@6.42.0(zod@3.25.76):
+    optionalDependencies:
+      zod: 3.25.76
 
   parseurl@1.3.3: {}
 
@@ -2151,6 +2219,11 @@ snapshots:
 
   split2@4.2.0: {}
 
+  standardwebhooks@1.0.0:
+    dependencies:
+      '@stablelib/base64': 1.0.1
+      fast-sha256: 1.3.0
+
   statuses@2.0.2: {}
 
   strnum@2.4.0:
@@ -2164,6 +2237,8 @@ snapshots:
   toad-cache@3.7.1: {}
 
   toidentifier@1.0.1: {}
+
+  ts-algebra@2.0.0: {}
 
   tslib@2.8.1: {}
 
