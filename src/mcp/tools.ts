@@ -10,6 +10,8 @@ import {
 } from '../db.js';
 import { listEpisodes, getEpisode } from '../episodes/db.js';
 import { resolveByWhatsapp } from '../commands/identity.js';
+import { sendCloudText } from '../webhook-cloud/send.js';
+import { config } from '../config.js';
 
 /**
  * Registra todas as tools no `server` com o `agent` baked-in via closure.
@@ -107,6 +109,40 @@ export function registerTools(server: McpServer, agent: string): void {
       return {
         content: [{ type: 'text', text: user ? JSON.stringify(user) : 'null' }],
       };
+    }
+  );
+
+  // ── send_whatsapp_dm ───────────────────────────────────────────────────
+  server.registerTool(
+    'send_whatsapp_dm',
+    {
+      description:
+        'Envia uma mensagem de texto (DM) via número B (WhatsApp Cloud) DESTE agente para um indivíduo. NUNCA envia para grupo (o número B não está em grupos). Só funciona dentro da janela de 24h (o destinatário precisa ter mandado msg pro número B nas últimas 24h); fora dela exige template (não suportado aqui) e a API retorna erro. Resolve o phone_number_id do agente automaticamente. Retorna {ok, send_id, status?, detail?}.',
+      inputSchema: {
+        to: z
+          .string()
+          .describe('Telefone destino em E.164 ou só dígitos (ex: "5531999594121"). NUNCA um JID de grupo.'),
+        text: z.string().min(1).describe('Texto da mensagem.'),
+      },
+    },
+    async ({ to, text }): Promise<CallToolResult> => {
+      const map = (config.WHATSAPP_CLOUD_NUMBERS_JSON ?? {}) as Record<
+        string,
+        { agent: string; project: string }
+      >;
+      const phoneNumberId = Object.keys(map).find((id) => map[id]?.agent === agent);
+      if (!phoneNumberId) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({ ok: false, send_id: null, detail: `sem phone_number_id Cloud p/ agente ${agent}` }),
+            },
+          ],
+        };
+      }
+      const res = await sendCloudText(phoneNumberId, to, text);
+      return { content: [{ type: 'text', text: JSON.stringify(res) }] };
     }
   );
 
