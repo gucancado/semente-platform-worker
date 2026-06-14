@@ -91,3 +91,74 @@ export function makeOpenAIEmbeddingClient(
     },
   };
 }
+
+// Limite do batchEmbedContents da Generative Language API: <=100 requests/chamada.
+const GEMINI_MAX_REQUESTS_PER_CALL = 100;
+
+/** Normalizacao L2: divide cada componente pela norma euclidiana. Norma 0 -> vetor inalterado. */
+function l2normalize(v: number[]): number[] {
+  let sumSq = 0;
+  for (const x of v) sumSq += x * x;
+  const norm = Math.sqrt(sumSq);
+  if (norm === 0) return v;
+  return v.map((x) => x / norm);
+}
+
+/**
+ * Cria um EmbeddingClient real sobre a Generative Language API (Gemini),
+ * modelo `gemini-embedding-001` com `dimensions: 1024` (decisao de substrato v1.4,
+ * preferido sobre OpenAI). Detalhes de implementacao:
+ *
+ * - REST puro via `fetch` global (Node 24) — sem dependencia nova (nada de
+ *   googleapis/@google).
+ * - O endpoint `batchEmbedContents` aceita no maximo 100 requests por chamada;
+ *   como `embedBatched` pode entregar ate 2048 inputs de uma vez, o `embed()`
+ *   sub-fatia internamente em blocos de <=100 e concatena preservando a ordem global.
+ * - Normalizacao L2 obrigatoria: com `outputDimensionality < 3072` o modelo
+ *   retorna vetores NAO normalizados; o pgvector da Lua usa distancia cosseno e
+ *   espera vetores normalizados, entao aplicamos L2-normalize em cada vetor.
+ *
+ * Construir o cliente NAO faz chamada de rede.
+ */
+export function makeGeminiEmbeddingClient(
+  apiKey: string,
+  opts?: { model?: string; dimensions?: number },
+): EmbeddingClient {
+  const model = opts?.model ?? 'gemini-embedding-001';
+  const dimensions = opts?.dimensions ?? 1024;
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:batchEmbedContents?key=${apiKey}`;
+
+  return {
+    model: `${model}@${dimensions}`,
+    async embed(inputs: string[]): Promise<number[][]> {
+      if (inputs.length === 0) return [];
+
+      const out: number[][] = [];
+      // Sub-fatia em blocos de <=100 (limite do batchEmbedContents).
+      for (let start = 0; start < inputs.length; start += GEMINI_MAX_REQUESTS_PER_CALL) {
+        const slice = inputs.slice(start, start + GEMINI_MAX_REQUESTS_PER_CALL);
+        const body = {
+          requests: slice.map((text) => ({
+            model: `models/${model}`,
+            content: { parts: [{ text }] },
+            outputDimensionality: dimensions,
+            taskType: 'SEMANTIC_SIMILARITY',
+          })),
+        };
+        const res = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        if (!res.ok) {
+          const errBody = await res.text();
+          throw new Error(`Gemini embeddings ${res.status}: ${errBody}`);
+        }
+        const json = (await res.json()) as { embeddings: Array<{ values: number[] }> };
+        // A API devolve na MESMA ordem das requests; normalizamos cada vetor (L2).
+        for (const e of json.embeddings) out.push(l2normalize(e.values));
+      }
+      return out;
+    },
+  };
+}
