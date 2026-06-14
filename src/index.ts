@@ -16,6 +16,7 @@ import { startTriggerPoller } from './triggers/poller.js';
 import { startHoldsCleanupCron } from './goals/scheduling/holds-cleanup.js';
 import { startReconcileCron } from './goals/scheduling/reconcile-trigger.js';
 import { startOutboxDispatcher } from './events/dispatcher.js';
+import { startLuaScheduler } from './lua/scheduler.js';
 
 async function main() {
   const app = Fastify({
@@ -122,6 +123,11 @@ async function main() {
 
   // Cron que reconcilia meetings com Google Calendar a cada 1h (detecta cancel/move pelo closer).
   startReconcileCron(app.log);
+
+  // Scheduler noturno da Lua (memória): setInterval 60s, janela America/Sao_Paulo.
+  // Self-check de LUA_ENABLED + janela a cada tick => iniciar sempre é seguro
+  // (no-op enquanto desligado ou fora da janela 02h-05h local).
+  startLuaScheduler(app.log);
 }
 
 main().catch((err) => {

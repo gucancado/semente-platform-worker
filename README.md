@@ -179,3 +179,113 @@ Reprocessar uma entrega manualmente pelo id:
 POST /admin/outbox/deliveries/:id/replay
 X-Owner-Token: <OWNER_ADMIN_TOKEN>
 ```
+
+## Runbook — habilitar pgvector (pré-requisito da Lua, migration 019)
+
+A imagem Postgres do Coolify (`semente-worker-postgres`) NAO traz a extensao `vector` por
+padrao. Trocar para a imagem oficial pgvector e operacao de PRODUCAO — fazer em janela fora
+de horario comercial. **Este runbook precede tudo da Lua** (migrations 019+ e o scheduler).
+
+1. Backup verificado: `pg_dump` completo + snapshot Hetzner da VM. CONFERIR que o dump restaura.
+2. `SELECT version();` — anotar a major version do Postgres em producao.
+3. Coolify: trocar a imagem do servico para `pgvector/pgvector:pg<major>` (MESMA major = data dir
+   compativel, troca drop-in).
+4. Restart. Sanity numa sessao manual:
+   - `CREATE EXTENSION IF NOT EXISTS vector;`
+   - `SELECT extversion FROM pg_extension WHERE extname='vector';` — exigir **>= 0.8**
+     (`hnsw.iterative_scan` da busca hibrida depende disso).
+   - Smoke das tabelas existentes (`SELECT count(*) FROM episodes;`).
+   - Confirmar que o worker reconecta (`GET /health`).
+5. So entao: deploy do worker com as migrations 019–023 (rodam no startup via `src/migrate.ts`).
+
+Rollback: se a extensao falhar, voltar a imagem anterior (data dir intacto, nenhuma migration
+nova aplicada). Dimensionamento: ~8–12k chunks, vetor 1024 float32 = 4KB => ~50MB vetores +
+HNSW => centenas de MB (folga sob o teto <1GB).
+
+## Runbook — Lua (memória noturna)
+
+A Lua transforma episodios em tres camadas de memoria (episodica vetorizada · fatos
+bi-temporais · condutas) num **batch noturno** dentro do worker. Roda via `setInterval` de 60s
+(`src/lua/scheduler.ts`), na janela local **America/Sao_Paulo** `[LUA_WINDOW_START, LUA_WINDOW_END)`
+(default 02h–05h). O scheduler **sempre inicia** mas se auto-verifica a cada tick: enquanto
+`LUA_ENABLED=false` ou fora da janela, e no-op.
+
+> **Pre-requisito:** o runbook pgvector acima DEVE estar concluido antes de ligar a Lua.
+
+### Ligar / desligar (master switch — SEGURANCA)
+
+`LUA_ENABLED` (env do Coolify) e o portao mestre. Parse **estrito**: aceita literalmente
+`true` ou `false` (qualquer outro valor reprova o startup). **`LUA_ENABLED=false` desliga** —
+nao confie em `z.coerce.boolean` (coagiria `"false"` para `true`).
+
+- **So ligar (`LUA_ENABLED=true`) apos o gate de eval verde + OK humano.** A memoria entra no
+  contexto de TODOS os agentes; extracao ruim e pior que memoria nenhuma. Ligar = comeca a
+  gastar API (OpenAI embeddings + Anthropic extracao) e a gravar memoria.
+- Para desligar com urgencia: setar `LUA_ENABLED=false` no Coolify e redeploy. O tick em voo
+  termina o run corrente; o proximo tick e no-op.
+
+Envs da janela/concorrencia: `LUA_WINDOW_START` (default 2), `LUA_WINDOW_END` (default 5),
+`LUA_CONCURRENCY` (default 2), `LUA_MAX_ATTEMPTS` (default 4). Modelos:
+`LUA_EXTRACTION_MODEL` / `LUA_JUDGE_MODEL` / `LUA_RECAP_MODEL` (default `claude-sonnet-4-6`).
+
+### Observabilidade e tripwires
+
+`GET /admin/lua/runs?limit=N` (X-Owner-Token) lista os runs com `stats`:
+`episodes_processed/failed`, `facts_new/superseded/flagged`, `statuses`, `recaps`,
+`condutas_proposed`, `backlog`, `duration_ms`. Tripwires a vigiar:
+
+- **backlog > 0 em duas noites seguidas** — a fila nao drena na janela; investigar lentidao de
+  API ou aumentar a janela/concorrencia.
+- **duration_ms** subindo — run nao cabe na janela (hard stop deixando episodios `pending`).
+- **custo/noite** — cruzar tokens reais (stats) com a estimativa (~<$0,30/noite de regime).
+- **RAM** — observada via Coolify (teto assumido <1GB para os vetores).
+
+### DLQ, replay e reprocessamento
+
+```
+GET  /admin/lua/processing?status=dead|failed     # fila / DLQ
+POST /admin/lua/processing/:id/replay             # dead -> pending (zera tentativas, preserva last_error)
+POST /admin/lua/episodes/:id/reprocess            # forca reprocessamento (semantica de revision)
+```
+Todos com `X-Owner-Token`.
+
+### Triagem de `needs_review` (fatos suspeitos)
+
+```
+GET   /admin/lua/facts?workspace_id=<ws>&needs_review=true    # lista flags
+PATCH /admin/lua/facts/:id                                    # { action: 'confirm' | 'invalidate' | 'supersede_by' }
+```
+`needs_review` marca: confianca baixa, contradicao ambigua, instrucao imperativa suspeita
+(defesa de memory-poisoning) ou re-atribuicao de workspace. **Confirmar** legitima o fato;
+**invalidate**/**supersede_by** o retiram da memoria vigente com auditoria em `review_note`.
+Erro de extracao triado vira caso novo do golden set (o set e vivo).
+
+### Rodar o eval (gate de producao)
+
+```
+pnpm eval:lua
+```
+Roda a extracao real sobre o golden set (`eval/lua/golden.jsonl`) e imprime precisao/recall/
+alucinacao por tipo. Gate default: precisao >= 0,85 global / 0,75 por tipo, recall >= 0,75,
+alucinacao = 0, injection = 0. **`LUA_ENABLED` so vai a `true` com o gate verde.**
+
+### Bootstrap do acervo
+
+```
+pnpm lua:bootstrap --dry-run        # estima custo SEM chamar LLM nem gravar (livre)
+pnpm lua:bootstrap                   # processa o acervo em occurred_at ASC (gasta API — so com OK)
+```
+
+### Rotacao das chaves de API
+
+`OPENAI_API_KEY` (embeddings) e `ANTHROPIC_API_KEY` (extracao/judge/narrativa) vivem **so** no
+env do Coolify (nunca no repo). Para rotacionar: gerar a chave nova no dashboard do provedor,
+atualizar a env no Coolify, redeploy. Ausencia da chave NAO derruba o startup — a busca degrada
+para `lexical_only` e o batch falha explicitamente no proximo tick (recuperavel via replay).
+
+### Regenerar um recap
+
+Recap e idempotente por semana (UNIQUE workspace+period_start). Para regenerar, apagar antes:
+```
+DELETE /admin/lua/recaps/:id        # X-Owner-Token
+```

@@ -462,6 +462,50 @@ export async function startRun(
   return Number(rows[0]!.id);
 }
 
+/**
+ * Reivindica a noite (spec §5.1): A INSERÇÃO É O CLAIM. Abre o run nightly da
+ * data via `startRun('nightly', runDate)` — INSERT ... ON CONFLICT DO NOTHING no
+ * índice parcial `idx_lua_runs_one_nightly (run_date) WHERE kind='nightly'`.
+ * Retorna o id do run (a noite é minha) ou null (já reivindicada por outra
+ * réplica/tick — não re-rodar). Réplicas concorrentes do worker NUNCA duplicam a
+ * noite porque a unicidade é garantida pelo índice, não por leitura-antes-do-write.
+ */
+export async function claimNight(runDate: Date | string): Promise<number | null> {
+  return startRun('nightly', runDate);
+}
+
+/**
+ * Workspaces tocados num run (spec §5.3-C — insumo do estágio C). Um workspace
+ * "mudou de memória nesta noite" se:
+ *  - teve episódio processado neste run (linha lua_processing concluída `done`
+ *    com processed_at >= started_at do run), OU
+ *  - teve fato criado/invalidado/flagado neste run (facts.run_id = runId).
+ * O JOIN com episodes resolve o workspace do lado do processing (lua_processing
+ * não denormaliza workspace). DISTINCT + workspace_id NÃO nulo. Retorna a lista
+ * de workspace_ids para os quais o status nightly deve ser regenerado.
+ */
+export async function getWorkspacesChangedInRun(
+  runId: number
+): Promise<string[]> {
+  const { rows } = await pool.query<{ ws: string }>(
+    `SELECT DISTINCT ws FROM (
+       SELECT e.workspace_id AS ws
+         FROM lua_processing lp
+         JOIN episodes e ON e.id = lp.episode_id
+        WHERE lp.status = 'done'
+          AND lp.processed_at >= (SELECT started_at FROM lua_runs WHERE id = $1)
+       UNION
+       SELECT f.workspace_id AS ws
+         FROM facts f
+        WHERE f.run_id = $1
+     ) t
+      WHERE ws IS NOT NULL
+      ORDER BY ws`,
+    [runId]
+  );
+  return rows.map((r) => r.ws);
+}
+
 /** Fecha um run com status final, stats e erro opcional. */
 export async function finishRun(
   id: number,

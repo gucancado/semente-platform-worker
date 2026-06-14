@@ -124,7 +124,12 @@ const EnvSchema = z.object({
   // ── Lua (memória) ── parâmetros do subsistema. Todos com default sensato pra
   // que o startup nunca quebre por falta de env. Modelos default Sonnet (§5.4).
   // Master switch: default OFF — nada roda até o gate de eval + OK humano.
-  LUA_ENABLED: z.coerce.boolean().default(false),
+  // Parse ESTRITO (NÃO z.coerce.boolean — que coage qualquer string não-vazia,
+  // inclusive 'false', para true; com LUA_ENABLED=false no Coolify isso LIGARIA
+  // a Lua acidentalmente — gasto + memória não-testada contaminando agentes).
+  // Aceita só 'true'/'false' (default 'false'); qualquer outro valor reprova o
+  // startup explicitamente (melhor falhar do que ligar por engano).
+  LUA_ENABLED: z.enum(['true', 'false']).default('false').transform((v) => v === 'true'),
   // Janela noturna (hora local America/Sao_Paulo) [start, end).
   LUA_WINDOW_START: z.coerce.number().int().min(0).max(23).default(2),
   LUA_WINDOW_END: z.coerce.number().int().min(1).max(24).default(5),
