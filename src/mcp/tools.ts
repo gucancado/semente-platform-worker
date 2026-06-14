@@ -9,6 +9,7 @@ import {
   markInboxRead,
 } from '../db.js';
 import { listEpisodes, getEpisode } from '../episodes/db.js';
+import { resolveByWhatsapp } from '../commands/identity.js';
 
 /**
  * Registra todas as tools no `server` com o `agent` baked-in via closure.
@@ -86,6 +87,26 @@ export function registerTools(server: McpServer, agent: string): void {
     async ({ id }): Promise<CallToolResult> => {
       const deleted = await deleteContact(agent, id);
       return { content: [{ type: 'text', text: JSON.stringify({ deleted }) }] };
+    }
+  );
+
+  // ── resolve_whatsapp_identity ──────────────────────────────────────────
+  server.registerTool(
+    'resolve_whatsapp_identity',
+    {
+      description:
+        'Resolve um número WhatsApp → identidade Bloquim (userId, nome, email, whatsapp e workspaces com role). Use pra decidir se um remetente do grupo é membro da equipe (membro do workspace do projeto) ou cliente. Retorna a string "null" se o número não estiver cadastrado em nenhum usuário Bloquim.',
+      inputSchema: {
+        phone: z
+          .string()
+          .describe('Telefone em E.164 ou só dígitos (ex: "+5531999594121" ou "5531999594121"). A resolução compara apenas dígitos.'),
+      },
+    },
+    async ({ phone }): Promise<CallToolResult> => {
+      const user = await resolveByWhatsapp(phone);
+      return {
+        content: [{ type: 'text', text: user ? JSON.stringify(user) : 'null' }],
+      };
     }
   );
 
