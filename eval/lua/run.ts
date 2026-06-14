@@ -194,10 +194,12 @@ async function main(): Promise<number> {
     ? makeAnthropicClient(config.ANTHROPIC_API_KEY, { model: args.extractorModel })
     : getExtractionClient();
 
-  // Judge: MODELO DISTINTO do extrator (spec §11.2). Default = Opus, exceto se o
-  // extrator ja for Opus, caso em que caímos pra Haiku. --judge sobrepoe.
-  const defaultJudgeModel =
-    extractor.model.includes('opus') ? 'claude-haiku-4-6' : 'claude-opus-4-8';
+  // Judge: modelo DISTINTO do extrator (spec §11.2) e BARATO (classificacao simples).
+  // Default = Haiku; se o extrator ja for Haiku, usa Sonnet (ainda distinto, ainda barato).
+  // --judge sobrepoe.
+  const defaultJudgeModel = extractor.model.includes('haiku')
+    ? 'claude-sonnet-4-6'
+    : 'claude-haiku-4-5-20251001';
   const judgeModel = args.judgeModel ?? defaultJudgeModel;
   assertDistinctModels(extractor.model, judgeModel);
   const judge = makeLlmJudge(makeAnthropicClient(config.ANTHROPIC_API_KEY, { model: judgeModel }));

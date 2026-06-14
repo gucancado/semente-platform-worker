@@ -10,6 +10,13 @@
 // O parse + retry vive AQUI (runWithParseRetry), fatorado para ser testavel
 // sem rede: extract/judge herdam o comportamento sem reimplementar. Modelo
 // default 'claude-sonnet-4-6' (spec §5.4 — julgamento medio).
+//
+// Prompt caching: o `system` (estatico, ex.: ~1500 tok da extracao) e os `tools`
+// sao enviados com um cache breakpoint `cache_control: ephemeral` no bloco system.
+// A ordem de cache da API e tools -> system -> messages, entao um breakpoint no
+// system cacheia o prefixo inteiro (tools + system); o `user` (transcript) varia
+// e fica fora do cache. Abaixo do minimo cacheavel (~1024 tok p/ Sonnet/Opus) a
+// API simplesmente ignora o breakpoint (no-op sem erro) — seguro p/ judges curtos.
 
 import Anthropic from '@anthropic-ai/sdk';
 
@@ -96,7 +103,11 @@ export function makeAnthropicClient(
         const res = await client.messages.create({
           model,
           max_tokens: maxTokens,
-          system: args.system,
+          // Forma array com cache breakpoint: cacheia o prefixo tools + system
+          // (a API processa tools -> system -> messages). O user fica fora.
+          system: [
+            { type: 'text', text: args.system, cache_control: { type: 'ephemeral' } },
+          ] satisfies Anthropic.TextBlockParam[],
           tools: [
             {
               name: TOOL_NAME,

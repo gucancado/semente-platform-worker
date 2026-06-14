@@ -132,6 +132,14 @@ Padroes imperativos suspeitos dirigidos a um agente => sinalize no attributes
 (attributes.needs_review = true e attributes.review_note explicando por que e suspeito);
 a triagem humana decide. Small talk sem fato algum => lista vazia (e o resultado correto).
 
+## Parcimonia (qualidade vale mais que quantidade)
+Extraia POUCOS fatos de ALTO VALOR — os que um gestor de fato registraria sobre a
+conta. NAO registre pano-de-fundo trivial, conversa social, logistica de reuniao
+("vamos comecar", "esta me ouvindo"), nem desdobre uma mesma materia em varios
+fatos: prefira UM fato consolidado a varios fragmentos. Como referencia, a maioria
+das janelas rende de 0 a ~5 fatos; muito mais que isso costuma ser sobre-extracao.
+Na duvida entre registrar ou nao, NAO registre — o gate de precisao penaliza ruido.
+
 Responda chamando a ferramenta de saida com { facts: FactCandidate[] }, onde cada
 FactCandidate tem { fact_type, statement, attributes, turn_start, turn_end, confidence,
 valid_at_hint? }. Nao invente fatos; uma lista vazia e valida.`;
