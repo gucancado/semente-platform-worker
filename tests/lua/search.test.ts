@@ -225,7 +225,7 @@ test('braco lexical recupera linha com vetor irrelevante; item duplo lidera RRF'
     episodeId: ep,
     workspaceId: 'w1',
     chunkIndex: 1,
-    text: 'O orcamento de marketing precisa subir no proximo mes.',
+    text: 'O orcamento de marketing precisa subir; mais orcamento de marketing no proximo mes.',
     embedding: oneHot(7),
   });
   // C: casa SO no vetor (texto sem o termo), dimensao diferente da query.
