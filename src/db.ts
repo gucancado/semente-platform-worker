@@ -163,13 +163,21 @@ export type InboxItem = {
 export async function listUnreadInbox(
   agent: string,
   limit = 20,
-  instance?: string
+  instance?: string,
+  identifier?: string
 ): Promise<InboxItem[]> {
   const args: unknown[] = [agent, limit];
   let where = `agent = $1 AND processed_at IS NULL`;
   if (instance) {
     args.push(instance);
-    where += ` AND instance = $3`;
+    where += ` AND instance = $${args.length}`;
+  }
+  // Filtro por identifier (remetente/grupo). Como o LIMIT é aplicado depois do
+  // WHERE, filtrar aqui faz o FIFO devolver as N mais antigas DAQUELE escopo —
+  // resolve a "parede FIFO" em que mensagens de outros grupos ocupavam o teto.
+  if (identifier) {
+    args.push(identifier);
+    where += ` AND identifier = $${args.length}`;
   }
   const { rows } = await pool.query<InboxItem>(
     `SELECT id, agent, channel, instance, identifier, author, push_name, message_text,

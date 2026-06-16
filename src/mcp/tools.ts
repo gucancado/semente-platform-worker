@@ -151,17 +151,23 @@ export function registerTools(server: McpServer, agent: string): void {
     'inbox_list_unread',
     {
       description:
-        'Lista mensagens recebidas via webhook que ainda não foram processadas pelo agente. FIFO (mais antigas primeiro). Filtro opcional por `instance` quando agente quer focar em um projeto específico do tick atual.',
+        'Lista mensagens recebidas via webhook que ainda não foram processadas pelo agente. FIFO (mais antigas primeiro). Filtros opcionais: `instance` (instância Evolution) e `identifier` (remetente/grupo). Use `identifier` no sweep p/ pegar só as mensagens do grupo do projeto do tick — evita a fila global encher o teto com outros grupos.',
       inputSchema: {
         limit: z.number().int().min(1).max(100).optional(),
         instance: z
           .string()
           .optional()
           .describe('Filtra por instância Evolution (ex: "mercurio-metido-a-gente")'),
+        identifier: z
+          .string()
+          .optional()
+          .describe(
+            'Filtra por identifier do remetente/grupo (ex: "+120363308683104573" p/ um grupo WhatsApp). No sweep, passe o grupo do projeto p/ limitar a fila ao escopo do tick.'
+          ),
       },
     },
-    async ({ limit, instance }): Promise<CallToolResult> => {
-      const items = await listUnreadInbox(agent, limit ?? 20, instance);
+    async ({ limit, instance, identifier }): Promise<CallToolResult> => {
+      const items = await listUnreadInbox(agent, limit ?? 20, instance, identifier);
       return { content: [{ type: 'text', text: JSON.stringify(items) }] };
     }
   );
