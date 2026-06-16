@@ -114,7 +114,34 @@ const EnvSchema = z.object({
   OUTBOX_MAX_ATTEMPTS: z.coerce.number().int().positive().default(8),
 
   // ── Repositório de transcrições ──
-  FIREFLIES_API_KEY: z.string().optional(),
+  FIREFLIES_API_KEY: z.string().optional().transform((s) => s?.trim() || undefined),
+  // ── Lua (memória) ── chave OpenAI p/ embeddings (text-embedding-3-large@1024).
+  // Opcional: ausente não quebra startup; só o batch/bootstrap reais a exigem.
+  OPENAI_API_KEY: z.string().optional(),
+  // ── Lua (memória) ── chave Gemini p/ embeddings (gemini-embedding-001@1024).
+  // Preferida sobre OpenAI quando presente. Opcional: ausente nao quebra startup.
+  GEMINI_API_KEY: z.string().optional(),
+  // ── Lua (memória) ── chave Anthropic p/ extração/judge/narrativa (Sonnet, spec §5.4).
+  // Opcional: ausente não quebra startup; só o batch/bootstrap reais a exigem.
+  ANTHROPIC_API_KEY: z.string().optional(),
+  // ── Lua (memória) ── parâmetros do subsistema. Todos com default sensato pra
+  // que o startup nunca quebre por falta de env. Modelos default Sonnet (§5.4).
+  // Master switch: default OFF — nada roda até o gate de eval + OK humano.
+  // Parse ESTRITO (NÃO z.coerce.boolean — que coage qualquer string não-vazia,
+  // inclusive 'false', para true; com LUA_ENABLED=false no Coolify isso LIGARIA
+  // a Lua acidentalmente — gasto + memória não-testada contaminando agentes).
+  // Aceita só 'true'/'false' (default 'false'); qualquer outro valor reprova o
+  // startup explicitamente (melhor falhar do que ligar por engano).
+  LUA_ENABLED: z.enum(['true', 'false']).default('false').transform((v) => v === 'true'),
+  // Janela noturna (hora local America/Sao_Paulo) [start, end).
+  LUA_WINDOW_START: z.coerce.number().int().min(0).max(23).default(2),
+  LUA_WINDOW_END: z.coerce.number().int().min(1).max(24).default(5),
+  LUA_CONCURRENCY: z.coerce.number().int().positive().default(2),
+  LUA_MAX_ATTEMPTS: z.coerce.number().int().positive().default(4),
+  LUA_EXTRACTION_MODEL: z.string().default('claude-sonnet-4-6'),
+  LUA_JUDGE_MODEL: z.string().default('claude-sonnet-4-6'),
+  LUA_RECAP_MODEL: z.string().default('claude-sonnet-4-6'),
+  LUA_EXTRACTION_MAX_INPUT: z.coerce.number().int().positive().default(60_000),
   R2_ENDPOINT: z.string().url().optional(),
   R2_ACCESS_KEY_ID: z.string().optional(),
   R2_SECRET_ACCESS_KEY: z.string().optional(),

@@ -10,11 +10,13 @@ import { registerTimelineRoutes } from './timeline/routes.js';
 import { registerProjectsRoutes } from './projects/routes.js';
 import { registerWebhookCloudRoutes, registerSendCloudRoute } from './webhook-cloud/routes.js';
 import { registerEpisodesRoutes } from './episodes/routes.js';
+import { registerMemoriaRoutes } from './lua/routes.js';
 import { requireAgentToken } from './auth.js';
 import { startTriggerPoller } from './triggers/poller.js';
 import { startHoldsCleanupCron } from './goals/scheduling/holds-cleanup.js';
 import { startReconcileCron } from './goals/scheduling/reconcile-trigger.js';
 import { startOutboxDispatcher } from './events/dispatcher.js';
+import { startLuaScheduler } from './lua/scheduler.js';
 
 async function main() {
   const app = Fastify({
@@ -95,6 +97,11 @@ async function main() {
     await registerEpisodesRoutes(scope);
   });
 
+  // Memória da Lua (busca híbrida): leitura por X-Agent-Token.
+  await app.register(async (scope) => {
+    await registerMemoriaRoutes(scope);
+  });
+
   // Admin endpoints: CRUD de projects/goals/agendas. Auth: X-Owner-Token (env OWNER_ADMIN_TOKEN).
   // Consumido pela GUI agentes.beeads.com.br.
   await app.register(async (scope) => {
@@ -116,6 +123,11 @@ async function main() {
 
   // Cron que reconcilia meetings com Google Calendar a cada 1h (detecta cancel/move pelo closer).
   startReconcileCron(app.log);
+
+  // Scheduler noturno da Lua (memória): setInterval 60s, janela America/Sao_Paulo.
+  // Self-check de LUA_ENABLED + janela a cada tick => iniciar sempre é seguro
+  // (no-op enquanto desligado ou fora da janela 02h-05h local).
+  startLuaScheduler(app.log);
 }
 
 main().catch((err) => {

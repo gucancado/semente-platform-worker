@@ -12,6 +12,10 @@ import { listEpisodes, getEpisode } from '../episodes/db.js';
 import { resolveByWhatsapp } from '../commands/identity.js';
 import { sendCloudText } from '../webhook-cloud/send.js';
 import { config } from '../config.js';
+import { searchMemoria } from '../lua/search.js';
+import { getEmbeddingClient } from '../lua/embedding-provider.js';
+import { getFatos, getStatusVigente, getRecapByWeek, getActiveConduta, type FactType } from '../lua/db.js';
+import { resolveRecapPeriodStart } from '../lua/narrativa.js';
 
 /**
  * Registra todas as tools no `server` com o `agent` baked-in via closure.
@@ -229,6 +233,164 @@ export function registerTools(server: McpServer, agent: string): void {
     async ({ id }): Promise<CallToolResult> => {
       const ep = await getEpisode(id);
       return { content: [{ type: 'text', text: ep ? JSON.stringify({ schema: 'episodio_v1', ...ep }) : 'null' }] };
+    }
+  );
+
+  // ── search_memoria ─────────────────────────────────────────────────────
+  server.registerTool(
+    'search_memoria',
+    {
+      description:
+        'Busca híbrida (vetorial + lexical, fusão RRF) na memória de um workspace. Retorna chunks de episódios e/ou fatos com proveniência. Tudo filtrado por workspace_id. Sem OPENAI_API_KEY degrada para lexical_only.',
+      inputSchema: {
+        workspace_id: z.string(),
+        query: z.string(),
+        k: z.number().int().optional(),
+        scope: z.enum(['episodios', 'fatos', 'ambos']).optional(),
+        since: z.string().optional().describe('ISO date'),
+        until: z.string().optional().describe('ISO date'),
+      },
+    },
+    async ({ workspace_id, query, k, scope, since, until }): Promise<CallToolResult> => {
+      const result = await searchMemoria(
+        { workspaceId: workspace_id, query },
+        { k, scope, since, until },
+        { embeddingClient: getEmbeddingClient() }
+      );
+      return { content: [{ type: 'text', text: JSON.stringify(result) }] };
+    }
+  );
+
+  // ── get_fatos ──────────────────────────────────────────────────────────
+  server.registerTool(
+    'get_fatos',
+    {
+      description:
+        'Lista fatos tipados de um workspace (memória semântica). As-of bi-temporal: por padrão só os vigentes agora; `vigente_em` consulta "o que valia em T"; `include_invalid` traz o histórico. Cada fato carrega proveniência, `needs_review` (suspeita) e `superseded_by_fact_id` (cadeia). Keyset cursor para paginar.',
+      inputSchema: {
+        workspace_id: z.string(),
+        types: z.array(z.string()).optional(),
+        vigente_em: z.string().optional().describe('ISO timestamp (as-of)'),
+        include_invalid: z.boolean().optional(),
+        q: z.string().optional().describe('filtro lexical (tsquery PT-BR)'),
+        episode_id: z.number().int().optional(),
+        limit: z.number().int().optional(),
+        cursor: z.string().optional(),
+      },
+    },
+    async (input): Promise<CallToolResult> => {
+      const { fatos, next_cursor } = await getFatos(input.workspace_id, {
+        types: input.types as FactType[] | undefined,
+        vigenteEm: input.vigente_em,
+        includeInvalid: input.include_invalid,
+        q: input.q,
+        episodeId: input.episode_id,
+        limit: input.limit,
+        cursor: input.cursor,
+      });
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify({ schema: 'memoria_fatos_v1', fatos, next_cursor }),
+          },
+        ],
+      };
+    }
+  );
+
+  // ── get_status ─────────────────────────────────────────────────────────
+  server.registerTool(
+    'get_status',
+    {
+      description:
+        'Status descritivo vigente do projeto (poucas frases, objetivo — onde o projeto está agora). Consumo: visão geral da Central. Retorna content_md null quando o workspace ainda não tem status.',
+      inputSchema: { workspace_id: z.string() },
+    },
+    async ({ workspace_id }): Promise<CallToolResult> => {
+      const status = await getStatusVigente(workspace_id);
+      const payload = status
+        ? {
+            schema: 'status_v1',
+            workspace_id: status.workspace_id,
+            content_md: status.content_md,
+            generated_at: status.generated_at,
+            sources: status.sources,
+          }
+        : {
+            schema: 'status_v1',
+            workspace_id,
+            content_md: null,
+            generated_at: null,
+            sources: [],
+          };
+      return { content: [{ type: 'text', text: JSON.stringify(payload) }] };
+    }
+  );
+
+  // ── get_condutas ───────────────────────────────────────────────────────
+  server.registerTool(
+    'get_condutas',
+    {
+      description:
+        'Conduta ativa (memória procedural) de um workspace: o documento de modo de agir INJETADO no contexto do agente ao iniciar trabalho no projeto. Retorna version, content_md e rules[] (cada regra com proveniência: fact_id + episódio + janela de turnos). content_md/version null quando não há conduta ativa.',
+      inputSchema: { workspace_id: z.string() },
+    },
+    async ({ workspace_id }): Promise<CallToolResult> => {
+      const conduta = await getActiveConduta(workspace_id);
+      const payload = conduta
+        ? {
+            schema: 'conduta_v1',
+            workspace_id: conduta.workspace_id,
+            version: conduta.version,
+            approved_at: conduta.approved_at,
+            content_md: conduta.content_md,
+            rules: conduta.rules,
+          }
+        : {
+            schema: 'conduta_v1',
+            workspace_id,
+            version: null,
+            content_md: null,
+            rules: [],
+          };
+      return { content: [{ type: 'text', text: JSON.stringify(payload) }] };
+    }
+  );
+
+  // ── get_recap ──────────────────────────────────────────────────────────
+  server.registerTool(
+    'get_recap',
+    {
+      description:
+        'Recap semanal (narradora) de um workspace. `week` (YYYY-Www) ou `start` (YYYY-MM-DD da segunda); default: semana ISO anterior. Retorna recap_v1 com content_md e sources (episode_ids); content_md null quando não gerado.',
+      inputSchema: {
+        workspace_id: z.string(),
+        week: z.string().optional().describe('semana ISO (YYYY-Www)'),
+        start: z.string().optional().describe('segunda-feira da semana (YYYY-MM-DD)'),
+      },
+    },
+    async ({ workspace_id, week, start }): Promise<CallToolResult> => {
+      const periodStart = resolveRecapPeriodStart({ week, start });
+      const recap = await getRecapByWeek(workspace_id, periodStart);
+      const payload = recap
+        ? {
+            schema: 'recap_v1',
+            workspace_id: recap.workspace_id,
+            period_start: recap.period_start,
+            period_end: recap.period_end,
+            content_md: recap.content_md,
+            sources: recap.sources,
+          }
+        : {
+            schema: 'recap_v1',
+            workspace_id,
+            period_start: periodStart,
+            period_end: null,
+            content_md: null,
+            sources: [],
+          };
+      return { content: [{ type: 'text', text: JSON.stringify(payload) }] };
     }
   );
 }
