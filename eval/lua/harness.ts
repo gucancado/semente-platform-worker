@@ -234,8 +234,8 @@ export async function matchFacts(
     const exp = expected[ei]!;
     for (let xi = 0; xi < extracted.length; xi++) {
       const ext = extracted[xi]!;
-      // (1) tipo igual + (2) janelas intersectam — filtros de código baratos.
-      if (ext.fact_type !== exp.fact_type) continue;
+      // (1) janelas intersectam — filtro de código barato; o judge decide a
+      // materia, tipo pode diferir.
       if (
         !turnsIntersect(
           { turn_start: ext.turn_start, turn_end: ext.turn_end },

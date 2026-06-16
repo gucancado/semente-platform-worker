@@ -152,8 +152,22 @@ test('matchFacts: extracao correta casa o esperado', async () => {
   assert.ok(r.matchedExtractedIdx.has(0));
 });
 
-test('matchFacts: tipo errado nao casa', async () => {
+test('matchFacts: tipo divergente NAO bloqueia — o judge decide pela materia', async () => {
+  // Nova semantica (afrouxamento do pre-filtro): tipo do esperado e do extraido
+  // pode diferir (decisao/contexto/objetivo/compromisso se confundem). O pre-filtro
+  // de tipo foi removido; quem decide o match e o judge, pela MATERIA. Aqui o judge
+  // (fake, default match:true) confirma a materia mesmo com tipos distintos.
   const judge = makeFakeJudge({});
+  const expected = [{ fact_type: 'decisao' as const, key_values: ['verba'], gist: 'verba' }];
+  const r = await matchFacts([fact({ fact_type: 'preferencia' })], expected, trecho(), { judge });
+  assert.equal(r.expectedFound[0], true);
+  assert.ok(r.matchedExtractedIdx.has(0));
+});
+
+test('matchFacts: tipo divergente mas judge nega materia -> nao casa', async () => {
+  // Espelho do anterior: tipo diverge E o judge rejeita a materia => sem match.
+  // Confirma que o gate de match agora vem do judge, nao do tipo.
+  const judge = makeFakeJudge({ match: () => ({ match: false, key_values_present: false }) });
   const expected = [{ fact_type: 'decisao' as const, key_values: ['verba'], gist: 'verba' }];
   const r = await matchFacts([fact({ fact_type: 'preferencia' })], expected, trecho(), { judge });
   assert.equal(r.expectedFound[0], false);
