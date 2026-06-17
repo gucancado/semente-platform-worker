@@ -210,3 +210,57 @@ test('run real com deps fake grava chunks e fatos em occurred_at ASC', async () 
   assert.equal(runRows[0]!.kind, 'bootstrap');
   assert.equal(runRows[0]!.status, 'done');
 });
+
+// ─────────────────────────────────────────────────────────────────────────
+// Falha de episódio NÃO pode ser silenciosa (observabilidade do run pago): o
+// worker deve registrar o erro via failProcessing (last_error + retry/backoff),
+// não engolir no catch. Antes do fix a linha ficava 'chunked' com last_error
+// NULL e o erro sumia.
+// ─────────────────────────────────────────────────────────────────────────
+
+test('run real: episodio que falha registra last_error (nao silencioso)', async () => {
+  const fakeEmbeddingClient = {
+    model: 'fake@1024',
+    async embed(inputs: string[]): Promise<number[][]> {
+      return inputs.map(() => {
+        const v = new Array(1024).fill(0);
+        v[42] = 1;
+        return v;
+      });
+    },
+  };
+  // Extrator que SEMPRE lança -> runEpisode (estágio B) propaga -> o worker do
+  // bootstrap precisa registrar a falha, não engolir.
+  const throwingExtractor = {
+    model: 'fake-extractor',
+    async complete<T = unknown>(): Promise<T> {
+      throw new Error('boom-extract-187');
+    },
+  };
+  const fakeJudge = {
+    model: 'fake-judge',
+    async complete<T = unknown>(): Promise<T> {
+      return { verdict: 'unrelated', reasoning: 'x' } as unknown as T;
+    },
+  };
+
+  const ep = await seedEpisode({ externalId: 'fail', workspaceId: 'w1', occurredAt: '2026-05-01T10:00:00Z' });
+  await seedTurns(ep, [{ index: 0, name: 'Ana', text: 'A verba sobe pra 8k reais.' }]);
+
+  const report = await runBootstrap(
+    { dryRun: false },
+    { embeddingClient: fakeEmbeddingClient, llmClient: throwingExtractor, judge: fakeJudge }
+  );
+
+  assert.equal(report.failed, 1, 'a falha foi contada');
+  assert.equal(report.processed, 0, 'nenhum processado');
+
+  // A linha NÃO pode ficar invisível: status failed/dead + last_error gravado.
+  const { rows } = await pool.query<{ status: string; last_error: string | null; attempt_count: number }>(
+    `SELECT status, last_error, attempt_count FROM lua_processing WHERE episode_id = $1`,
+    [ep]
+  );
+  assert.ok(['failed', 'dead'].includes(rows[0]!.status), `status visível de falha, veio '${rows[0]!.status}'`);
+  assert.ok(rows[0]!.last_error && rows[0]!.last_error.includes('boom-extract-187'), 'last_error gravado com a mensagem');
+  assert.ok(rows[0]!.attempt_count >= 1, 'attempt_count incrementado');
+});

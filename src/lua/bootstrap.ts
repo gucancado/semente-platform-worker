@@ -19,6 +19,7 @@ import { config } from '../config.js';
 import { chunkTurns, estimateTokens, type Turn } from './chunking.js';
 import {
   claimProcessing,
+  failProcessing,
   startRun,
   finishRun,
   type ProcessingRow,
@@ -275,8 +276,23 @@ export async function runBootstrap(
             chunks: res.chunks,
             tokens: 0,
           });
-        } catch {
+        } catch (err) {
+          // Falha NÃO pode ser silenciosa (run pago): registra erro + agenda
+          // retry com backoff (failProcessing → last_error / attempt_count / dead
+          // no teto). Sem isto a linha ficava 'chunked' com claimed_at preso e o
+          // erro sumia (descoberto no sample de 10, ep187).
           failed++;
+          const msg = err instanceof Error ? err.message : String(err);
+          try {
+            const { dead } = await failProcessing(row.id, msg);
+            console.error(`[bootstrap] episódio ${row.episode_id} falhou${dead ? ' (DEAD)' : ''}: ${msg}`);
+          } catch (markErr) {
+            console.error(
+              `[bootstrap] episódio ${row.episode_id} falhou e o registro da falha também falhou: ${msg} / ${
+                markErr instanceof Error ? markErr.message : String(markErr)
+              }`
+            );
+          }
         }
       }
     };
