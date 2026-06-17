@@ -19,6 +19,16 @@ export const pool = new pg.Pool({
   idle_in_transaction_session_timeout: 60_000,
 } as any);
 
+// node-postgres emite um evento 'error' em clientes OCIOSOS do pool quando o
+// backend encerra a conexão (statement/idle-in-transaction timeout, restart do
+// Postgres, rede). SEM um listener, esse evento é não-tratado e DERRUBA o
+// processo inteiro (crash do worker em prod E do bootstrap — deixando transações
+// zumbis que seguram locks e travam os claims seguintes). A query em curso já
+// rejeita na própria call (try/catch local); aqui só logamos e seguimos.
+pool.on('error', (err) => {
+  console.error('[pg pool] erro em conexão ociosa (recuperado, não-fatal):', err.message);
+});
+
 export type ContactRoute = {
   id: number;
   agent: string;

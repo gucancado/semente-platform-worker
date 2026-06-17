@@ -1,0 +1,15 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { pool } from '../src/db.js';
+
+// node-postgres emite 'error' em clientes ociosos quando o backend encerra a
+// conexão (timeout, restart, idle-in-transaction, rede). SEM listener, o evento
+// é não-tratado e DERRUBA o processo (crash do worker/bootstrap → transações
+// zumbis com locks). O pool DEVE registrar um handler de erro.
+
+test('o pool pg tem um handler de erro (nao derruba o processo em conexao ociosa)', () => {
+  assert.ok(
+    pool.listenerCount('error') >= 1,
+    'pool.on("error") ausente — erro de conexao ociosa derrubaria o processo'
+  );
+});
