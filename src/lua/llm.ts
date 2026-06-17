@@ -20,6 +20,67 @@
 
 import Anthropic from '@anthropic-ai/sdk';
 
+// ── Medição de custo (instrumentação do bootstrap / runs) ───────────────────
+//
+// O cliente real descarta `res.usage`; aqui acumulamos tokens + custo num meter
+// de processo (o bootstrap é um processo só; workers concorrentes somam no mesmo
+// total, que é o que queremos). resetLlmUsage() no início do run, readLlmUsage()
+// no fim. Tarifas por 1M tokens (USD); fallback Sonnet p/ modelo desconhecido.
+
+const PRICING_USD_PER_M: Record<
+  string,
+  { in: number; out: number; cacheRead: number; cacheWrite: number }
+> = {
+  'claude-sonnet-4-6': { in: 3, out: 15, cacheRead: 0.3, cacheWrite: 3.75 },
+  'claude-haiku-4-5': { in: 1, out: 5, cacheRead: 0.1, cacheWrite: 1.25 },
+  'claude-opus-4-8': { in: 5, out: 25, cacheRead: 0.5, cacheWrite: 6.25 },
+};
+
+export interface LlmCallTokens {
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+}
+
+/** Custo USD de uma chamada, pela tarifa do modelo (fallback Sonnet 4.6). */
+export function computeCallCostUsd(model: string, u: LlmCallTokens): number {
+  const p = PRICING_USD_PER_M[model] ?? PRICING_USD_PER_M['claude-sonnet-4-6']!;
+  return (u.input * p.in + u.output * p.out + u.cacheRead * p.cacheRead + u.cacheWrite * p.cacheWrite) / 1_000_000;
+}
+
+export interface LlmUsageTotals {
+  calls: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  costUsd: number;
+}
+
+function zeroUsage(): LlmUsageTotals {
+  return { calls: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: 0 };
+}
+
+let usageMeter: LlmUsageTotals = zeroUsage();
+
+export function resetLlmUsage(): void {
+  usageMeter = zeroUsage();
+}
+
+export function readLlmUsage(): LlmUsageTotals {
+  return { ...usageMeter };
+}
+
+export function recordLlmUsage(model: string, u: LlmCallTokens): void {
+  usageMeter.calls += 1;
+  usageMeter.inputTokens += u.input;
+  usageMeter.outputTokens += u.output;
+  usageMeter.cacheReadTokens += u.cacheRead;
+  usageMeter.cacheWriteTokens += u.cacheWrite;
+  usageMeter.costUsd += computeCallCostUsd(model, u);
+}
+
 /** Argumentos de uma chamada de completude estruturada. */
 export interface LlmCompletionArgs {
   /** Prompt de sistema (PT-BR): contrato + instrucoes. */
@@ -118,6 +179,13 @@ export function makeAnthropicClient(
           ],
           tool_choice: { type: 'tool', name: TOOL_NAME },
           messages: [{ role: 'user', content: user }],
+        });
+        // Contabiliza custo (input/output/cache) no meter de processo.
+        recordLlmUsage(model, {
+          input: res.usage.input_tokens,
+          output: res.usage.output_tokens,
+          cacheRead: (res.usage as { cache_read_input_tokens?: number }).cache_read_input_tokens ?? 0,
+          cacheWrite: (res.usage as { cache_creation_input_tokens?: number }).cache_creation_input_tokens ?? 0,
         });
         const block = res.content.find(
           (b): b is Anthropic.ToolUseBlock => b.type === 'tool_use' && b.name === TOOL_NAME,

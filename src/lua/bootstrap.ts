@@ -25,6 +25,7 @@ import {
   type ProcessingRow,
 } from './db.js';
 import { runEpisode, type StageBDeps } from './pipeline.js';
+import { resetLlmUsage, readLlmUsage, type LlmUsageTotals } from './llm.js';
 
 // ── Tarifas (spec §5.4) — constantes nomeadas. ─────────────────────────────
 // Embeddings text-embedding-3-large@1024: $0,13 por 1M tokens (spec §5.4).
@@ -67,6 +68,8 @@ export type BootstrapReport = {
   factsNew: number;
   factsSuperseded: number;
   factsFlagged: number;
+  // Custo REAL medido (Anthropic) no caminho real — undefined no --dry-run.
+  usage?: LlmUsageTotals;
 };
 
 type EligibleRow = {
@@ -250,6 +253,9 @@ export async function runBootstrap(
     // entram na fila, então o claim global nunca pega um estranho.
     report.enqueued = await enqueueScoped(opts);
 
+    // Zera o meter de custo antes do run (mede só este bootstrap).
+    resetLlmUsage();
+
     // Pool de N workers (default LUA_CONCURRENCY) puxando claims de 1 em 1 até a
     // fila drenar. claimProcessing já ordena por occurred_at ASC (§5.3); com
     // batch=1 cada worker pega sempre o episódio devido mais antigo disponível,
@@ -303,6 +309,7 @@ export async function runBootstrap(
     report.processed = processed;
     report.failed = failed;
     report.episodesSeen = processed + failed;
+    report.usage = readLlmUsage();
 
     await finishRun(runId!, failed > 0 ? 'failed' : 'done', {
       mode: 'real',

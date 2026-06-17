@@ -57,6 +57,17 @@ function printReport(report: BootstrapReport): void {
   console.log(`Fatos novos:         ${report.factsNew}`);
   console.log(`Fatos supersedidos:  ${report.factsSuperseded}`);
   console.log(`Fatos flagados:      ${report.factsFlagged}`);
+  if (report.usage) {
+    const u = report.usage;
+    const perEp = report.processed > 0 ? u.costUsd / report.processed : 0;
+    console.log('--- Custo REAL (Anthropic, medido) ---');
+    console.log(`Chamadas LLM:        ${u.calls}`);
+    console.log(
+      `Tokens:              in=${u.inputTokens} out=${u.outputTokens} cacheRead=${u.cacheReadTokens} cacheWrite=${u.cacheWriteTokens}`
+    );
+    console.log(`Custo total:         ${usd(u.costUsd)}`);
+    console.log(`Custo por episodio:  ${usd(perEp)} (${report.processed} processados)`);
+  }
 }
 
 async function main(): Promise<number> {
