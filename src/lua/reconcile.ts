@@ -62,7 +62,7 @@ export interface ReconcileResult {
 }
 
 // Candidato apos embedding + resolucao de valid_at, antes de tocar o banco.
-interface PreparedCandidate {
+export interface PreparedCandidate {
   statement: string;
   factType: string;
   attributes: Record<string, unknown>;
@@ -305,18 +305,40 @@ async function reconcileIntraEpisode(
 }
 
 // ── Reconciliacao por episodio (orquestrador) ───────────────────────────────
+//
+// FIX idle-in-transaction (spec docs/specs/2026-06-17-lua-reconcile-tx-fix.md):
+// o reconcile e dividido em duas fases:
+//  - prepareReconcile: trabalho de LLM (embeddings + judging INTRA-episodio).
+//    SEM PoolClient -> roda FORA da TX2 do caller. Era o bloco O(n²) que segurava
+//    a transacao ociosa >60s e fazia o Postgres derrubar a sessao (25P03).
+//  - applyReconcile: escritas (insert/supersede/flag) + busca de vizinhos. Roda
+//    DENTRO da TX2. Em memoria fria (bootstrap) nao ha vizinhos, entao a TX nao
+//    tem nenhum LLM; em memoria quente ha <=8 judges/survivor (gap limitado).
+// `reconcileEpisode` segue valido (prepare+apply) para callers que ja sao donos
+// da TX e usam clientes instantaneos (testes); o pipeline (runStageB) chama
+// prepareReconcile ANTES do BEGIN e applyReconcile depois.
 
-export async function reconcileEpisode(
-  client: PoolClient,
+/** Saida da fase de preparo (LLM, sem banco). Consumida por applyReconcile. */
+export interface PreparedReconcile {
+  survivors: PreparedCandidate[];
+  supersedePairs: { earlierIdx: number; laterIdx: number }[];
+  embeddingModel: string;
+}
+
+/**
+ * Fase 1 (LLM, SEM banco): embeddings de todos os statements (§5.3-B3) +
+ * reconciliacao INTRA-episodio (§6.4). NAO recebe PoolClient — toda a latencia
+ * de LLM acontece fora de qualquer transacao.
+ */
+export async function prepareReconcile(
   args: ReconcileArgs,
   deps: ReconcileDeps
-): Promise<ReconcileResult> {
+): Promise<PreparedReconcile> {
   const embeddingModel = deps.embeddingClient.model;
+  if (args.candidates.length === 0) {
+    return { survivors: [], supersedePairs: [], embeddingModel };
+  }
 
-  const result: ReconcileResult = { inserted: 0, superseded: 0, flagged: 0 };
-  if (args.candidates.length === 0) return result;
-
-  // ── Passo 0: embeddings de TODOS os statements ANTES de qualquer write (§5.3-B3).
   const embeddings = await deps.embeddingClient.embed(args.candidates.map((c) => c.statement));
 
   const prepared: PreparedCandidate[] = args.candidates.map((c, idx) => {
@@ -337,8 +359,25 @@ export async function reconcileEpisode(
     };
   });
 
-  // ── Passo 1: reconciliacao INTRA-episodio (antes da busca de vizinhos — §6.4).
   const { survivors, supersedePairs } = await reconcileIntraEpisode(prepared, deps.judge, args.occurredAt);
+  return { survivors, supersedePairs, embeddingModel };
+}
+
+/**
+ * Fase 2 (escritas, DENTRO da TX2 do caller): para cada sobrevivente, busca
+ * vizinhos vigentes (§6.1) + julga contra eles (§6.2/§6.3) + INSERT; resolve os
+ * supersedes intra-episodio. O `judge` so e chamado quando ha vizinhos (memoria
+ * fria => nenhum LLM aqui).
+ */
+export async function applyReconcile(
+  client: PoolClient,
+  prep: PreparedReconcile,
+  args: ReconcileArgs,
+  deps: ReconcileDeps
+): Promise<ReconcileResult> {
+  const result: ReconcileResult = { inserted: 0, superseded: 0, flagged: 0 };
+  const { survivors, supersedePairs, embeddingModel } = prep;
+  if (survivors.length === 0 && supersedePairs.length === 0) return result;
 
   // INSERT de todos os sobreviventes primeiro, registrando o id de cada um pelo
   // seu index original — assim resolvemos os supersedePairs intra-episodio.
@@ -393,6 +432,20 @@ export async function reconcileEpisode(
   }
 
   return result;
+}
+
+/**
+ * Orquestrador (prepare + apply numa so chamada). Mantido para callers donos da
+ * TX com clientes instantaneos (testes). O pipeline NAO usa isto — chama as duas
+ * fases separadas para manter o LLM fora da TX2.
+ */
+export async function reconcileEpisode(
+  client: PoolClient,
+  args: ReconcileArgs,
+  deps: ReconcileDeps
+): Promise<ReconcileResult> {
+  const prep = await prepareReconcile(args, deps);
+  return applyReconcile(client, prep, args, deps);
 }
 
 // INSERT de um candidato que nao tem reconciliacao contra vizinhos de banco.

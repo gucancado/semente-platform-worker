@@ -2,7 +2,7 @@ import { test, beforeEach, after } from 'node:test';
 import assert from 'node:assert/strict';
 import type { PoolClient } from 'pg';
 import { pool } from '../../src/db.js';
-import { reconcileEpisode } from '../../src/lua/reconcile.js';
+import { reconcileEpisode, prepareReconcile } from '../../src/lua/reconcile.js';
 import { insertFactTx, type FactInput } from '../../src/lua/db.js';
 import type { FactCandidate, FactType } from '../../src/lua/extract.js';
 import type { EmbeddingClient } from '../../src/lua/embeddings.js';
@@ -667,4 +667,38 @@ test('supersede sobre fato citado em conduta ativa: marca conduta_rules.needs_re
     [ruleId!]
   );
   assert.equal(rows[0]!.needs_review, true, 'a regra de conduta que citava o fato fica needs_review');
+});
+
+// ─────────────────────────────────────────────────────────────────────────
+// FIX idle-in-transaction (spec 2026-06-17): o trabalho de LLM do reconcile
+// (embeddings + judging intra-episódio) deve rodar FORA da TX2. `prepareReconcile`
+// faz essa fase SEM PoolClient — provando que o bloco de judging O(n²), que antes
+// segurava a transação aberta >60s (Postgres 25P03), agora antecede o BEGIN.
+// ─────────────────────────────────────────────────────────────────────────
+
+test('prepareReconcile faz embed+intra-episodio SEM client (fora da TX): colapsa duplicate', async () => {
+  const candidates: FactCandidate[] = [
+    candidate({ fact_type: 'decisao', statement: 'A verba e 8k.', turn_start: 0, turn_end: 0 }),
+    candidate({ fact_type: 'decisao', statement: 'Verba mensal 8 mil.', turn_start: 1, turn_end: 1 }),
+  ];
+  // intra-episódio: o par é julgado 'duplicate' -> colapsa em 1 survivor.
+  const judge = makeFakeJudge({ 'A verba e 8k.::Verba mensal 8 mil.': 'duplicate' });
+
+  // prepareReconcile NÃO recebe PoolClient: toda a fase de LLM (embed + intra)
+  // acontece antes de qualquer transação.
+  const prep = await prepareReconcile(
+    {
+      workspaceId: 'w1',
+      episodeId: 1,
+      episodeRevision: 1,
+      occurredAt: '2026-05-01T14:00:00Z',
+      candidates,
+      extractedBy: 'fake-extractor',
+    },
+    { embeddingClient: makeFakeEmbedding(), judge }
+  );
+
+  assert.equal(prep.survivors.length, 1, 'intra duplicate colapsado em 1 survivor — sem tocar o banco');
+  assert.equal(prep.survivors[0]!.embedding.length, 1024, 'embedding computado na fase de preparo (fora da TX)');
+  assert.equal(prep.embeddingModel, 'fake@1024');
 });

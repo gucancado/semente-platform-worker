@@ -12,7 +12,7 @@ import { pool } from '../db.js';
 import { chunkTurns, type Turn } from './chunking.js';
 import { embedBatched, type EmbeddingClient } from './embeddings.js';
 import { extractFacts, type ExtractInput } from './extract.js';
-import { reconcileEpisode, type ReconcileResult } from './reconcile.js';
+import { prepareReconcile, applyReconcile, type ReconcileResult } from './reconcile.js';
 import type { LlmClient } from './llm.js';
 import {
   insertChunksTx,
@@ -312,10 +312,29 @@ export async function runStageB(
   };
   const candidates = await extractFacts(deps.llmClient, extractInput);
 
-  // ── Passo 2/3: TX2 única (§5.3-B3) — invalidação §4.6 → reconcile → finish.
+  // ── Passo 2: PREPARO do reconcile (embeddings + judging intra-episodio) — LLM,
+  // SEM banco, FORA da TX2. Fix idle-in-transaction (spec 2026-06-17): este bloco
+  // (antes O(n²) judges dentro da TX) é o que segurava a transação ociosa >60s e
+  // fazia o Postgres derrubar a sessão (25P03).
+  const reconcileArgs = {
+    workspaceId,
+    episodeId: Number(row.episode_id),
+    episodeRevision: row.episode_revision,
+    occurredAt: meta.occurredAt.toISOString(),
+    candidates,
+    extractedBy: deps.llmClient.model,
+  };
+  const reconcileDeps = { embeddingClient: deps.embeddingClient, judge: deps.judge };
+  const prepared = await prepareReconcile(reconcileArgs, reconcileDeps);
+
+  // ── Passo 3: TX2 única (§5.3-B3) — invalidação §4.6 → escritas do reconcile →
+  // finish. Só writes + a busca de vizinhos (read) + ≤8 judges/survivor (vazio em
+  // memória fria). `SET LOCAL` dá margem ao tail de judges de vizinho sem mexer no
+  // default global do pool (60s, proteção do poller).
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+    await client.query(`SET LOCAL idle_in_transaction_session_timeout = '180000'`);
 
     // §4.6: invalida fatos da revision anterior DENTRO da TX, após a extração pronta.
     await invalidatePriorRevisionFactsTx(client, {
@@ -323,18 +342,7 @@ export async function runStageB(
       episodeRevision: row.episode_revision,
     });
 
-    const reconcileResult = await reconcileEpisode(
-      client,
-      {
-        workspaceId,
-        episodeId: Number(row.episode_id),
-        episodeRevision: row.episode_revision,
-        occurredAt: meta.occurredAt.toISOString(),
-        candidates,
-        extractedBy: deps.llmClient.model,
-      },
-      { embeddingClient: deps.embeddingClient, judge: deps.judge }
-    );
+    const reconcileResult = await applyReconcile(client, prepared, reconcileArgs, reconcileDeps);
 
     const ok = await finishProcessingTx(client, {
       id: row.id,
