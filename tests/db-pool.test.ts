@@ -13,3 +13,12 @@ test('o pool pg tem um handler de erro (nao derruba o processo em conexao ociosa
     'pool.on("error") ausente — erro de conexao ociosa derrubaria o processo'
   );
 });
+
+test('o pool anexa handler de erro em cada cliente (cobre conexao EM USO na TX)', () => {
+  // pool.on('connect', client => client.on('error', ...)) garante que um cliente
+  // checked-out cuja conexao cai mid-transacao nao emita um 'error' nao-tratado.
+  assert.ok(
+    pool.listenerCount('connect') >= 1,
+    'pool.on("connect") ausente — erro em cliente EM USO derrubaria o processo'
+  );
+});

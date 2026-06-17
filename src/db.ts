@@ -29,6 +29,18 @@ pool.on('error', (err) => {
   console.error('[pg pool] erro em conexão ociosa (recuperado, não-fatal):', err.message);
 });
 
+// O pool.on('error') acima só cobre clientes OCIOSOS. Um cliente CHECKED OUT
+// (em uso numa transação — ex.: a TX2 do estágio B, que segura o cliente durante
+// busca de vizinhos + judges + inserts) cujo backend cai mid-transação emite
+// 'error' no PRÓPRIO cliente; sem listener nele, o evento é não-tratado e derruba
+// o processo (matava o bootstrap após poucos episódios, deixando TX zumbi). Anexa
+// um listener a cada cliente no momento da conexão. A query em curso já rejeita.
+pool.on('connect', (client) => {
+  client.on('error', (err) => {
+    console.error('[pg client] erro em conexão em uso (recuperado, não-fatal):', err.message);
+  });
+});
+
 export type ContactRoute = {
   id: number;
   agent: string;
