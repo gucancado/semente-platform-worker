@@ -1,4 +1,5 @@
-import { S3Client, PutObjectCommand, HeadObjectCommand } from '@aws-sdk/client-s3';
+import { S3Client, PutObjectCommand, HeadObjectCommand, GetObjectCommand } from '@aws-sdk/client-s3';
+import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { config } from '../config.js';
 
 export function r2Configured(): boolean {
@@ -24,4 +25,11 @@ export async function putAndVerify(key: string, body: Buffer | string, contentTy
   if (head.ContentLength !== buf.length) {
     throw new Error(`r2: verificação falhou pra ${key} (esperado ${buf.length}, gravado ${head.ContentLength})`);
   }
+}
+
+/** URL GET presigned (TTL curto) pro objeto de episódio. Lança se R2 não configurado. */
+export async function presignGet(key: string, ttlSeconds = 120): Promise<string> {
+  if (!r2Configured()) throw new Error('r2: não configurado (R2_* ausentes)');
+  const cmd = new GetObjectCommand({ Bucket: config.R2_BUCKET_EPISODES!, Key: key });
+  return getSignedUrl(client(), cmd, { expiresIn: ttlSeconds });
 }
