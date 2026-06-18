@@ -5,6 +5,7 @@ import { requireOwnerToken } from '../admin/auth.js';
 import { getEpisode, listEpisodes, updateEpisodeAttribution } from './db.js';
 import { listDeadDeliveries, requeueDelivery } from '../events/outbox.js';
 import { pool } from '../db.js';
+import { presignGet } from '../integrations/r2.js';
 
 const ListQuery = z.object({
   workspace_id: z.string().optional(),
@@ -73,6 +74,20 @@ export async function registerEpisodesRoutes(app: FastifyInstance): Promise<void
 
   app.register(async (scope) => {
     scope.addHook('preHandler', requireOwnerToken);
+
+    // Redireciona para URL presigned do R2 (raw ou audio) — TTL 120s
+    scope.get('/episodes/:id/asset', async (req, reply) => {
+      const rawId = (req.params as { id: string }).id;
+      if (!/^\d+$/.test(rawId)) return reply.code(400).send({ error: 'id inválido' });
+      const kind = (req.query as { kind?: string }).kind;
+      if (kind !== 'raw' && kind !== 'audio') return reply.code(400).send({ error: 'kind deve ser raw|audio' });
+      const ep = await getEpisode(Number(rawId));
+      if (!ep) return reply.code(404).send({ error: 'episódio não encontrado' });
+      const key = kind === 'raw' ? ep.raw_r2_key : ep.audio_r2_key;
+      if (!key) return reply.code(404).send({ error: `sem ${kind} para este episódio` });
+      const url = await presignGet(key, 120);
+      return reply.code(302).header('location', url).send();
+    });
 
     scope.patch('/admin/episodes/:id/attribution', async (req, reply) => {
       const rawId = (req.params as { id: string }).id;
