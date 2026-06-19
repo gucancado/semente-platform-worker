@@ -138,6 +138,12 @@ const EnvSchema = z.object({
   // Aceita só 'true'/'false' (default 'false'); qualquer outro valor reprova o
   // startup explicitamente (melhor falhar do que ligar por engano).
   LUA_ENABLED: z.enum(['true', 'false']).default('false').transform((v) => v === 'true'),
+  // Convivência da inversão WhatsApp: quando true, ingestão de instância sem número
+  // cadastrado cai no parse legado <agent>-<project> + contact_routes. Vira false no
+  // cutover (Task 20) → instância desconhecida vai pra quarentena.
+  // Parse ESTRITO (NÃO z.coerce.boolean — que coage 'false' p/ true; com
+  // INGEST_LEGACY_PARSE_ENABLED=false no Coolify o corte falharia silenciosamente).
+  INGEST_LEGACY_PARSE_ENABLED: z.enum(['true', 'false']).default('true').transform((v) => v === 'true'),
   // Janela noturna (hora local America/Sao_Paulo) [start, end).
   LUA_WINDOW_START: z.coerce.number().int().min(0).max(23).default(2),
   LUA_WINDOW_END: z.coerce.number().int().min(1).max(24).default(5),
