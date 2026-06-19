@@ -12,7 +12,9 @@ export async function listThreads(pool: Pool, p: { workspaceId: string; numberId
        FROM messages
       WHERE whatsapp_number_id = $1 AND workspace_id = $2
       GROUP BY identifier
-      HAVING ($3::timestamptz IS NULL OR (MAX(created_at), identifier) < ($3, $4))
+      HAVING ($3::timestamptz IS NULL
+          OR MAX(created_at) < $3
+          OR (MAX(created_at) = $3 AND identifier > $4))
       ORDER BY last_at DESC, identifier ASC
       LIMIT $5`,
     [p.numberId, p.workspaceId, cur?.lastAt ?? null, cur?.identifier ?? null, p.limit]);
