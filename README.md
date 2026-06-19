@@ -289,3 +289,77 @@ Recap e idempotente por semana (UNIQUE workspace+period_start). Para regenerar, 
 ```
 DELETE /admin/lua/recaps/:id        # X-Owner-Token
 ```
+
+## Runbook — WhatsApp multi-número por workspace (provisionamento, migração, cutover)
+
+Inversão do modelo agente-cêntrico: o número de WhatsApp vira entidade de 1ª classe
+ligada ao **workspace** (tabelas `whatsapp_numbers` + `workspace_agents`). Ingestão
+resolve `instance → número → workspace`; leitura pelo contrato `whatsapp_v1`
+(REST `/whatsapp/*` + tools MCP), consumido pelo painel central.
+
+### Variáveis de ambiente (novas — definir no Coolify ANTES do deploy)
+- `EVOLUTION_API_URL` / `EVOLUTION_API_KEY` — Evolution API v2 (provisionamento + envio). **REQUIRED** (worker não sobe sem).
+- `PANEL_TOKEN` — shared secret painel↔worker para `/admin/whatsapp/*` e `/whatsapp/*`. **REQUIRED**. `openssl rand -hex 32`.
+- `INGEST_LEGACY_PARSE_ENABLED` — `true` (default) na Fase 1; `false` no cutover. Parse estrito (`'true'`/`'false'`).
+- No painel (beeads-central-de-dados): `WORKER_URL` (= `https://agentes-worker.beeads.com.br`) e `WORKER_PANEL_TOKEN` (= o mesmo `PANEL_TOKEN`).
+
+> ⚠️ As 3 primeiras são **required**: `config.ts` valida no startup e `db.ts` importa `config` no load.
+> Setar no Coolify ANTES de mergear pra master, senão o worker (e a suíte de testes no servidor) não sobem.
+
+### Provisionamento de um número (painel)
+Admin do workspace → página WhatsApp → "Conectar número" → o painel chama
+`POST /admin/whatsapp/numbers` (cria a linha em `whatsapp_numbers` com status `connecting`
+ANTES de criar a instância na Evolution), exibe o QR (`GET /admin/whatsapp/numbers/:id/qr`)
+e faz polling até `connected` (via `connection.update` → `whatsapp_numbers.status`).
+O webhook é **global** (já aponta pro `/webhook`); NÃO configurar webhook por instância.
+
+### Migração legada (Mercúrio/Saturno → números + workspace_agents)
+1. **Dry-run** (lê env, NÃO escreve):
+   ```
+   pnpm whatsapp:migrate-legacy --dry-run
+   ```
+   Revisar o relatório JSON: `numbersCreated`, `agentsUpserted`, `messagesBackfilled`,
+   `webhookLogsBackfilled`, e **`orphans`** (instâncias sem workspace resolvível). Resolver
+   órfãos (cadastrar `contact_routes` ou `fallback_workspace_id` no `AGENT_TOKENS_JSON`) antes do real.
+2. **Real**:
+   ```
+   pnpm whatsapp:migrate-legacy
+   ```
+   Materializa cada instância `<agent>-<project>` como `whatsapp_numbers`
+   (mode `agent_operated`) + `workspace_agents` (operates/observes_numbers) e faz backfill
+   de `messages`/`webhook_logs` (por instância) e `whatsapp_groups` (por agent+project).
+   Idempotente (ON CONFLICT + guardas `whatsapp_number_id IS NULL`) — re-rodar é seguro.
+
+### Observabilidade de misses (ingestão dupla, Fase 1)
+Enquanto `INGEST_LEGACY_PARSE_ENABLED=true`, toda instância sem número cai no parse legado.
+Um `source==='miss'` só ocorre com a flag OFF. Monitorar nos logs do worker:
+```
+grep 'ingest miss' nos logs (campo estruturado: instance, evolution_event_id)
+```
+Antes do cutover, com a flag ON, o objetivo é **0 órfãos** no dry-run e que toda instância
+ativa tenha número materializado.
+
+### Cutover (Fase 2 — corte do parse legado)
+SÓ após observar ~7 dias com toda instância ativa tendo número (0 misses esperados):
+1. No Coolify: `INGEST_LEGACY_PARSE_ENABLED=false` + redeploy.
+2. A partir daí, instância desconhecida vai pra **quarentena** (`webhook_receipts`
+   provider='evolution', status 'failed', last_error 'unknown_instance') — replay admin.
+3. Monitorar 24h: misses devem ir pra quarentena, não derrubar ingestão (responde 200).
+
+### Rollback
+- Reverter o cutover: `INGEST_LEGACY_PARSE_ENABLED=true` + redeploy (volta ao parse legado).
+- O caminho legado de Mercúrio/Saturno permanece intacto enquanto a flag estiver ON; os
+  números materializados (mode agent_operated) atribuem o mesmo agente operador no inbound,
+  preservando o console agentes-beeads.
+
+### Tripwires de capacidade (Evolution / cânone 02 §7)
+A Evolution roda múltiplas instâncias Baileys no mesmo container. Revisar capacidade quando:
+- nº de conexões se aproximar de ~10 (cap operacional atual);
+- RAM do container Evolution > 80%, ou saturação de `evolution-postgres`/`evolution-redis`;
+- reconexões (`connection.update` close→connecting) acumulando sem estabilizar.
+Ação: escalar o recurso Evolution no Coolify ou distribuir instâncias antes de provisionar mais números.
+
+### Outbound (read-first)
+Números nascem `monitored` (outbound desligado). `whatsapp_send` (tool MCP) só envia se o
+número é `agent_operated`, o agente é operador dele, e o lock de canal está livre.
+Portão de aprovação §4 + rate-limit são pontos de integração de produto marcados em `src/whatsapp/send.ts`.
