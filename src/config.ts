@@ -46,6 +46,9 @@ const EnvSchema = z.object({
     }
   }),
   EVOLUTION_WEBHOOK_SECRET: z.string().min(8),
+  // Evolution API v2 (provisionamento + envio). Base e apikey global da app evolution-api.
+  EVOLUTION_API_URL: z.string().url(),
+  EVOLUTION_API_KEY: z.string().min(1),
 
   // WhatsApp Cloud API (Meta) — opcional. Quando setado, ativa /webhook-cloud
   // e /send-cloud no worker. Tokens vivem aqui em vez de no orquestrador
