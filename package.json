@@ -21,6 +21,7 @@
   "dependencies": {
     "@anthropic-ai/sdk": "^0.104.1",
     "@aws-sdk/client-s3": "^3.1065.0",
+    "@aws-sdk/s3-request-presigner": "^3.1071.0",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@types/luxon": "^3.7.1",
     "fastify": "^5.0.0",
