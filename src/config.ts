@@ -78,6 +78,8 @@ const EnvSchema = z.object({
   // Shared secret entre worker e GUI agentes.beeads.com.br para endpoints /admin/*.
   // Gerar com: openssl rand -hex 32
   OWNER_ADMIN_TOKEN: z.string().min(32),
+  // Shared secret entre o painel central (beeads-central-de-dados) e o worker p/ /admin/whatsapp/* e /whatsapp/*.
+  PANEL_TOKEN: z.string().min(1),
 
   // Google OAuth (Entrega 2). Sem default — se ausente, endpoints /admin/.../google/* falham
   // explicitamente em runtime.
