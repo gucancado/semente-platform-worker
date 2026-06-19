@@ -6,8 +6,10 @@ import {
   insertMessage,
   lookupContact,
   logWebhook,
+  pool,
 } from '../db.js';
 import { parseEvolutionPayload, shouldIngest } from './evolution.js';
+import { handleConnectionEvent } from '../whatsapp/connection-events.js';
 import { createTask } from '../bloquim/client.js';
 import { computeScheduledAt } from '../triggers/quiet-hours.js';
 
@@ -21,6 +23,12 @@ export async function registerWebhookRoutes(app: FastifyInstance) {
         'webhook rejeitado — X-Evolution-Secret ausente ou mismatch'
       );
       return reply.code(401).send({ error: 'invalid evolution secret' });
+    }
+
+    // Eventos de instância (connection.update/qrcode.updated) atualizam o status
+    // do número e NÃO seguem pro ingest de mensagem. Tratar antes do parse.
+    if (await handleConnectionEvent(pool, req.body)) {
+      return reply.send({ ok: true });
     }
 
     const msg = parseEvolutionPayload(req.body);
