@@ -12,6 +12,7 @@ import { registerWebhookCloudRoutes, registerSendCloudRoute } from './webhook-cl
 import { registerEpisodesRoutes } from './episodes/routes.js';
 import { registerMemoriaRoutes } from './lua/routes.js';
 import { registerProvisionRoutes } from './whatsapp/provision-routes.js';
+import { registerReadRoutes } from './whatsapp/read-routes.js';
 import { pool } from './db.js';
 import { requireAgentToken } from './auth.js';
 import { startTriggerPoller } from './triggers/poller.js';
@@ -117,6 +118,11 @@ async function main() {
       evolution: { baseUrl: config.EVOLUTION_API_URL, apiKey: config.EVOLUTION_API_KEY },
       panelToken: config.PANEL_TOKEN,
     });
+  });
+
+  // Contrato de leitura WhatsApp (painel central): auth X-Panel-Token.
+  await app.register(async (scope) => {
+    registerReadRoutes(scope, { pool, panelToken: config.PANEL_TOKEN });
   });
 
   await app.listen({ host: '0.0.0.0', port: config.PORT });
