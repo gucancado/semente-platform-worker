@@ -20,6 +20,7 @@ import { searchMemoria } from '../lua/search.js';
 import { getEmbeddingClient } from '../lua/embedding-provider.js';
 import { getFatos, getStatusVigente, getRecapByWeek, getActiveConduta, type FactType } from '../lua/db.js';
 import { resolveRecapPeriodStart } from '../lua/narrativa.js';
+import { whatsappSend } from '../whatsapp/send.js';
 
 export async function whatsappListNumbersHandler(p: Pool, input: { workspace_id: string }) {
   if (!input?.workspace_id) throw new Error('workspace_id required');
@@ -460,5 +461,26 @@ export function registerTools(server: McpServer, agent: string): void {
     async (input): Promise<CallToolResult> => ({
       content: [{ type: 'text', text: JSON.stringify(await whatsappThreadMessagesHandler(pool, input)) }],
     })
+  );
+
+  // ── whatsapp_send (outbound gated) ─────────────────────────────────────
+  server.registerTool(
+    'whatsapp_send',
+    {
+      description: 'Envia mensagem outbound por um número agent_operated que o agente opera (read-first: recusa monitored/não-operador/lock-ocupado).',
+      inputSchema: {
+        workspace_id: z.string(),
+        number_id: z.number(),
+        identifier: z.string().describe('E.164 do destinatário (+55...)'),
+        text: z.string(),
+      },
+    },
+    async (input): Promise<CallToolResult> => {
+      const out = await whatsappSend(
+        { pool, evolution: { baseUrl: config.EVOLUTION_API_URL, apiKey: config.EVOLUTION_API_KEY } },
+        { agent, workspaceId: input.workspace_id, numberId: Number(input.number_id), identifier: input.identifier, text: input.text }
+      );
+      return { content: [{ type: 'text', text: JSON.stringify(out) }] };
+    }
   );
 }
