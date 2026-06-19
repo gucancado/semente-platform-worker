@@ -15,6 +15,7 @@
     "lint": "eslint src/**/*.ts",
     "import:fireflies": "tsx src/cli/import-fireflies.ts",
     "lua:bootstrap": "tsx src/cli/lua-bootstrap.ts",
+    "whatsapp:migrate-legacy": "tsx src/cli/migrate-legacy-whatsapp.ts",
     "lua:sample": "tsx eval/lua/sample.ts",
     "eval:lua": "tsx eval/lua/run.ts"
   },
