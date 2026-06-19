@@ -48,10 +48,11 @@ export async function migrateLegacy(pool: Pool, agentTokens: Record<string, Agen
         WHERE whatsapp_number_id IS NULL AND instance = $3`,
       [numberId, workspaceId, instance]);
     report.webhookLogsBackfilled += w.rowCount ?? 0;
-    // grupos do agente (sweep)
+    // grupos da instância (agent+project) — sweep
     await pool.query(
       `UPDATE whatsapp_groups SET whatsapp_number_id = $1, workspace_id = COALESCE(workspace_id, $2)
-        WHERE whatsapp_number_id IS NULL AND agent = $3`, [numberId, workspaceId, agent]);
+        WHERE whatsapp_number_id IS NULL AND agent = $3
+          AND COALESCE(project,'') = COALESCE($4,'')`, [numberId, workspaceId, agent, project]);
   }
   return report;
 }

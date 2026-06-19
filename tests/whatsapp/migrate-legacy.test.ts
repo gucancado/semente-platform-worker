@@ -32,3 +32,16 @@ test('dry-run não escreve', async () => {
   assert.equal((await pool.query(`SELECT count(*) c FROM whatsapp_numbers`)).rows[0].c, '0');
   assert.ok(report.numbersCreated >= 1); // o relatório conta o que FARIA
 });
+
+test('backfill de grupos é escopado por (agent, project)', async () => {
+  await pool.query(`INSERT INTO contact_routes (agent, channel, identifier, workspace_id) VALUES ('saturno','whatsapp','+1','ws-a')`);
+  await pool.query(`INSERT INTO messages (agent, project, channel, identifier, direction, text) VALUES ('saturno','projA','whatsapp','+1','inbound','a'),('saturno','projB','whatsapp','+2','inbound','b')`);
+  await pool.query(`INSERT INTO whatsapp_groups (agent, jid, project) VALUES ('saturno','gA@g.us','projA'),('saturno','gB@g.us','projB')`);
+  await migrateLegacy(pool, { saturno: { worker_token: 't', fallback_workspace_id: 'ws-a', mode: 'sweep' as const } }, { dryRun: false });
+  const a = await pool.query(`SELECT whatsapp_number_id FROM whatsapp_groups WHERE jid='gA@g.us'`);
+  const b = await pool.query(`SELECT whatsapp_number_id FROM whatsapp_groups WHERE jid='gB@g.us'`);
+  const na = await pool.query(`SELECT id FROM whatsapp_numbers WHERE evolution_instance='saturno-projA'`);
+  const nb = await pool.query(`SELECT id FROM whatsapp_numbers WHERE evolution_instance='saturno-projB'`);
+  assert.equal(Number(a.rows[0].whatsapp_number_id), Number(na.rows[0].id));
+  assert.equal(Number(b.rows[0].whatsapp_number_id), Number(nb.rows[0].id));
+});
