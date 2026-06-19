@@ -14,6 +14,7 @@ import { resolveIngest } from '../whatsapp/resolve-ingest.js';
 import { resolveInboundAgent } from '../whatsapp/ingest-persist.js';
 import { createTask } from '../bloquim/client.js';
 import { computeScheduledAt } from '../triggers/quiet-hours.js';
+import { agentsToTrigger, quarantineUnknownInstance } from '../whatsapp/reaction.js';
 
 export async function registerWebhookRoutes(app: FastifyInstance) {
   app.post('/webhook', async (req, reply) => {
@@ -60,13 +61,13 @@ export async function registerWebhookRoutes(app: FastifyInstance) {
     });
 
     if (resolved.source === 'miss') {
-      // Fase 2 (flag OFF): instância desconhecida. Task 12 substitui por quarentena.
-      // Por ora: loga e responde 200 (não 500) p/ não retriar o Evolution.
+      // Fase 2 (flag OFF): instância desconhecida → quarentena (replay admin via webhook_receipts).
+      await quarantineUnknownInstance(pool, req.body);
       req.log.warn(
         { instance: msg.instance, evolution_event_id: msg.rawEventId },
-        'ingest miss — instância sem número cadastrado e parse legado desligado'
+        'ingest miss → quarentena (instância sem número e parse legado desligado)'
       );
-      return reply.send({ ok: true, ignored: true, reason: 'unknown_instance' });
+      return reply.send({ ok: true, quarantined: true, reason: 'unknown_instance' });
     }
 
     if (resolved.source === 'number') {
@@ -108,7 +109,23 @@ export async function registerWebhookRoutes(app: FastifyInstance) {
           req.log.warn({ err: (err as Error).message }, 'insertMessage(number-path) falhou — webhook segue');
         }
       }
-      // Reação (agent_operated → triggers via workspace_agents) entra na Task 12.
+      // Reação: agentes reactive que operam o número recebem trigger (debounce/quiet-hours
+      // pelo poller). Só DM e só em mensagem nova (não duplicada). Sweep não dispara aqui (cron).
+      if (!inserted.duplicate && msg.identifier && !msg.isGroup) {
+        const toTrigger = await agentsToTrigger(pool, {
+          workspaceId: resolved.workspaceId!,
+          numberId: resolved.numberId!,
+          mode: resolved.mode!,
+        });
+        for (const ag of toTrigger) {
+          try {
+            const scheduledAt = computeScheduledAt(null, config.TRIGGER_DEBOUNCE_MS);
+            await enqueuePendingTrigger({ agent: ag, project: null, identifier: msg.identifier, inbox_id: inserted.id, scheduled_at: scheduledAt });
+          } catch (err) {
+            req.log.warn({ err: (err as Error).message, agent: ag }, 'enqueuePendingTrigger (number-path) falhou');
+          }
+        }
+      }
       return {
         ok: true,
         inbox_id: inserted.id,
