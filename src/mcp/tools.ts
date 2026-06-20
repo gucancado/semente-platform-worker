@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import type { McpServer, CallToolResult } from './sdk.js';
+import type { Pool } from 'pg';
 import {
   lookupContact,
   upsertContact,
@@ -7,7 +8,10 @@ import {
   deleteContact,
   listUnreadInbox,
   markInboxRead,
+  pool,
 } from '../db.js';
+import { listNumbers } from '../whatsapp/numbers.js';
+import { listThreads, listThreadMessages } from '../whatsapp/read-queries.js';
 import { listEpisodes, getEpisode } from '../episodes/db.js';
 import { resolveByWhatsapp } from '../commands/identity.js';
 import { sendCloudText } from '../webhook-cloud/send.js';
@@ -16,6 +20,24 @@ import { searchMemoria } from '../lua/search.js';
 import { getEmbeddingClient } from '../lua/embedding-provider.js';
 import { getFatos, getStatusVigente, getRecapByWeek, getActiveConduta, type FactType } from '../lua/db.js';
 import { resolveRecapPeriodStart } from '../lua/narrativa.js';
+import { whatsappSend } from '../whatsapp/send.js';
+
+export async function whatsappListNumbersHandler(p: Pool, input: { workspace_id: string }) {
+  if (!input?.workspace_id) throw new Error('workspace_id required');
+  return { schema: 'whatsapp_v1', numbers: await listNumbers(p, input.workspace_id) };
+}
+
+export async function whatsappListThreadsHandler(p: Pool, input: { workspace_id: string; number_id: number; limit?: number; cursor?: string }) {
+  if (!input?.workspace_id) throw new Error('workspace_id required');
+  if (!input?.number_id) throw new Error('number_id required');
+  return { schema: 'whatsapp_v1', ...await listThreads(p, { workspaceId: input.workspace_id, numberId: Number(input.number_id), limit: input.limit ?? 30, cursor: input.cursor }) };
+}
+
+export async function whatsappThreadMessagesHandler(p: Pool, input: { workspace_id: string; number_id: number; identifier: string; limit?: number; cursor?: string }) {
+  if (!input?.workspace_id) throw new Error('workspace_id required');
+  if (!input?.number_id || !input?.identifier) throw new Error('number_id and identifier required');
+  return { schema: 'whatsapp_v1', ...await listThreadMessages(p, { numberId: Number(input.number_id), identifier: input.identifier, limit: input.limit ?? 50, cursor: input.cursor }) };
+}
 
 /**
  * Registra todas as tools no `server` com o `agent` baked-in via closure.
@@ -391,6 +413,74 @@ export function registerTools(server: McpServer, agent: string): void {
             sources: [],
           };
       return { content: [{ type: 'text', text: JSON.stringify(payload) }] };
+    }
+  );
+
+  // ── whatsapp_list_numbers ──────────────────────────────────────────────
+  server.registerTool(
+    'whatsapp_list_numbers',
+    {
+      description: 'Lista os números WhatsApp de um workspace (contrato whatsapp_v1).',
+      inputSchema: { workspace_id: z.string() },
+    },
+    async (input): Promise<CallToolResult> => ({
+      content: [{ type: 'text', text: JSON.stringify(await whatsappListNumbersHandler(pool, input)) }],
+    })
+  );
+
+  // ── whatsapp_list_threads ──────────────────────────────────────────────
+  server.registerTool(
+    'whatsapp_list_threads',
+    {
+      description: 'Lista as conversas (threads) de um número, paginadas por keyset.',
+      inputSchema: {
+        workspace_id: z.string(),
+        number_id: z.number(),
+        limit: z.number().optional(),
+        cursor: z.string().optional(),
+      },
+    },
+    async (input): Promise<CallToolResult> => ({
+      content: [{ type: 'text', text: JSON.stringify(await whatsappListThreadsHandler(pool, input)) }],
+    })
+  );
+
+  // ── whatsapp_thread_messages ───────────────────────────────────────────
+  server.registerTool(
+    'whatsapp_thread_messages',
+    {
+      description: 'Lista as mensagens de uma thread (número + identifier), paginadas por keyset.',
+      inputSchema: {
+        workspace_id: z.string(),
+        number_id: z.number(),
+        identifier: z.string(),
+        limit: z.number().optional(),
+        cursor: z.string().optional(),
+      },
+    },
+    async (input): Promise<CallToolResult> => ({
+      content: [{ type: 'text', text: JSON.stringify(await whatsappThreadMessagesHandler(pool, input)) }],
+    })
+  );
+
+  // ── whatsapp_send (outbound gated) ─────────────────────────────────────
+  server.registerTool(
+    'whatsapp_send',
+    {
+      description: 'Envia mensagem outbound por um número agent_operated que o agente opera (read-first: recusa monitored/não-operador/lock-ocupado).',
+      inputSchema: {
+        workspace_id: z.string(),
+        number_id: z.number(),
+        identifier: z.string().describe('E.164 do destinatário (+55...)'),
+        text: z.string(),
+      },
+    },
+    async (input): Promise<CallToolResult> => {
+      const out = await whatsappSend(
+        { pool, evolution: { baseUrl: config.EVOLUTION_API_URL, apiKey: config.EVOLUTION_API_KEY } },
+        { agent, workspaceId: input.workspace_id, numberId: Number(input.number_id), identifier: input.identifier, text: input.text }
+      );
+      return { content: [{ type: 'text', text: JSON.stringify(out) }] };
     }
   );
 }

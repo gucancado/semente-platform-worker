@@ -6,10 +6,15 @@ import {
   insertMessage,
   lookupContact,
   logWebhook,
+  pool,
 } from '../db.js';
 import { parseEvolutionPayload, shouldIngest } from './evolution.js';
+import { handleConnectionEvent } from '../whatsapp/connection-events.js';
+import { resolveIngest } from '../whatsapp/resolve-ingest.js';
+import { resolveInboundAgent } from '../whatsapp/ingest-persist.js';
 import { createTask } from '../bloquim/client.js';
 import { computeScheduledAt } from '../triggers/quiet-hours.js';
+import { agentsToTrigger, quarantineUnknownInstance } from '../whatsapp/reaction.js';
 
 export async function registerWebhookRoutes(app: FastifyInstance) {
   app.post('/webhook', async (req, reply) => {
@@ -21,6 +26,12 @@ export async function registerWebhookRoutes(app: FastifyInstance) {
         'webhook rejeitado — X-Evolution-Secret ausente ou mismatch'
       );
       return reply.code(401).send({ error: 'invalid evolution secret' });
+    }
+
+    // Eventos de instância (connection.update/qrcode.updated) atualizam o status
+    // do número e NÃO seguem pro ingest de mensagem. Tratar antes do parse.
+    if (await handleConnectionEvent(pool, req.body)) {
+      return reply.send({ ok: true });
     }
 
     const msg = parseEvolutionPayload(req.body);
@@ -38,6 +49,95 @@ export async function registerWebhookRoutes(app: FastifyInstance) {
         'webhook: mensagem chegou sem texto extraível — checar envelope keys'
       );
     }
+
+    // Resolução de ingestão (inversão): instância → número → workspace.
+    const legacyParse = (i: string) => {
+      const h = i.indexOf('-');
+      return h < 0 ? { agent: i, project: null } : { agent: i.slice(0, h), project: i.slice(h + 1) };
+    };
+    const resolved = await resolveIngest(pool, msg.instance, {
+      legacyEnabled: config.INGEST_LEGACY_PARSE_ENABLED,
+      legacyParse,
+    });
+
+    if (resolved.source === 'miss') {
+      // Fase 2 (flag OFF): instância desconhecida → quarentena (replay admin via webhook_receipts).
+      await quarantineUnknownInstance(pool, req.body);
+      req.log.warn(
+        { instance: msg.instance, evolution_event_id: msg.rawEventId },
+        'ingest miss → quarentena (instância sem número e parse legado desligado)'
+      );
+      return reply.send({ ok: true, quarantined: true, reason: 'unknown_instance' });
+    }
+
+    if (resolved.source === 'number') {
+      // Caminho NÚMERO (pós-inversão). agent = operador único (agent_operated) ou null (monitored).
+      const agent = await resolveInboundAgent(pool, {
+        workspaceId: resolved.workspaceId!,
+        numberId: resolved.numberId!,
+        mode: resolved.mode!,
+      });
+      const inserted = await logWebhook({
+        agent,
+        channel: msg.channel,
+        instance: msg.instance,
+        identifier: msg.identifier,
+        author: msg.author,
+        push_name: msg.pushName,
+        message_text: msg.messageText,
+        workspace_id: resolved.workspaceId,
+        evolution_event_id: msg.rawEventId,
+        payload_summary: (msg.messageText ?? '').slice(0, 80) || '(sem texto)',
+        bloquim_task_id: null,
+        fallback_used: false,
+        whatsapp_number_id: resolved.numberId,
+      });
+      if (!inserted.duplicate && msg.messageText && msg.identifier) {
+        try {
+          await insertMessage({
+            agent,
+            channel: msg.channel,
+            identifier: msg.identifier,
+            author: msg.author,
+            direction: 'inbound',
+            text: msg.messageText,
+            evolution_event_id: msg.rawEventId,
+            whatsapp_number_id: resolved.numberId,
+            workspace_id: resolved.workspaceId,
+          });
+        } catch (err) {
+          req.log.warn({ err: (err as Error).message }, 'insertMessage(number-path) falhou — webhook segue');
+        }
+      }
+      // Reação: agentes reactive que operam o número recebem trigger (debounce/quiet-hours
+      // pelo poller). Só DM e só em mensagem nova (não duplicada). Sweep não dispara aqui (cron).
+      if (!inserted.duplicate && msg.identifier && !msg.isGroup) {
+        const toTrigger = await agentsToTrigger(pool, {
+          workspaceId: resolved.workspaceId!,
+          numberId: resolved.numberId!,
+          mode: resolved.mode!,
+        });
+        for (const ag of toTrigger) {
+          try {
+            const scheduledAt = computeScheduledAt(null, config.TRIGGER_DEBOUNCE_MS);
+            await enqueuePendingTrigger({ agent: ag, project: null, identifier: msg.identifier, inbox_id: inserted.id, scheduled_at: scheduledAt });
+          } catch (err) {
+            req.log.warn({ err: (err as Error).message, agent: ag }, 'enqueuePendingTrigger (number-path) falhou');
+          }
+        }
+      }
+      return {
+        ok: true,
+        inbox_id: inserted.id,
+        number_id: resolved.numberId,
+        workspace_id: resolved.workspaceId,
+        agent,
+        duplicate: inserted.duplicate,
+        source: 'number',
+      };
+    }
+
+    // resolved.source === 'legacy' → segue o caminho legado EXISTENTE abaixo (inalterado).
 
     const agentCfg = config.AGENT_TOKENS_JSON[msg.agent];
     if (!agentCfg) {

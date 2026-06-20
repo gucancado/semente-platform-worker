@@ -46,6 +46,9 @@ const EnvSchema = z.object({
     }
   }),
   EVOLUTION_WEBHOOK_SECRET: z.string().min(8),
+  // Evolution API v2 (provisionamento + envio). Base e apikey global da app evolution-api.
+  EVOLUTION_API_URL: z.string().url(),
+  EVOLUTION_API_KEY: z.string().min(1),
 
   // WhatsApp Cloud API (Meta) — opcional. Quando setado, ativa /webhook-cloud
   // e /send-cloud no worker. Tokens vivem aqui em vez de no orquestrador
@@ -75,6 +78,8 @@ const EnvSchema = z.object({
   // Shared secret entre worker e GUI agentes.beeads.com.br para endpoints /admin/*.
   // Gerar com: openssl rand -hex 32
   OWNER_ADMIN_TOKEN: z.string().min(32),
+  // Shared secret entre o painel central (beeads-central-de-dados) e o worker p/ /admin/whatsapp/* e /whatsapp/*.
+  PANEL_TOKEN: z.string().min(1),
 
   // Google OAuth (Entrega 2). Sem default — se ausente, endpoints /admin/.../google/* falham
   // explicitamente em runtime.
@@ -133,6 +138,12 @@ const EnvSchema = z.object({
   // Aceita só 'true'/'false' (default 'false'); qualquer outro valor reprova o
   // startup explicitamente (melhor falhar do que ligar por engano).
   LUA_ENABLED: z.enum(['true', 'false']).default('false').transform((v) => v === 'true'),
+  // Convivência da inversão WhatsApp: quando true, ingestão de instância sem número
+  // cadastrado cai no parse legado <agent>-<project> + contact_routes. Vira false no
+  // cutover (Task 20) → instância desconhecida vai pra quarentena.
+  // Parse ESTRITO (NÃO z.coerce.boolean — que coage 'false' p/ true; com
+  // INGEST_LEGACY_PARSE_ENABLED=false no Coolify o corte falharia silenciosamente).
+  INGEST_LEGACY_PARSE_ENABLED: z.enum(['true', 'false']).default('true').transform((v) => v === 'true'),
   // Janela noturna (hora local America/Sao_Paulo) [start, end).
   LUA_WINDOW_START: z.coerce.number().int().min(0).max(23).default(2),
   LUA_WINDOW_END: z.coerce.number().int().min(1).max(24).default(5),

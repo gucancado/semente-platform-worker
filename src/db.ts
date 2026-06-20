@@ -115,7 +115,7 @@ export async function deleteContact(agent: string, id: number): Promise<boolean>
 }
 
 export async function logWebhook(args: {
-  agent: string;
+  agent: string | null;
   channel: string;
   identifier: string | null;
   evolution_event_id: string | null;
@@ -127,16 +127,17 @@ export async function logWebhook(args: {
   message_text?: string | null;
   workspace_id?: string | null;
   author?: string | null;
+  whatsapp_number_id?: number | null;
 }): Promise<{ id: number; duplicate: boolean }> {
-  // Dedup: índice único parcial em (agent, evolution_event_id). Se Evolution
-  // re-emite o mesmo evento, ON CONFLICT cai no DO NOTHING e a query principal
-  // não retorna linha — buscamos o id existente num segundo SELECT.
+  // Dedup: índice único parcial em (evolution_event_id) — global por evento.
+  // Se Evolution re-emite o mesmo evento, ON CONFLICT cai no DO NOTHING e a
+  // query principal não retorna linha — buscamos o id existente num segundo SELECT.
   const insert = await pool.query<{ id: number }>(
     `INSERT INTO webhook_logs
        (agent, channel, identifier, evolution_event_id, payload_summary, bloquim_task_id, fallback_used,
-        instance, push_name, message_text, workspace_id, author)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-     ON CONFLICT (agent, evolution_event_id) WHERE evolution_event_id IS NOT NULL
+        instance, push_name, message_text, workspace_id, author, whatsapp_number_id)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+     ON CONFLICT (evolution_event_id) WHERE evolution_event_id IS NOT NULL
      DO NOTHING
      RETURNING id`,
     [
@@ -152,14 +153,15 @@ export async function logWebhook(args: {
       args.message_text ?? null,
       args.workspace_id ?? null,
       args.author ?? null,
+      args.whatsapp_number_id ?? null,
     ]
   );
   if (insert.rows[0]) {
     return { id: insert.rows[0].id, duplicate: false };
   }
   const existing = await pool.query<{ id: number }>(
-    `SELECT id FROM webhook_logs WHERE agent = $1 AND evolution_event_id = $2 LIMIT 1`,
-    [args.agent, args.evolution_event_id]
+    `SELECT id FROM webhook_logs WHERE evolution_event_id = $1 LIMIT 1`,
+    [args.evolution_event_id]
   );
   return { id: existing.rows[0]!.id, duplicate: true };
 }
@@ -259,7 +261,7 @@ export type MessageRow = {
  * INSERT cai em ON CONFLICT e a row já existia.
  */
 export async function insertMessage(args: {
-  agent: string;
+  agent: string | null;
   project?: string | null;
   channel: string;
   identifier: string;
@@ -274,19 +276,21 @@ export async function insertMessage(args: {
   classifier_intent?: string | null;
   cost_usd?: number | null;
   latency_ms?: number | null;
+  whatsapp_number_id?: number | null;
+  workspace_id?: string | null;
 }): Promise<{ id: number; duplicate: boolean }> {
-  // Pra inbound com evolution_event_id, tenta ON CONFLICT (dedup).
-  // Pra outbound ou inbound sem event_id, insert direto.
-  if (args.direction === 'inbound' && args.evolution_event_id) {
+  // Pra inbound com evolution_event_id E agent presente, tenta ON CONFLICT (dedup).
+  // Pra outbound, inbound sem event_id, ou agent null, insert direto.
+  if (args.direction === 'inbound' && args.evolution_event_id && args.agent) {
     const insert = await pool.query<{ id: number }>(
       `INSERT INTO messages
-         (agent, project, channel, identifier, author, direction, text, evolution_event_id)
-       VALUES ($1, $2, $3, $4, $5, 'inbound', $6, $7)
+         (agent, project, channel, identifier, author, direction, text, evolution_event_id, whatsapp_number_id, workspace_id)
+       VALUES ($1, $2, $3, $4, $5, 'inbound', $6, $7, $8, $9)
        ON CONFLICT (agent, evolution_event_id)
          WHERE direction = 'inbound' AND evolution_event_id IS NOT NULL
          DO NOTHING
        RETURNING id`,
-      [args.agent, args.project ?? null, args.channel, args.identifier, args.author ?? null, args.text, args.evolution_event_id]
+      [args.agent, args.project ?? null, args.channel, args.identifier, args.author ?? null, args.text, args.evolution_event_id, args.whatsapp_number_id ?? null, args.workspace_id ?? null]
     );
     if (insert.rows[0]) return { id: insert.rows[0].id, duplicate: false };
 
@@ -303,8 +307,9 @@ export async function insertMessage(args: {
     `INSERT INTO messages
        (agent, project, channel, identifier, author, direction, text,
         evolution_event_id, evolution_send_id,
-        tier, model, provider, classifier_intent, cost_usd, latency_ms)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+        tier, model, provider, classifier_intent, cost_usd, latency_ms,
+        whatsapp_number_id, workspace_id)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
      RETURNING id`,
     [
       args.agent,
@@ -322,6 +327,8 @@ export async function insertMessage(args: {
       args.classifier_intent ?? null,
       args.cost_usd ?? null,
       args.latency_ms ?? null,
+      args.whatsapp_number_id ?? null,
+      args.workspace_id ?? null,
     ]
   );
   return { id: rows[0]!.id, duplicate: false };
