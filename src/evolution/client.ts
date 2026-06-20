@@ -11,9 +11,28 @@ async function call(deps: EvolutionDeps, method: string, path: string, body?: un
   return res.json();
 }
 
-export async function createEvolutionInstance(deps: EvolutionDeps, instance: string) {
-  // integration: qrcode true; webhook é global (não setar por instância) — spec §1.4
+// Eventos que o worker precisa por instância. CONNECTION_UPDATE/QRCODE p/ status,
+// MESSAGES_UPSERT p/ ingestão. Sem isso o número novo não atualiza status nem recebe msgs.
+const INSTANCE_WEBHOOK_EVENTS = ['MESSAGES_UPSERT', 'CONNECTION_UPDATE', 'QRCODE_UPDATED'];
+
+export async function createEvolutionInstance(deps: EvolutionDeps, instance: string, webhook?: { url: string; secret: string }) {
   await call(deps, 'POST', '/instance/create', { instanceName: instance, qrcode: true, integration: 'WHATSAPP-BAILEYS' });
+  // O webhook GLOBAL da Evolution NÃO envia X-Evolution-Secret → o /webhook do worker
+  // rejeitaria (401). Por isso registramos um webhook POR-INSTÂNCIA com o secret + eventos.
+  if (webhook) await setInstanceWebhook(deps, instance, webhook);
+}
+
+export async function setInstanceWebhook(deps: EvolutionDeps, instance: string, p: { url: string; secret: string }) {
+  await call(deps, 'POST', `/webhook/set/${instance}`, {
+    webhook: {
+      enabled: true,
+      url: p.url,
+      headers: { 'Content-Type': 'application/json', 'X-Evolution-Secret': p.secret },
+      byEvents: false,
+      base64: false,
+      events: INSTANCE_WEBHOOK_EVENTS,
+    },
+  });
 }
 export async function getQrCode(deps: EvolutionDeps, instance: string): Promise<{ base64: string; pairingCode?: string }> {
   const r = await call(deps, 'GET', `/instance/connect/${instance}`);

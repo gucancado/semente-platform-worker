@@ -15,7 +15,7 @@ export function requirePanelToken(panelToken: string) {
   };
 }
 
-export function registerProvisionRoutes(app: FastifyInstance, deps: { pool: Pool; evolution: EvolutionDeps; panelToken: string }) {
+export function registerProvisionRoutes(app: FastifyInstance, deps: { pool: Pool; evolution: EvolutionDeps; panelToken: string; webhook: { url: string; secret: string } }) {
   app.addHook('preHandler', async (req, reply) => {
     if (req.url.startsWith('/admin/whatsapp/')) return requirePanelToken(deps.panelToken)(req, reply);
   });
@@ -27,7 +27,7 @@ export function registerProvisionRoutes(app: FastifyInstance, deps: { pool: Pool
     // INSERT primeiro (P0.3): garante que connection.update encontre a linha.
     const n = await createNumber(deps.pool, { workspaceId: workspace_id, evolutionInstance: instance, label: label ?? null, createdBy: req.actingUser });
     await updateNumberStatus(deps.pool, instance, { status: 'connecting' });
-    try { await createEvolutionInstance(deps.evolution, instance); }
+    try { await createEvolutionInstance(deps.evolution, instance, deps.webhook); }
     catch (e) { await updateNumberStatus(deps.pool, instance, { status: 'disconnected' }); throw e; }
     return reply.code(201).send({ id: n.id, evolution_instance: instance, status: 'connecting' });
   });
