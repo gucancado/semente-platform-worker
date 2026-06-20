@@ -117,6 +117,7 @@ async function main() {
       pool,
       evolution: { baseUrl: config.EVOLUTION_API_URL, apiKey: config.EVOLUTION_API_KEY },
       panelToken: config.PANEL_TOKEN,
+      webhook: { url: config.WORKER_WEBHOOK_URL, secret: config.EVOLUTION_WEBHOOK_SECRET },
     });
   });
 

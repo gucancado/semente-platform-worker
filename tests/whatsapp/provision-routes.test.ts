@@ -11,10 +11,15 @@ function buildApp(evolutionCalls: string[]) {
     baseUrl: 'http://mock', apiKey: 'k',
     fetch: (async (url: string, init: any) => {
       if (/\/instance\/create$/.test(url)) evolutionCalls.push(`create:${JSON.parse(init.body).instanceName}`);
+      const m = url.match(/\/webhook\/set\/(.+)$/);
+      if (m) {
+        const hdr = JSON.parse(init.body).webhook?.headers?.['X-Evolution-Secret'];
+        evolutionCalls.push(`webhook:${m[1]}:${hdr}`);
+      }
       return { ok: true, status: 200, json: async () => ({}) } as any;
     }) as any,
   };
-  registerProvisionRoutes(app, { pool, evolution, panelToken: 'test-panel' });
+  registerProvisionRoutes(app, { pool, evolution, panelToken: 'test-panel', webhook: { url: 'https://wk/webhook', secret: 'sek' } });
   return app;
 }
 
@@ -35,6 +40,8 @@ test('POST /admin/whatsapp/numbers cria a linha ANTES de chamar Evolution', asyn
   const { rows } = await pool.query(`SELECT status FROM whatsapp_numbers WHERE evolution_instance=$1`, [body.evolution_instance]);
   assert.equal(rows[0].status, 'connecting');
   assert.ok(evolutionCalls.includes(`create:${body.evolution_instance}`));
+  // webhook por-instância registrado com o secret (senão o /webhook do worker 401-rejeita o global)
+  assert.ok(evolutionCalls.includes(`webhook:${body.evolution_instance}:sek`));
 });
 
 test('rejeita sem X-Panel-Token', async () => {
