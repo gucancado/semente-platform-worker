@@ -311,7 +311,14 @@ Admin do workspace → página WhatsApp → "Conectar número" → o painel cham
 `POST /admin/whatsapp/numbers` (cria a linha em `whatsapp_numbers` com status `connecting`
 ANTES de criar a instância na Evolution), exibe o QR (`GET /admin/whatsapp/numbers/:id/qr`)
 e faz polling até `connected` (via `connection.update` → `whatsapp_numbers.status`).
-O webhook é **global** (já aponta pro `/webhook`); NÃO configurar webhook por instância.
+
+> ⚠️ **Webhook é POR-INSTÂNCIA, não global.** A premissa inicial ("webhook global basta") estava
+> errada: o `WEBHOOK_GLOBAL_URL` da Evolution NÃO envia o header `X-Evolution-Secret`, então o
+> `/webhook` do worker 401-rejeitaria todos os eventos. `createEvolutionInstance` registra um
+> webhook por-instância (`POST /webhook/set/<instance>`) com o `X-Evolution-Secret` + events
+> `MESSAGES_UPSERT/CONNECTION_UPDATE/QRCODE_UPDATED` (config `WORKER_WEBHOOK_URL`). O webhook
+> global pode seguir ligado (dispara duplicado e bate 401/413 — ruído inofensivo); cleanup =
+> desativar `WEBHOOK_GLOBAL_ENABLED` após garantir webhook por-instância no mercurio/saturno.
 
 ### Migração legada (Mercúrio/Saturno → números + workspace_agents)
 1. **Dry-run** (lê env, NÃO escreve):
