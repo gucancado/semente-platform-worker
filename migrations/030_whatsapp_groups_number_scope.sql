@@ -21,6 +21,14 @@ ALTER TABLE whatsapp_groups ALTER COLUMN agent DROP NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS uq_wa_groups_agent_jid
   ON whatsapp_groups (agent, jid) WHERE agent IS NOT NULL;
 
+-- Defensiva (padrão da migração 026): remove duplicatas number-scoped antes do índice único.
+DELETE FROM whatsapp_groups a
+ USING whatsapp_groups b
+ WHERE a.whatsapp_number_id IS NOT NULL
+   AND a.whatsapp_number_id = b.whatsapp_number_id
+   AND a.jid = b.jid
+   AND a.id > b.id;
+
 -- Alvo do sync por número (monitored).
 CREATE UNIQUE INDEX IF NOT EXISTS uq_wa_groups_number_jid
   ON whatsapp_groups (whatsapp_number_id, jid) WHERE whatsapp_number_id IS NOT NULL;
