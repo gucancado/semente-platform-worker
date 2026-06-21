@@ -24,16 +24,22 @@ export async function listThreads(pool: Pool, p: { workspaceId: string; numberId
   return { threads, nextCursor };
 }
 
-export type Msg = { direction: string; text: string | null; agent: string | null; createdAt: string };
+export type Msg = { direction: string; text: string | null; agent: string | null; createdAt: string; author: string | null; authorName: string | null };
 export async function listThreadMessages(pool: Pool, p: { numberId: number; identifier: string; limit: number; cursor?: string }) {
   const before = p.cursor ? Buffer.from(p.cursor, 'base64').toString() : null;
   const { rows } = await pool.query(
-    `SELECT direction, text, agent, created_at FROM messages
-      WHERE whatsapp_number_id = $1 AND identifier = $2
-        AND ($3::timestamptz IS NULL OR created_at < $3)
-      ORDER BY created_at DESC LIMIT $4`,
+    `SELECT m.direction, m.text, m.agent, m.created_at, m.author,
+            w.push_name AS author_name
+       FROM messages m
+       LEFT JOIN webhook_logs w
+         ON w.evolution_event_id = m.evolution_event_id
+        AND w.whatsapp_number_id = m.whatsapp_number_id
+        AND m.direction = 'inbound'
+      WHERE m.whatsapp_number_id = $1 AND m.identifier = $2
+        AND ($3::timestamptz IS NULL OR m.created_at < $3)
+      ORDER BY m.created_at DESC LIMIT $4`,
     [p.numberId, p.identifier, before, p.limit]);
-  const messages: Msg[] = rows.map(r => ({ direction: r.direction, text: r.text, agent: r.agent, createdAt: r.created_at.toISOString() }));
+  const messages: Msg[] = rows.map(r => ({ direction: r.direction, text: r.text, agent: r.agent, createdAt: r.created_at.toISOString(), author: r.author, authorName: r.author_name }));
   const lastMsg = messages.at(-1);
   const nextCursor = messages.length === p.limit && lastMsg ? Buffer.from(lastMsg.createdAt).toString('base64') : null;
   return { messages, nextCursor };
