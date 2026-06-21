@@ -325,7 +325,7 @@ export async function upsertWhatsappGroups(
     await pool.query(
       `INSERT INTO whatsapp_groups (agent, jid, subject, updated_at)
        VALUES ($1, $2, $3, NOW())
-       ON CONFLICT (agent, jid) DO UPDATE SET
+       ON CONFLICT (agent, jid) WHERE agent IS NOT NULL DO UPDATE SET
          subject = COALESCE(EXCLUDED.subject, whatsapp_groups.subject),
          updated_at = NOW()`,
       [agent, g.jid, g.subject ?? null]
@@ -344,7 +344,7 @@ export async function assignWhatsappGroupProject(
   const { rows } = await pool.query<WhatsappGroup>(
     `INSERT INTO whatsapp_groups (agent, jid, project, updated_at)
      VALUES ($1, $2, $3, NOW())
-     ON CONFLICT (agent, jid) DO UPDATE SET project = $3, updated_at = NOW()
+     ON CONFLICT (agent, jid) WHERE agent IS NOT NULL DO UPDATE SET project = $3, updated_at = NOW()
      RETURNING agent, jid, subject, project, 0 AS msg_count, NULL::timestamptz AS last_at`,
     [agent, jid, project]
   );

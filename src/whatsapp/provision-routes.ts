@@ -3,6 +3,7 @@ import type { Pool } from 'pg';
 import { randomBytes } from 'node:crypto';
 import { createNumber, getNumber, updateNumberStatus } from './numbers.js';
 import { createEvolutionInstance, getQrCode, logoutInstance, deleteInstance, type EvolutionDeps } from '../evolution/client.js';
+import { syncGroupSubjects } from './group-sync.js';
 
 export function generateInstanceName(workspaceId: string) {
   return `ws-${workspaceId.replace(/-/g, '').slice(0, 8)}-${randomBytes(4).toString('hex')}`;
@@ -44,5 +45,12 @@ export function registerProvisionRoutes(app: FastifyInstance, deps: { pool: Pool
     try { await logoutInstance(deps.evolution, n.evolutionInstance); await deleteInstance(deps.evolution, n.evolutionInstance); } catch { /* idempotente */ }
     await updateNumberStatus(deps.pool, n.evolutionInstance, { status: 'disconnected' });
     return reply.send({ status: 'disconnected' });
+  });
+
+  app.post('/admin/whatsapp/numbers/:id/sync-groups', async (req: any, reply) => {
+    const n = await getNumber(deps.pool, Number(req.params.id));
+    if (!n) return reply.code(404).send({ error: 'not found' });
+    const out = await syncGroupSubjects(deps.pool, deps.evolution, n.id);
+    return reply.send({ schema: 'whatsapp_v1', ...out });
   });
 }
