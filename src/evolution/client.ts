@@ -48,3 +48,24 @@ export async function sendText(deps: EvolutionDeps, instance: string, to: string
   const r = await call(deps, 'POST', `/message/sendText/${instance}`, { number: to, text });
   return { sendId: r.key?.id ?? r.id ?? '' };
 }
+
+/** Normaliza jid de grupo da Evolution ('<id>@g.us') p/ o formato do identifier ('+<id>'). */
+export function normalizeGroupJid(raw: string): string {
+  const idPart = raw.split('@')[0] ?? '';
+  return idPart.startsWith('+') ? idPart : `+${idPart}`;
+}
+
+/**
+ * Lista os grupos da instância. Shape do retorno da Evolution varia por versão —
+ * cobrimos array direto e {groups:[...]}; cada item tem id ('<id>@g.us') + subject.
+ */
+export async function fetchAllGroups(
+  deps: EvolutionDeps,
+  instance: string
+): Promise<Array<{ jid: string; subject: string | null }>> {
+  const r = await call(deps, 'GET', `/group/fetchAllGroups/${instance}?getParticipants=false`);
+  const arr: any[] = Array.isArray(r) ? r : Array.isArray(r?.groups) ? r.groups : [];
+  return arr
+    .filter((g) => typeof g?.id === 'string')
+    .map((g) => ({ jid: normalizeGroupJid(g.id), subject: g.subject ?? g.subjectName ?? null }));
+}
