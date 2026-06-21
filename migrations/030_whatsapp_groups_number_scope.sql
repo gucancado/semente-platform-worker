@@ -6,7 +6,14 @@ ALTER TABLE whatsapp_groups ADD COLUMN IF NOT EXISTS id BIGSERIAL;
 
 -- Troca a PK composta por surrogate. PK antiga (agent, jid) impede agent NULL.
 ALTER TABLE whatsapp_groups DROP CONSTRAINT IF EXISTS whatsapp_groups_pkey;
-ALTER TABLE whatsapp_groups ADD PRIMARY KEY (id);
+DO $$ BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+     WHERE conrelid = 'whatsapp_groups'::regclass AND contype = 'p'
+  ) THEN
+    ALTER TABLE whatsapp_groups ADD PRIMARY KEY (id);
+  END IF;
+END $$;
 
 ALTER TABLE whatsapp_groups ALTER COLUMN agent DROP NOT NULL;
 
