@@ -88,3 +88,26 @@ test('shouldIngest: grupo só ingere em sweep', () => {
   assert.equal(shouldIngest(grp, 'reactive'), false);
   assert.equal(shouldIngest(grp, 'sweep'), true);
 });
+
+// ── fromMe (mensagens enviadas pelo próprio número) ───────────────────────
+test('fromMe DM: parse NÃO retorna null e marca fromMe=true', () => {
+  const ev = { ...baseEv, data: { ...baseEv.data, key: { ...baseEv.data.key, fromMe: true, id: 'EVOUT1' } } };
+  const parsed = parseEvolutionPayload(ev);
+  assert.ok(parsed, 'fromMe deve ser parseado, não descartado');
+  assert.equal(parsed!.fromMe, true);
+  assert.equal(parsed!.isGroup, false);
+  assert.equal(parsed!.identifier, '+5531999998888');
+});
+test('fromMe=false continua marcando fromMe=false', () => {
+  const parsed = parseEvolutionPayload(baseEv);
+  assert.ok(parsed);
+  assert.equal(parsed!.fromMe, false);
+});
+test('fromMe em grupo: parseado, isGroup=true, fromMe=true', () => {
+  const ev = { ...groupEv, data: { ...groupEv.data, key: { ...groupEv.data.key, fromMe: true, id: 'EVGOUT1' } } };
+  const parsed = parseEvolutionPayload(ev);
+  assert.ok(parsed);
+  assert.equal(parsed!.fromMe, true);
+  assert.equal(parsed!.isGroup, true);
+  assert.equal(parsed!.identifier, '+120363000000000000');
+});

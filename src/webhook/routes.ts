@@ -99,7 +99,7 @@ export async function registerWebhookRoutes(app: FastifyInstance) {
             channel: msg.channel,
             identifier: msg.identifier,
             author: msg.author,
-            direction: 'inbound',
+            direction: msg.fromMe ? 'outbound' : 'inbound',
             text: msg.messageText,
             evolution_event_id: msg.rawEventId,
             whatsapp_number_id: resolved.numberId,
@@ -111,7 +111,7 @@ export async function registerWebhookRoutes(app: FastifyInstance) {
       }
       // Reação: agentes reactive que operam o número recebem trigger (debounce/quiet-hours
       // pelo poller). Só DM e só em mensagem nova (não duplicada). Sweep não dispara aqui (cron).
-      if (!inserted.duplicate && msg.identifier && !msg.isGroup) {
+      if (!inserted.duplicate && msg.identifier && !msg.isGroup && !msg.fromMe) {
         const toTrigger = await agentsToTrigger(pool, {
           workspaceId: resolved.workspaceId!,
           numberId: resolved.numberId!,
@@ -138,6 +138,12 @@ export async function registerWebhookRoutes(app: FastifyInstance) {
     }
 
     // resolved.source === 'legacy' → segue o caminho legado EXISTENTE abaixo (inalterado).
+
+    // Legacy (mercurio/saturno) nunca ingeriu fromMe (eco do próprio agente).
+    // Como o parse não descarta mais fromMe (number-path precisa), blindamos aqui.
+    if (msg.fromMe) {
+      return { ignored: true, reason: 'fromMe-legacy' };
+    }
 
     const agentCfg = config.AGENT_TOKENS_JSON[msg.agent];
     if (!agentCfg) {
