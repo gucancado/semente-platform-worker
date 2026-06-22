@@ -41,7 +41,6 @@ export function parseEvolutionPayload(raw: unknown): ParsedMessage | null {
   const ev = parse.data;
 
   if (ev.event !== 'messages.upsert') return null;
-  if (ev.data.key.fromMe) return null;
 
   const jid = ev.data.key.remoteJid;
   const isGroup = jid.endsWith('@g.us');
@@ -78,7 +77,7 @@ export function parseEvolutionPayload(raw: unknown): ParsedMessage | null {
     identifier,
     author,
     isGroup,
-    fromMe: false,
+    fromMe: ev.data.key.fromMe,
     pushName: ev.data.pushName ?? null,
     messageText,
     rawEventId: ev.data.key.id,
