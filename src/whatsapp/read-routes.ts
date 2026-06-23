@@ -1,7 +1,8 @@
 import type { FastifyInstance } from 'fastify';
 import type { Pool } from 'pg';
 import { listNumbers } from './numbers.js';
-import { listThreads, listThreadMessages } from './read-queries.js';
+import { listThreads, listThreadMessages, searchThreads } from './read-queries.js';
+import { exportConversation } from './export.js';
 import { requirePanelToken } from './provision-routes.js';
 
 export function registerReadRoutes(app: FastifyInstance, deps: { pool: Pool; panelToken: string }) {
@@ -22,5 +23,20 @@ export function registerReadRoutes(app: FastifyInstance, deps: { pool: Pool; pan
     const { number_id, limit, cursor } = req.query;
     if (!number_id) return reply.code(400).send({ error: 'number_id required' });
     return reply.send({ schema: 'whatsapp_v1', ...await listThreadMessages(deps.pool, { numberId: Number(number_id), identifier: req.params.identifier, limit: Number(limit ?? 50), cursor }) });
+  });
+
+  app.get('/whatsapp/search', { preHandler: auth }, async (req: any, reply) => {
+    const { workspace_id, number_id, query, since, until, kind, lead_status, limit } = req.query;
+    if (!workspace_id || !number_id || !query) return reply.code(400).send({ error: 'workspace_id, number_id e query required' });
+    const k = kind === 'dm' || kind === 'group' ? kind : 'all';
+    const ls = lead_status === 'lead' || lead_status === 'not_lead' ? lead_status : 'all';
+    return reply.send({ schema: 'whatsapp_v1', ...await searchThreads(deps.pool, { workspaceId: workspace_id, numberId: Number(number_id), query, since, until, kind: k, leadStatus: ls, limit: limit ? Number(limit) : undefined }) });
+  });
+
+  app.get('/whatsapp/threads/:identifier/export', { preHandler: auth }, async (req: any, reply) => {
+    const { workspace_id, number_id, since, until, max_messages } = req.query;
+    if (!workspace_id || !number_id) return reply.code(400).send({ error: 'workspace_id and number_id required' });
+    const out = await exportConversation(deps.pool, { workspaceId: workspace_id, numberId: Number(number_id), identifier: req.params.identifier, since, until, maxMessages: max_messages ? Number(max_messages) : undefined });
+    return reply.send({ schema: 'whatsapp_v1', ...out });
   });
 }
