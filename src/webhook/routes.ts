@@ -92,7 +92,7 @@ export async function registerWebhookRoutes(app: FastifyInstance) {
         fallback_used: false,
         whatsapp_number_id: resolved.numberId,
       });
-      if (!inserted.duplicate && msg.messageText && msg.identifier) {
+      if (msg.messageText && msg.identifier) {
         try {
           await insertMessage({
             agent,
@@ -104,7 +104,7 @@ export async function registerWebhookRoutes(app: FastifyInstance) {
             evolution_event_id: msg.rawEventId,
             whatsapp_number_id: resolved.numberId,
             workspace_id: resolved.workspaceId,
-          });
+          });  // dedup próprio por (whatsapp_number_id, evolution_event_id)
         } catch (err) {
           req.log.warn({ err: (err as Error).message }, 'insertMessage(number-path) falhou — webhook segue');
         }
