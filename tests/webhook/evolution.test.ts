@@ -111,3 +111,31 @@ test('fromMe em grupo: parseado, isGroup=true, fromMe=true', () => {
   assert.equal(parsed!.isGroup, true);
   assert.equal(parsed!.identifier, '+120363000000000000');
 });
+
+// ── canonicalização LID (@lid → número real via *Alt) ─────────────────────
+test('DM @lid usa remoteJidAlt (número real) como identifier', () => {
+  const ev = { ...baseEv, data: { ...baseEv.data, key: { remoteJid: '166730898927796@lid', remoteJidAlt: '553196039118@s.whatsapp.net', fromMe: false, id: 'EVLID1', addressingMode: 'lid' } } };
+  const p = parseEvolutionPayload(ev);
+  assert.ok(p);
+  assert.equal(p!.identifier, '+553196039118');
+  assert.equal(p!.isGroup, false);
+});
+test('@lid sem alt mantém o lid (fallback)', () => {
+  const ev = { ...baseEv, data: { ...baseEv.data, key: { remoteJid: '166730898927796@lid', fromMe: false, id: 'EVLID2' } } };
+  const p = parseEvolutionPayload(ev);
+  assert.ok(p);
+  assert.equal(p!.identifier, '+166730898927796');
+});
+test('grupo: author usa participantAlt quando participant é @lid', () => {
+  const ev = { ...groupEv, data: { ...groupEv.data, key: { remoteJid: '120363000000000000@g.us', participant: '228617015537729@lid', participantAlt: '553187508613@s.whatsapp.net', fromMe: false, id: 'EVLID3', addressingMode: 'lid' } } };
+  const p = parseEvolutionPayload(ev);
+  assert.ok(p);
+  assert.equal(p!.isGroup, true);
+  assert.equal(p!.identifier, '+120363000000000000');
+  assert.equal(p!.author, '+553187508613');
+});
+test('número real (@s.whatsapp.net) não é alterado', () => {
+  const p = parseEvolutionPayload(baseEv); // remoteJid 5531999998888@s.whatsapp.net
+  assert.ok(p);
+  assert.equal(p!.identifier, '+5531999998888');
+});

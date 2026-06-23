@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { canonicalJid } from '../evolution/client.js';
 
 /**
  * Payload do Evolution API (subset relevante). Estrutura confirmada com
@@ -13,6 +14,9 @@ export const EvolutionMessageSchema = z.object({
       fromMe: z.boolean(),
       id: z.string(),
       participant: z.string().nullable().optional(), // em grupo: JID de quem enviou
+      remoteJidAlt: z.string().nullable().optional(),    // número real quando remoteJid é @lid
+      participantAlt: z.string().nullable().optional(),  // número real quando participant é @lid
+      addressingMode: z.string().nullable().optional(),  // 'lid' quando endereçado via LID
     }),
     message: z.record(z.string(), z.unknown()).nullable().optional(),
     pushName: z.string().nullable().optional(),
@@ -42,7 +46,7 @@ export function parseEvolutionPayload(raw: unknown): ParsedMessage | null {
 
   if (ev.event !== 'messages.upsert') return null;
 
-  const jid = ev.data.key.remoteJid;
+  const jid = canonicalJid(ev.data.key.remoteJid, ev.data.key.remoteJidAlt);
   const isGroup = jid.endsWith('@g.us');
   const phonePart = jid.split('@')[0] ?? '';
   const identifier = phonePart ? `+${phonePart}` : '';
@@ -53,7 +57,8 @@ export function parseEvolutionPayload(raw: unknown): ParsedMessage | null {
   // `key.participant`. Em DM, participant é ausente e author fica null.
   let author: string | null = null;
   if (isGroup) {
-    const participantPart = (ev.data.key.participant ?? '').split('@')[0] ?? '';
+    const part = canonicalJid(ev.data.key.participant, ev.data.key.participantAlt);
+    const participantPart = (part ?? '').split('@')[0] ?? '';
     author = participantPart ? `+${participantPart}` : null;
   }
 
