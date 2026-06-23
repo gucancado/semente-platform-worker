@@ -1,10 +1,10 @@
 import type { Pool } from 'pg';
 import type { EvolutionDeps } from '../evolution/client.js';
-import { fetchMessages, normalizeGroupJid } from '../evolution/client.js';
+import { fetchMessages, normalizeGroupJid, canonicalJid } from '../evolution/client.js';
 import { extractMessageText } from '../webhook/evolution.js';
 import { getNumber } from './numbers.js';
 
-export type BackfillResult = { scanned: number; inserted: number; skippedNoText: number; pages: number; reachedCutoff: boolean };
+export type BackfillResult = { scanned: number; inserted: number; updated: number; skippedNoText: number; pages: number; reachedCutoff: boolean };
 
 /**
  * Importa mensagens da Evolution p/ `messages`, preservando created_at, com dedup por
@@ -18,10 +18,10 @@ export async function backfillNumber(
   opts: { sinceTs: number; maxPages: number; offset?: number; log?: (m: string) => void }
 ): Promise<BackfillResult> {
   const num = await getNumber(pool, numberId);
-  if (!num) return { scanned: 0, inserted: 0, skippedNoText: 0, pages: 0, reachedCutoff: false };
+  if (!num) return { scanned: 0, inserted: 0, updated: 0, skippedNoText: 0, pages: 0, reachedCutoff: false };
   const offset = opts.offset ?? 100;
   const log = opts.log ?? (() => {});
-  let scanned = 0, inserted = 0, skippedNoText = 0, page = 1, reachedCutoff = false;
+  let scanned = 0, inserted = 0, updated = 0, skippedNoText = 0, page = 1, reachedCutoff = false;
 
   for (; page <= opts.maxPages; page++) {
     const { records, pages } = await fetchMessages(deps, num.evolutionInstance, page, offset);
@@ -30,14 +30,17 @@ export async function backfillNumber(
       scanned++;
       const ts = Number(m?.messageTimestamp ?? 0);
       if (ts && ts < opts.sinceTs) { reachedCutoff = true; continue; }
-      const jid: string | undefined = m?.key?.remoteJid;
+      const rawJid: string | undefined = m?.key?.remoteJid;
       const eventId: string | undefined = m?.key?.id;
-      if (!jid || !eventId) continue;
+      if (!rawJid || !eventId) continue;
+      const jid = canonicalJid(rawJid, m?.key?.remoteJidAlt);
       const text = extractMessageText(m?.message);
       if (!text) { skippedNoText++; continue; }
       const isGroup = jid.endsWith('@g.us');
       const identifier = normalizeGroupJid(jid);
-      const author = isGroup && m?.key?.participant ? normalizeGroupJid(m.key.participant) : null;
+      const author = isGroup
+        ? (m?.key?.participant ? normalizeGroupJid(canonicalJid(m.key.participant, m?.key?.participantAlt)) : null)
+        : null;
       const direction = m?.key?.fromMe ? 'outbound' : 'inbound';
       const createdAt = ts ? new Date(ts * 1000) : new Date();
       try {
@@ -46,11 +49,11 @@ export async function backfillNumber(
            VALUES ($1, $2, NULL, 'whatsapp', $3, $4, $5, $6, $7, $8)
            ON CONFLICT (whatsapp_number_id, evolution_event_id)
              WHERE whatsapp_number_id IS NOT NULL AND evolution_event_id IS NOT NULL
-             DO NOTHING
-           RETURNING id`,
+             DO UPDATE SET identifier = EXCLUDED.identifier, author = EXCLUDED.author
+           RETURNING (xmax = 0) AS inserted`,
           [numberId, num.workspaceId, identifier, author, direction, text, eventId, createdAt]
         );
-        if (res.rows[0]) inserted++;
+        if (res.rows[0]?.inserted) inserted++; else updated++;
       } catch (err) {
         log(`[backfill] erro msg ${eventId}: ${(err as Error).message}`);
       }
@@ -59,6 +62,6 @@ export async function backfillNumber(
     if (pages && page >= pages) break;
     if (page % 10 === 0) log(`[backfill] number=${numberId} page=${page} scanned=${scanned} inserted=${inserted}`);
   }
-  log(`[backfill] DONE number=${numberId} pages=${page} scanned=${scanned} inserted=${inserted} skippedNoText=${skippedNoText} reachedCutoff=${reachedCutoff}`);
-  return { scanned, inserted, skippedNoText, pages: page, reachedCutoff };
+  log(`[backfill] DONE number=${numberId} pages=${page} scanned=${scanned} inserted=${inserted} updated=${updated} skippedNoText=${skippedNoText} reachedCutoff=${reachedCutoff}`);
+  return { scanned, inserted, updated, skippedNoText, pages: page, reachedCutoff };
 }

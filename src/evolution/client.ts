@@ -49,6 +49,16 @@ export async function sendText(deps: EvolutionDeps, instance: string, to: string
   return { sendId: r.key?.id ?? r.id ?? '' };
 }
 
+/**
+ * Resolve o LID de privacidade do WhatsApp p/ o número real, quando disponível.
+ * Mensagens @lid trazem o número em `*Alt` (remoteJidAlt/participantAlt). Sem alt,
+ * mantém o jid original. Para @g.us e @s.whatsapp.net, retorna o próprio jid.
+ */
+export function canonicalJid(jid: string | null | undefined, jidAlt: string | null | undefined): string {
+  if (jid && jid.endsWith('@lid') && jidAlt && jidAlt.endsWith('@s.whatsapp.net')) return jidAlt;
+  return jid ?? '';
+}
+
 /** Normaliza jid de grupo da Evolution ('<id>@g.us') p/ o formato do identifier ('+<id>'). */
 export function normalizeGroupJid(raw: string): string {
   const idPart = raw.split('@')[0] ?? '';
