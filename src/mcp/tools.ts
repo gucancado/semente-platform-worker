@@ -521,4 +521,34 @@ export function registerTools(server: McpServer, agent: string, cfg: AgentConfig
       return { content: [{ type: 'text', text: JSON.stringify(out) }] };
     }
   );
+
+  // ── whatsapp_set_lead_status ───────────────────────────────────────────
+  server.registerTool(
+    'whatsapp_set_lead_status',
+    {
+      description: 'Marca/desmarca uma conversa como lead (reversível). Exige que o agente tenha capability de escrita E que acting_user (telefone E.164) seja admin do workspace.',
+      inputSchema: { workspace_id: z.string(), number_id: z.number(), identifier: z.string(), status: z.enum(['lead', 'not_lead']), acting_user: z.string().describe('Telefone E.164 do operador admin.') },
+    },
+    async (input): Promise<CallToolResult> => {
+      const gate = await requireWhatsappWrite(cfg, input.acting_user, input.workspace_id);
+      if (!gate.ok) return { content: [{ type: 'text', text: JSON.stringify(gate) }] };
+      await setLeadStatus(pool, { numberId: Number(input.number_id), identifier: input.identifier, isLead: input.status === 'lead', updatedBy: 'mcp:' + input.acting_user });
+      return { content: [{ type: 'text', text: JSON.stringify({ schema: 'whatsapp_v1', ok: true, identifier: input.identifier, leadStatus: input.status }) }] };
+    }
+  );
+
+  // ── whatsapp_set_group_exposure ────────────────────────────────────────
+  server.registerTool(
+    'whatsapp_set_group_exposure',
+    {
+      description: 'Liga/desliga a exposição de grupos do número no MCP. Mesmo duplo gate (capability + acting_user admin).',
+      inputSchema: { workspace_id: z.string(), number_id: z.number(), expose: z.boolean(), acting_user: z.string() },
+    },
+    async (input): Promise<CallToolResult> => {
+      const gate = await requireWhatsappWrite(cfg, input.acting_user, input.workspace_id);
+      if (!gate.ok) return { content: [{ type: 'text', text: JSON.stringify(gate) }] };
+      await setGroupExposure(pool, { numberId: Number(input.number_id), expose: input.expose });
+      return { content: [{ type: 'text', text: JSON.stringify({ schema: 'whatsapp_v1', ok: true, number_id: input.number_id, expose_groups_in_mcp: input.expose }) }] };
+    }
+  );
 }
