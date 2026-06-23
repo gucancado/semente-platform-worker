@@ -5,6 +5,7 @@ import { createNumber, getNumber, updateNumberStatus } from './numbers.js';
 import { createEvolutionInstance, getQrCode, logoutInstance, deleteInstance, type EvolutionDeps } from '../evolution/client.js';
 import { syncGroupSubjects } from './group-sync.js';
 import { backfillNumber } from './backfill.js';
+import { setGroupExposure } from './thread-meta.js';
 
 export function generateInstanceName(workspaceId: string) {
   return `ws-${workspaceId.replace(/-/g, '').slice(0, 8)}-${randomBytes(4).toString('hex')}`;
@@ -65,5 +66,13 @@ export function registerProvisionRoutes(app: FastifyInstance, deps: { pool: Pool
     backfillNumber(deps.pool, deps.evolution, n.id, { sinceTs, maxPages, log: (m) => req.log.info(m) })
       .catch((err) => req.log.error({ err: (err as Error).message }, '[backfill] falhou'));
     return reply.send({ schema: 'whatsapp_v1', started: true, numberId: n.id, days, maxPages, sinceTs });
+  });
+
+  app.post('/admin/whatsapp/numbers/:id/group-exposure', async (req: any, reply) => {
+    const n = await getNumber(deps.pool, Number(req.params.id));
+    if (!n) return reply.code(404).send({ error: 'not found' });
+    const expose = req.body?.expose === true;
+    await setGroupExposure(deps.pool, { numberId: n.id, expose });
+    return reply.send({ schema: 'whatsapp_v1', id: n.id, expose_groups_in_mcp: expose });
   });
 }
