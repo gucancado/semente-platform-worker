@@ -16,6 +16,9 @@ const AgentTokensSchema = z.record(
     //  - 'sweep': agente auditor (saturno). INGERE mensagens de grupo (@g.us)
     //    pra inbox, NÃO cria task nem dispara trigger reativo (varre por cron).
     mode: z.enum(['reactive', 'sweep']).default('reactive'),
+    // Capability de escrita WhatsApp (lead/exposição) via MCP. Default false:
+    // só agentes explicitamente marcados (ex.: 'analista') podem escrever.
+    can_write_whatsapp_meta: z.boolean().default(false),
   })
 );
 

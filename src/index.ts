@@ -13,6 +13,7 @@ import { registerEpisodesRoutes } from './episodes/routes.js';
 import { registerMemoriaRoutes } from './lua/routes.js';
 import { registerProvisionRoutes } from './whatsapp/provision-routes.js';
 import { registerReadRoutes } from './whatsapp/read-routes.js';
+import { registerWriteRoutes } from './whatsapp/write-routes.js';
 import { pool } from './db.js';
 import { requireAgentToken } from './auth.js';
 import { startTriggerPoller } from './triggers/poller.js';
@@ -126,8 +127,17 @@ async function main() {
     registerReadRoutes(scope, { pool, panelToken: config.PANEL_TOKEN });
   });
 
+  // Contrato de ESCRITA WhatsApp (painel central): auth X-Panel-Token.
+  await app.register(async (scope) => {
+    registerWriteRoutes(scope, { pool, panelToken: config.PANEL_TOKEN });
+  });
+
   await app.listen({ host: '0.0.0.0', port: config.PORT });
   app.log.info({ port: config.PORT }, 'semente-platform-worker up');
+
+  if (!config.INTERNAL_API_SECRET) {
+    app.log.warn('INTERNAL_API_SECRET ausente — escrita de lead/exposição via MCP será SEMPRE recusada (fail-closed).');
+  }
 
   // Poller que processa pending_triggers (burst smoothing + quiet hours).
   // Substitui o trigger fire-and-forget inline do webhook handler.

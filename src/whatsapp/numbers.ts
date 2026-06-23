@@ -3,15 +3,17 @@ import type { Pool } from 'pg';
 export type WhatsappNumber = {
   id: number; workspaceId: string; phone: string | null; evolutionInstance: string;
   label: string | null; status: 'pending'|'connecting'|'connected'|'disconnected';
-  mode: 'monitored'|'agent_operated'; createdBy: string | null; createdAt: string; updatedAt: string;
+  mode: 'monitored'|'agent_operated'; exposeGroupsInMcp: boolean;
+  createdBy: string | null; createdAt: string; updatedAt: string;
 };
 
 const SELECT = `SELECT id, workspace_id, phone, evolution_instance, label, status, mode,
-  created_by, created_at, updated_at FROM whatsapp_numbers`;
+  expose_groups_in_mcp, created_by, created_at, updated_at FROM whatsapp_numbers`;
 
 function map(r: any): WhatsappNumber {
   return { id: Number(r.id), workspaceId: r.workspace_id, phone: r.phone, evolutionInstance: r.evolution_instance,
-    label: r.label, status: r.status, mode: r.mode, createdBy: r.created_by,
+    label: r.label, status: r.status, mode: r.mode, exposeGroupsInMcp: r.expose_groups_in_mcp === true,
+    createdBy: r.created_by,
     createdAt: r.created_at.toISOString?.() ?? r.created_at, updatedAt: r.updated_at.toISOString?.() ?? r.updated_at };
 }
 

@@ -2,6 +2,7 @@ import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { requireAgentToken } from '../auth.js';
 import { McpServer, StreamableHTTPServerTransport } from './sdk.js';
 import { registerTools } from './tools.js';
+import { config } from '../config.js';
 
 /**
  * Cria um McpServer com tools registrados em closure sobre o agentName.
@@ -12,7 +13,8 @@ function buildServerForAgent(agentName: string): McpServer {
     { name: 'semente-platform', version: '0.1.0' },
     { capabilities: { tools: {} } }
   );
-  registerTools(server, agentName);
+  const cfg = config.AGENT_TOKENS_JSON[agentName] ?? { worker_token: '', mode: 'reactive' as const, can_write_whatsapp_meta: false };
+  registerTools(server, agentName, cfg);
   return server;
 }
 

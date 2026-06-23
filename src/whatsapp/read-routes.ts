@@ -12,10 +12,11 @@ export function registerReadRoutes(app: FastifyInstance, deps: { pool: Pool; pan
     return reply.send({ schema: 'whatsapp_v1', numbers: await listNumbers(deps.pool, ws) });
   });
   app.get('/whatsapp/threads', { preHandler: auth }, async (req: any, reply) => {
-    const { workspace_id, number_id, limit, cursor, kind } = req.query;
+    const { workspace_id, number_id, limit, cursor, kind, lead_status } = req.query;
     if (!workspace_id || !number_id) return reply.code(400).send({ error: 'workspace_id and number_id required' });
     const k = kind === 'dm' || kind === 'group' ? kind : 'all';
-    return reply.send({ schema: 'whatsapp_v1', ...await listThreads(deps.pool, { workspaceId: workspace_id, numberId: Number(number_id), limit: Number(limit ?? 30), cursor, kind: k }) });
+    const ls = lead_status === 'lead' || lead_status === 'not_lead' ? lead_status : 'all';
+    return reply.send({ schema: 'whatsapp_v1', ...await listThreads(deps.pool, { workspaceId: workspace_id, numberId: Number(number_id), limit: Number(limit ?? 30), cursor, kind: k, leadStatus: ls }) });
   });
   app.get('/whatsapp/threads/:identifier/messages', { preHandler: auth }, async (req: any, reply) => {
     const { number_id, limit, cursor } = req.query;
