@@ -55,6 +55,18 @@ export function normalizeGroupJid(raw: string): string {
   return idPart.startsWith('+') ? idPart : `+${idPart}`;
 }
 
+/** Uma página de mensagens da instância (Evolution v2 paginado, desc por messageTimestamp). */
+export async function fetchMessages(
+  deps: EvolutionDeps,
+  instance: string,
+  page: number,
+  offset = 100
+): Promise<{ records: any[]; total: number; pages: number }> {
+  const r = await call(deps, 'POST', `/chat/findMessages/${instance}`, { where: {}, page, offset });
+  const m = r?.messages ?? {};
+  return { records: Array.isArray(m.records) ? m.records : [], total: m.total ?? 0, pages: m.pages ?? 0 };
+}
+
 /**
  * Lista os grupos da instância. Shape do retorno da Evolution varia por versão —
  * cobrimos array direto e {groups:[...]}; cada item tem id ('<id>@g.us') + subject.
