@@ -16,7 +16,7 @@ export async function exportConversation(pool: Pool, p: { workspaceId: string; n
   let cursor: string | undefined = undefined;
   let truncated = false;
   while (collected.length < cap) {
-    const page = await listThreadMessages(pool, { numberId: p.numberId, identifier: p.identifier, limit: Math.min(100, cap - collected.length), cursor });
+    const page = await listThreadMessages(pool, { numberId: p.numberId, identifier: p.identifier, limit: Math.min(100, cap - collected.length), cursor, since: p.since, until: p.until });
     collected.push(...page.messages.map(m => ({ direction: m.direction, text: m.text, author: m.author, authorName: m.authorName, createdAt: m.createdAt })));
     if (!page.nextCursor) break;
     cursor = page.nextCursor;
@@ -33,8 +33,8 @@ export async function exportConversation(pool: Pool, p: { workspaceId: string; n
   };
   // Pré-resolve identidades (DM: o identifier; grupo: autores distintos).
   const toResolve = isGroup ? [...new Set(asc.map(m => m.author).filter(Boolean) as string[])] : [p.identifier];
-  for (const id of toResolve) {
-    const u = await resolveByWhatsapp(id);
+  const resolved = await Promise.all(toResolve.map(id => resolveByWhatsapp(id).then(u => ({ id, u }))));
+  for (const { id, u } of resolved) {
     teamCache.set(id, !!u && (u.workspaces?.some(w => ['admin', 'owner', 'editor', 'member'].includes((w.role || '').toLowerCase())) ?? false));
     if (!isGroup && u) contactName = u.name;
   }

@@ -532,6 +532,11 @@ export function registerTools(server: McpServer, agent: string, cfg: AgentConfig
     async (input): Promise<CallToolResult> => {
       const gate = await requireWhatsappWrite(cfg, input.acting_user, input.workspace_id);
       if (!gate.ok) return { content: [{ type: 'text', text: JSON.stringify(gate) }] };
+      const expose = await getNumberExposure(pool, Number(input.number_id));
+      const isGroup = await isGroupThread(pool, Number(input.number_id), input.identifier);
+      if (!groupAccessAllowed(isGroup, expose)) {
+        return { content: [{ type: 'text', text: JSON.stringify({ error: 'groups_not_exposed' }) }] };
+      }
       await setLeadStatus(pool, { numberId: Number(input.number_id), identifier: input.identifier, isLead: input.status === 'lead', updatedBy: 'mcp:' + input.acting_user });
       return { content: [{ type: 'text', text: JSON.stringify({ schema: 'whatsapp_v1', ok: true, identifier: input.identifier, leadStatus: input.status }) }] };
     }
