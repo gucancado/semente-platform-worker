@@ -11,21 +11,16 @@ import {
   pool,
 } from '../db.js';
 import { listNumbers } from '../whatsapp/numbers.js';
-import { listThreads, listThreadMessages, searchThreads } from '../whatsapp/read-queries.js';
+import { listThreads, listThreadMessages } from '../whatsapp/read-queries.js';
 import { listEpisodes, getEpisode } from '../episodes/db.js';
 import { resolveByWhatsapp } from '../commands/identity.js';
 import { sendCloudText } from '../webhook-cloud/send.js';
 import { config } from '../config.js';
-import type { AgentConfig } from '../config.js';
 import { searchMemoria } from '../lua/search.js';
 import { getEmbeddingClient } from '../lua/embedding-provider.js';
 import { getFatos, getStatusVigente, getRecapByWeek, getActiveConduta, type FactType } from '../lua/db.js';
 import { resolveRecapPeriodStart } from '../lua/narrativa.js';
 import { whatsappSend } from '../whatsapp/send.js';
-import { coerceKind, groupAccessAllowed } from '../whatsapp/group-gate.js';
-import { getNumberExposure, isGroupThread, setLeadStatus, setGroupExposure } from '../whatsapp/thread-meta.js';
-import { exportConversation } from '../whatsapp/export.js';
-import { requireWhatsappWrite } from '../whatsapp/write-auth.js';
 
 export async function whatsappListNumbersHandler(p: Pool, input: { workspace_id: string }) {
   if (!input?.workspace_id) throw new Error('workspace_id required');
@@ -53,7 +48,7 @@ export async function whatsappThreadMessagesHandler(p: Pool, input: { workspace_
  * McpServer.registerTool aceita Zod shape (objeto de campos), não z.object(...);
  * o SDK converte internamente para JSON Schema.
  */
-export function registerTools(server: McpServer, agent: string, cfg: AgentConfig): void {
+export function registerTools(server: McpServer, agent: string): void {
   // ── lookup_contact ─────────────────────────────────────────────────────
   server.registerTool(
     'lookup_contact',
@@ -437,68 +432,35 @@ export function registerTools(server: McpServer, agent: string, cfg: AgentConfig
   server.registerTool(
     'whatsapp_list_threads',
     {
-      description: 'Lista as conversas (threads) de um número, paginadas por keyset. Filtros: kind (dm|group|all), lead_status (lead|not_lead|all). Grupos só aparecem se o número tiver exposição habilitada.',
+      description: 'Lista as conversas (threads) de um número, paginadas por keyset.',
       inputSchema: {
-        workspace_id: z.string(), number_id: z.number(),
-        limit: z.number().optional(), cursor: z.string().optional(),
-        kind: z.enum(['dm', 'group', 'all']).optional(),
-        lead_status: z.enum(['lead', 'not_lead', 'all']).optional(),
+        workspace_id: z.string(),
+        number_id: z.number(),
+        limit: z.number().optional(),
+        cursor: z.string().optional(),
       },
     },
-    async (input): Promise<CallToolResult> => {
-      const expose = await getNumberExposure(pool, Number(input.number_id));
-      const kind = coerceKind(input.kind, expose);
-      const out = await listThreads(pool, { workspaceId: input.workspace_id, numberId: Number(input.number_id), limit: input.limit ?? 30, cursor: input.cursor, kind, leadStatus: input.lead_status ?? 'all' });
-      return { content: [{ type: 'text', text: JSON.stringify({ schema: 'whatsapp_v1', ...out, groupsHidden: !expose }) }] };
-    }
+    async (input): Promise<CallToolResult> => ({
+      content: [{ type: 'text', text: JSON.stringify(await whatsappListThreadsHandler(pool, input)) }],
+    })
   );
 
   // ── whatsapp_thread_messages ───────────────────────────────────────────
   server.registerTool(
     'whatsapp_thread_messages',
     {
-      description: 'Lista as mensagens de uma thread (número + identifier), paginadas por keyset. Recusa grupos se a exposição estiver desligada no número.',
-      inputSchema: { workspace_id: z.string(), number_id: z.number(), identifier: z.string(), limit: z.number().optional(), cursor: z.string().optional() },
+      description: 'Lista as mensagens de uma thread (número + identifier), paginadas por keyset.',
+      inputSchema: {
+        workspace_id: z.string(),
+        number_id: z.number(),
+        identifier: z.string(),
+        limit: z.number().optional(),
+        cursor: z.string().optional(),
+      },
     },
-    async (input): Promise<CallToolResult> => {
-      const expose = await getNumberExposure(pool, Number(input.number_id));
-      const isGroup = await isGroupThread(pool, Number(input.number_id), input.identifier);
-      if (!groupAccessAllowed(isGroup, expose)) {
-        return { content: [{ type: 'text', text: JSON.stringify({ error: 'groups_not_exposed' }) }] };
-      }
-      return { content: [{ type: 'text', text: JSON.stringify(await whatsappThreadMessagesHandler(pool, input)) }] };
-    }
-  );
-
-  // ── whatsapp_export_conversation ──────────────────────────────────────
-  server.registerTool(
-    'whatsapp_export_conversation',
-    {
-      description: 'Exporta a thread inteira como transcrição (autor/direção/horário Brasília, rótulo atendente×cliente). Auto-pagina até max_messages (default 500, teto 2000). Recusa grupos se exposição off.',
-      inputSchema: { workspace_id: z.string(), number_id: z.number(), identifier: z.string(), since: z.string().optional(), until: z.string().optional(), max_messages: z.number().optional() },
-    },
-    async (input): Promise<CallToolResult> => {
-      const expose = await getNumberExposure(pool, Number(input.number_id));
-      const isGroup = await isGroupThread(pool, Number(input.number_id), input.identifier);
-      if (!groupAccessAllowed(isGroup, expose)) return { content: [{ type: 'text', text: JSON.stringify({ error: 'groups_not_exposed' }) }] };
-      const out = await exportConversation(pool, { workspaceId: input.workspace_id, numberId: Number(input.number_id), identifier: input.identifier, since: input.since, until: input.until, maxMessages: input.max_messages });
-      return { content: [{ type: 'text', text: JSON.stringify({ schema: 'whatsapp_v1', ...out }) }] };
-    }
-  );
-
-  // ── whatsapp_search ────────────────────────────────────────────────────
-  server.registerTool(
-    'whatsapp_search',
-    {
-      description: 'Busca textual (ILIKE) nas mensagens de um número, agrupada por thread. Filtros: kind, lead_status, since/until. Grupos só com exposição habilitada.',
-      inputSchema: { workspace_id: z.string(), number_id: z.number(), query: z.string(), since: z.string().optional(), until: z.string().optional(), kind: z.enum(['dm', 'group', 'all']).optional(), lead_status: z.enum(['lead', 'not_lead', 'all']).optional(), limit: z.number().optional() },
-    },
-    async (input): Promise<CallToolResult> => {
-      const expose = await getNumberExposure(pool, Number(input.number_id));
-      const kind = coerceKind(input.kind, expose);
-      const out = await searchThreads(pool, { workspaceId: input.workspace_id, numberId: Number(input.number_id), query: input.query, since: input.since, until: input.until, kind, leadStatus: input.lead_status ?? 'all', limit: input.limit });
-      return { content: [{ type: 'text', text: JSON.stringify({ schema: 'whatsapp_v1', ...out, groupsHidden: !expose }) }] };
-    }
+    async (input): Promise<CallToolResult> => ({
+      content: [{ type: 'text', text: JSON.stringify(await whatsappThreadMessagesHandler(pool, input)) }],
+    })
   );
 
   // ── whatsapp_send (outbound gated) ─────────────────────────────────────
@@ -522,38 +484,4 @@ export function registerTools(server: McpServer, agent: string, cfg: AgentConfig
     }
   );
 
-  // ── whatsapp_set_lead_status ───────────────────────────────────────────
-  server.registerTool(
-    'whatsapp_set_lead_status',
-    {
-      description: 'Marca/desmarca uma conversa como lead (reversível). Exige que o agente tenha capability de escrita E que acting_user (telefone E.164) seja admin do workspace.',
-      inputSchema: { workspace_id: z.string(), number_id: z.number(), identifier: z.string(), status: z.enum(['lead', 'not_lead']), acting_user: z.string().describe('Telefone E.164 do operador admin.') },
-    },
-    async (input): Promise<CallToolResult> => {
-      const gate = await requireWhatsappWrite(cfg, input.acting_user, input.workspace_id);
-      if (!gate.ok) return { content: [{ type: 'text', text: JSON.stringify(gate) }] };
-      const expose = await getNumberExposure(pool, Number(input.number_id));
-      const isGroup = await isGroupThread(pool, Number(input.number_id), input.identifier);
-      if (!groupAccessAllowed(isGroup, expose)) {
-        return { content: [{ type: 'text', text: JSON.stringify({ error: 'groups_not_exposed' }) }] };
-      }
-      await setLeadStatus(pool, { numberId: Number(input.number_id), identifier: input.identifier, isLead: input.status === 'lead', updatedBy: 'mcp:' + input.acting_user });
-      return { content: [{ type: 'text', text: JSON.stringify({ schema: 'whatsapp_v1', ok: true, identifier: input.identifier, leadStatus: input.status }) }] };
-    }
-  );
-
-  // ── whatsapp_set_group_exposure ────────────────────────────────────────
-  server.registerTool(
-    'whatsapp_set_group_exposure',
-    {
-      description: 'Liga/desliga a exposição de grupos do número no MCP. Mesmo duplo gate (capability + acting_user admin).',
-      inputSchema: { workspace_id: z.string(), number_id: z.number(), expose: z.boolean(), acting_user: z.string() },
-    },
-    async (input): Promise<CallToolResult> => {
-      const gate = await requireWhatsappWrite(cfg, input.acting_user, input.workspace_id);
-      if (!gate.ok) return { content: [{ type: 'text', text: JSON.stringify(gate) }] };
-      await setGroupExposure(pool, { numberId: Number(input.number_id), expose: input.expose });
-      return { content: [{ type: 'text', text: JSON.stringify({ schema: 'whatsapp_v1', ok: true, number_id: input.number_id, expose_groups_in_mcp: input.expose }) }] };
-    }
-  );
 }
