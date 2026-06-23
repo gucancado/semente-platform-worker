@@ -279,6 +279,28 @@ export async function insertMessage(args: {
   whatsapp_number_id?: number | null;
   workspace_id?: string | null;
 }): Promise<{ id: number; duplicate: boolean }> {
+  // Number-path (monitored/agent_operated): dedup por (whatsapp_number_id, evolution_event_id).
+  // Cobre inbound E outbound — cada número grava sua própria cópia, mesmo que a mesma
+  // mensagem (mesmo evolution_event_id) seja vista por outro número do mesmo worker.
+  if (args.evolution_event_id && args.whatsapp_number_id != null) {
+    const insert = await pool.query<{ id: number }>(
+      `INSERT INTO messages
+         (agent, project, channel, identifier, author, direction, text, evolution_event_id, whatsapp_number_id, workspace_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+       ON CONFLICT (whatsapp_number_id, evolution_event_id)
+         WHERE whatsapp_number_id IS NOT NULL AND evolution_event_id IS NOT NULL
+         DO NOTHING
+       RETURNING id`,
+      [args.agent, args.project ?? null, args.channel, args.identifier, args.author ?? null, args.direction, args.text, args.evolution_event_id, args.whatsapp_number_id, args.workspace_id ?? null]
+    );
+    if (insert.rows[0]) return { id: insert.rows[0].id, duplicate: false };
+    const existing = await pool.query<{ id: number }>(
+      `SELECT id FROM messages WHERE whatsapp_number_id = $1 AND evolution_event_id = $2 LIMIT 1`,
+      [args.whatsapp_number_id, args.evolution_event_id]
+    );
+    return { id: existing.rows[0]!.id, duplicate: true };
+  }
+
   // Pra inbound com evolution_event_id E agent presente, tenta ON CONFLICT (dedup).
   // Pra outbound, inbound sem event_id, ou agent null, insert direto.
   if (args.direction === 'inbound' && args.evolution_event_id && args.agent) {
