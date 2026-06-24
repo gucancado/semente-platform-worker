@@ -59,13 +59,19 @@ export function registerReadRoutes(
   });
 
   // ── GET /whatsapp/threads/:identifier/export ─────────────────────────────────
-  // workspace_id + number_id in query; exportConversation receives workspaceId
-  // as a param (scoped) → authz against query's workspace_id before DB.
+  // exportConversation uses listThreadMessages internally, which is NOT
+  // workspace-scoped → derive the AUTHORITATIVE workspace from number_id (NOT the
+  // caller-supplied workspace_id), then authz. Otherwise a member of ws A could
+  // pass workspace_id=A + a number_id belonging to ws B and exfiltrate B's data.
   app.get('/whatsapp/threads/:identifier/export', { preHandler: auth }, async (req: any, reply) => {
-    const { workspace_id, number_id, since, until, max_messages } = req.query;
-    if (!workspace_id || !number_id) return reply.code(400).send({ error: 'workspace_id and number_id required' });
-    if (!await gateMember(req, reply, workspace_id, authz)) return;
-    const out = await exportConversation(deps.pool, { workspaceId: workspace_id, numberId: Number(number_id), identifier: req.params.identifier, since, until, maxMessages: max_messages ? Number(max_messages) : undefined });
+    const { number_id, since, until, max_messages } = req.query;
+    if (!number_id) return reply.code(400).send({ error: 'number_id required' });
+    // Actor check first (before any DB call).
+    if (!req.actingUser) return reply.code(400).send({ error: 'x-acting-user required' });
+    const num = await getNumber(deps.pool, Number(number_id));
+    if (!num) return reply.code(404).send({ error: 'number not found' });
+    if (!await gateMember(req, reply, num.workspaceId, authz)) return;
+    const out = await exportConversation(deps.pool, { workspaceId: num.workspaceId, numberId: Number(number_id), identifier: req.params.identifier, since, until, maxMessages: max_messages ? Number(max_messages) : undefined });
     return reply.send({ schema: 'whatsapp_v1', ...out });
   });
 }

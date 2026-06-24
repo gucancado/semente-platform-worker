@@ -21,12 +21,19 @@
  *   (h) numbers: assertMember FORBIDDEN → 403
  *   (i) search: actor absent → 400
  *   (j) export: actor absent → 400
+ *   (k) export: authz derives workspace from number_id (NOT caller workspace_id),
+ *         assertMember FORBIDDEN → 403 (regression guard for cross-workspace leak)
  *
  * Notes:
  *   - messages route (actor-absent DB-free): the actor check runs BEFORE getNumber,
  *     so it is 400 without any DB call → confirmed DB-free.
  *   - lead route (actor-absent DB-free): same pattern — actor check before getNumber.
- *   - Happy-path (200) cases for messages/lead require a real number row → SERVER-GATED.
+ *   - export route (actor-absent DB-free): same pattern — actor check before getNumber.
+ *   - export route (k): DB-free via makeNumberPool (resolves the number row) + injected
+ *     authz, so no real DB/Bloquim is hit; the gate is reached and denied.
+ *   - Happy-path (200) cases for messages/lead/export require a real number row →
+ *     SERVER-GATED. Export number-not-found→404 is reachable DB-free in principle but
+ *     left to the server-gated suite alongside the 200 happy path.
  */
 
 import { test } from 'node:test';
@@ -236,9 +243,9 @@ test('(i) GET /whatsapp/search — actor absent → 400', async () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// (j) export: actor absent → 400
+// (j) export: actor absent → 400 (DB-free: actor check runs BEFORE getNumber)
 // ─────────────────────────────────────────────────────────────────────────────
-test('(j) GET /whatsapp/threads/:id/export — actor absent → 400', async () => {
+test('(j) GET /whatsapp/threads/:id/export — actor absent → 400 (no DB call)', async () => {
   const spy = makeMemberForbidden();
   const app = Fastify({ logger: false });
   registerReadRoutes(app, { pool: PANIC_POOL, panelToken: PANEL_TOKEN, authz: spy });
@@ -250,6 +257,39 @@ test('(j) GET /whatsapp/threads/:id/export — actor absent → 400', async () =
   assert.equal(res.statusCode, 400);
   assert.equal(res.json().error, 'x-acting-user required');
   assert.equal(spy.memberCalls, 0);
+  await app.close();
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// (k) export: derives workspace from number_id (NOT caller's workspace_id).
+// Actor present, number exists (resolves to ws-real), assertMember FORBIDDEN → 403.
+// The fake authz records the workspaceId it was asked to gate; we assert it is the
+// number's REAL workspace (ws-real), NOT the caller-supplied workspace_id (ws-attacker).
+// This is the regression guard for the cross-workspace export leak.
+// ─────────────────────────────────────────────────────────────────────────────
+test('(k) GET /whatsapp/threads/:id/export — authz uses workspace derived from number_id, not caller workspace_id → 403', async () => {
+  let gatedWorkspace: string | null = null;
+  const spy: RouteAuthz & { memberCalls: number } = {
+    memberCalls: 0,
+    async assertMember(_u, w) {
+      this.memberCalls++;
+      gatedWorkspace = w;
+      throw new AuthzError('forbidden', 'FORBIDDEN');
+    },
+    async assertAdmin() { /* unused */ },
+  };
+  const app = Fastify({ logger: false });
+  registerReadRoutes(app, { pool: makeNumberPool('ws-real'), panelToken: PANEL_TOKEN, authz: spy });
+  const res = await app.inject({
+    method: 'GET',
+    // Caller LIES about the workspace: passes ws-attacker, but number_id=1 belongs to ws-real.
+    url: '/whatsapp/threads/c-1/export?workspace_id=ws-attacker&number_id=1',
+    headers: ACTOR_HEADERS,
+  });
+  assert.equal(res.statusCode, 403);
+  assert.equal(res.json().error, 'forbidden');
+  assert.equal(spy.memberCalls, 1);
+  assert.equal(gatedWorkspace, 'ws-real', 'export must authorize against the number\'s real workspace, NOT the caller-supplied workspace_id');
   await app.close();
 });
 
