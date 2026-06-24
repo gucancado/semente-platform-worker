@@ -129,7 +129,7 @@ Quando for implementar, por **contato/thread** (`number_id`+`identifier`), tocar
 - Decidir com jurídico **apagar × anonimizar × reter** por tabela (dever de guarda saúde/fiscal vs art. 16).
 
 ### 5.4 Retenção / backfill — **decisão: RETER**
-- Política = **retenção** (sem expurgo automático nesta fase). **Documentar a base legal da retenção** (dever de guarda saúde/fiscal — art. 16, I) no registro de operações.
+- Política = **retenção** (sem expurgo automático nesta fase). **Base legal da retenção** (dever de guarda saúde/fiscal — art. 16, I) documentada no registro de operações: [`docs/lgpd/registro-operacoes.md`](../lgpd/registro-operacoes.md) (art. 37). ⚠️ Registro pendente de validação jurídica/DPO (gate (d)).
 - `BACKFILL_SINCE_DAYS` explícito/config por número (importar só o necessário — minimização na entrada, mesmo retendo).
 - Job de anonimização por inatividade: **fora de escopo** nesta fase (ver 5.3 adiado).
 
