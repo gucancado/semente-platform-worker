@@ -25,7 +25,7 @@
 ## File Structure
 
 **Bloquim (`beeads-bloquim/repo/artifacts/api-server`):**
-- Create: rota interna `POST /api/internal/authz/workspace-role` (auth por `SERVICE_TOKEN` dedicado) → `{ role }`.
+- Create: rota interna `POST /api/internal/authz/workspace-role` (auth por header `X-Internal-Secret` == env `INTERNAL_API_SECRET`, REUSO da convenção interna — decisão 6 da spec) → `{ role }`.
 
 **Worker (`semente-platform-worker`):**
 - Create: `migrations/033_whatsapp_lead_lifecycle.sql`, `migrations/034_messages_provenance.sql`, `migrations/035_whatsapp_audit_logs.sql`
@@ -49,7 +49,7 @@
 - Test: teste de rota do api-server (padrão do repo).
 
 **Interfaces:**
-- Produces: `POST /api/internal/authz/workspace-role` — header `X-Service-Token: <INTERNAL_SERVICE_TOKEN>`; body `{ userId: string (uuid), workspaceId: string (uuid) }` → `200 { role: 'admin'|'editor'|'executor'|null }` (null = não-membro); `401` se service token inválido. ⚠️ Enum real = `["admin","editor","executor"]` (não há `member`/`owner`); reusar `getMemberRole()` de `permissions.ts:183`.
+- Produces: `POST /api/internal/authz/workspace-role` — header `X-Internal-Secret: <INTERNAL_API_SECRET>` (REUSO da convenção interna existente, decisão 6 da spec — NÃO criar token novo); body `{ userId: string (uuid), workspaceId: string (uuid) }` → `200 { role: 'admin'|'editor'|'executor'|null }` (null = não-membro); `401` se secret inválido/ausente (fail-closed). ⚠️ Enum real = `["admin","editor","executor"]` (não há `member`/`owner`); reusar `getMemberRoleFresh()` (uncached) de `permissions.ts`.
 - Semântica de `role`: reaproveitar a resolução de membership já usada por `/api/auth/me/workspaces` (mesma fonte que o MCP consome), mas resolvendo por `userId` passado, não pelo JWT do request.
 
 - [ ] **Step 1:** Ler como `/api/auth/me/workspaces` resolve role hoje (membership query) no api-server; identificar a função reaproveitável.
@@ -66,12 +66,12 @@
 
 **Interfaces:**
 - Produces:
-  - `resolveActorRole(userId: string, workspaceId: string): Promise<'admin'|'editor'|'executor'|null>` — chama o endpoint da Task 1 com `X-Service-Token` (env `BLOQUIM_SERVICE_TOKEN`), **cache TTL 45s** por `(userId, workspaceId)`.
+  - `resolveActorRole(userId: string, workspaceId: string): Promise<'admin'|'editor'|'executor'|null>` — chama o endpoint da Task 1 com header `X-Internal-Secret` (env `INTERNAL_API_SECRET`), base = origin de `BLOQUIM_API_URL` (REUSO, decisão 6 — NÃO `BLOQUIM_INTERNAL_URL`/`BLOQUIM_SERVICE_TOKEN`). **cache TTL 45s** por `(userId, workspaceId)`. Fetch injetável p/ teste (padrão `deps.fetch` do worker). Secret ausente → fail-closed (trata como `null`/recusa).
   - `resolveActorRoleFresh(userId, workspaceId)` — mesma coisa, **sem cache** (para escrita/ações sensíveis).
   - `assertActorMember(actor, ws)` (lança se role==null) e `assertActorAdmin(actor, ws)` (lança se role!=='admin'; usa a versão fresh).
-- Consumes: env `BLOQUIM_INTERNAL_URL`, `BLOQUIM_SERVICE_TOKEN`.
+- Consumes: env `INTERNAL_API_SECRET`, `BLOQUIM_API_URL` (ambas já existem em `config.ts`).
 
-- [ ] **Step 1:** Teste: `resolveActorRole` cacheia (2 chamadas = 1 fetch dentro do TTL); `assertActorAdmin` lança para `editor`/`member`/`null` e passa só para `admin`; a versão fresh não cacheia. (mock do fetch).
+- [ ] **Step 1:** Teste: `resolveActorRole` cacheia (2 chamadas = 1 fetch dentro do TTL); `assertActorAdmin` lança para `editor`/`executor`/`null` e passa só para `admin`; a versão fresh não cacheia. (mock do fetch, sem DB).
 - [ ] **Step 2:** Implementar com um Map de cache `{value, expiresAt}`; fresh ignora cache.
 - [ ] **Step 3:** typecheck/build; commit `feat(whatsapp): worker-side actor authz client with short cache`.
 
@@ -170,5 +170,5 @@
 ## Gates humanos / riscos de rollout
 1. **Antes do deploy da Task 3:** confirmar que **painel e MCP já enviam `X-Acting-User`** em TODA chamada `/whatsapp/*` — senão a authz quebra leitura legítima em prod. (MCP envia: `bloquim-mcp/src/lib/worker.ts:17`. Painel: **verificar**.)
 2. **Worker→MCP sempre:** deploy worker com filtro novo ANTES do MCP anunciar (coerção silenciosa).
-3. **`INTERNAL_SERVICE_TOKEN`/`BLOQUIM_SERVICE_TOKEN`:** provisionar nos envs do Coolify (Bloquim + worker) antes da Task 3.
+3. **`INTERNAL_API_SECRET` (reuso):** garantir o **mesmo valor** nos envs Coolify do worker E do Bloquim antes da Task 3 (decisão 6 — não há token novo). O worker já declara a env (`config.ts:39`, optional); o Bloquim precisa recebê-la. Fail-closed se ausente.
 4. **Deploy manual** via Coolify API (push não auto-deploya).

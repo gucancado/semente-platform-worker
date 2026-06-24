@@ -100,10 +100,11 @@ ALTER TABLE messages ADD COLUMN ingest_source TEXT NOT NULL DEFAULT 'live';
 Problema: worker não tem a identidade do ator; `X-Acting-User` é forjável; `/api/auth/me/*` resolve pelo JWT do próprio usuário (que o worker não possui).
 **DECIDIDO — opção B**: endpoint **interno** no Bloquim, server-to-server:
 ```
-POST /api/internal/authz/workspace-role   (auth: SERVICE_TOKEN dedicado, não o painel-token)
+POST /api/internal/authz/workspace-role   (auth: header X-Internal-Secret == INTERNAL_API_SECRET, não o painel-token)
 body: { userId, workspaceId } → { role: 'admin'|'editor'|'executor'|null }
 ```
-- ⚠️ **Enum real de role no Bloquim** = `["admin","editor","executor"]` (pgEnum `workspace_role`, `lib/db/src/schema/workspaces.ts`). **Não existe `member` nem `owner`** — "membro" = qualquer role≠null. Fonte de role: `getMemberRole(workspaceId,userId)` em `api-server/src/middlewares/permissions.ts:183`.
+- ⚠️ **Reuso da convenção interna existente** (decisão 2026-06-24, item 6): a auth deste endpoint **reusa** `INTERNAL_API_SECRET` (header `X-Internal-Secret`) — o mesmo "segredo compartilhado p/ rotas internas do bloquim-api" que o worker já declara (`config.ts:37-38`) e usa em `resolveByWhatsapp` (`commands/identity.ts:39`). **NÃO** se cria `INTERNAL_SERVICE_TOKEN`/`BLOQUIM_SERVICE_TOKEN`/`BLOQUIM_INTERNAL_URL` novos (evita secret-sprawl). Base URL = origin de `BLOQUIM_API_URL`. Provisionar: mesmo valor de `INTERNAL_API_SECRET` no worker **e** no Bloquim (Coolify). Fail-closed: secret ausente → endpoint recusa tudo (401) e worker trata como negado.
+- ⚠️ **Enum real de role no Bloquim** = `["admin","editor","executor"]` (pgEnum `workspace_role`, `lib/db/src/schema/workspaces.ts`). **Não existe `member` nem `owner`** — "membro" = qualquer role≠null. Fonte de role: `getMemberRoleFresh(workspaceId,userId)` (uncached ground-truth) em `api-server/src/middlewares/permissions.ts`.
 - Worker chama isso passando `X-Acting-User` como `userId`. **Replica a regra exata** do MCP: leitura exige `role != null` (qualquer membro); escrita/eliminação exige `role === 'admin'` (atenção: `editor`/`executor` **não** contam, igual `workspace-access.ts:18-24`).
 - **Mantém o `JWT_SECRET` fora do worker** (autz numa fonte só). Alternativa (A): worker minta JWT com `JWT_SECRET` compartilhado e chama `/me/workspaces` — rejeitada por espalhar o secret.
 - **Cache**: leitura `(actor,workspace)→role` TTL 30–60s. **Escrita/DELETE/anonymize: sem cache** (revalida sempre — ex-admin não apaga na janela do TTL).
@@ -155,3 +156,4 @@ Migrations: `033_whatsapp_lead_lifecycle` (+ reasons + tags + CHECK), `034_messa
 3. **Embeddings (`episodes`)**: n/a nesta fase (eliminação adiada); inventário documentado em 5.3 para o futuro.
 4. **`role` para escrita**: ✅ **`admin` estrito** (como hoje — `editor`/`owner` não contam).
 5. **Consentimento no site (`source=site`)**: ✅ vira **tarefa no Bloquim** (criada — captura de consentimento LGPD no formulário do site da Luhma).
+6. **Secret do endpoint interno**: ✅ **reusar `INTERNAL_API_SECRET` + header `X-Internal-Secret`** (convenção já existente worker↔bloquim, `config.ts:37-38` + `commands/identity.ts:39`), e **reusar `BLOQUIM_API_URL`** (origin). Não criar `INTERNAL_SERVICE_TOKEN`/`BLOQUIM_SERVICE_TOKEN`/`BLOQUIM_INTERNAL_URL`. Satisfaz "service token dedicado, não o painel-token". Provisionar mesmo valor de `INTERNAL_API_SECRET` no Bloquim (worker já declara a env).
