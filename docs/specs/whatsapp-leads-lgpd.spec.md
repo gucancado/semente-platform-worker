@@ -101,9 +101,10 @@ Problema: worker não tem a identidade do ator; `X-Acting-User` é forjável; `/
 **DECIDIDO — opção B**: endpoint **interno** no Bloquim, server-to-server:
 ```
 POST /api/internal/authz/workspace-role   (auth: SERVICE_TOKEN dedicado, não o painel-token)
-body: { userId, workspaceId } → { role: 'admin'|'editor'|'member'|null }
+body: { userId, workspaceId } → { role: 'admin'|'editor'|'executor'|null }
 ```
-- Worker chama isso passando `X-Acting-User` como `userId`. **Replica a regra exata** do MCP: leitura exige `role != null` (membro); escrita/eliminação exige `role === 'admin'` (atenção: `editor`/`owner` **não** contam, igual `workspace-access.ts:18-24`).
+- ⚠️ **Enum real de role no Bloquim** = `["admin","editor","executor"]` (pgEnum `workspace_role`, `lib/db/src/schema/workspaces.ts`). **Não existe `member` nem `owner`** — "membro" = qualquer role≠null. Fonte de role: `getMemberRole(workspaceId,userId)` em `api-server/src/middlewares/permissions.ts:183`.
+- Worker chama isso passando `X-Acting-User` como `userId`. **Replica a regra exata** do MCP: leitura exige `role != null` (qualquer membro); escrita/eliminação exige `role === 'admin'` (atenção: `editor`/`executor` **não** contam, igual `workspace-access.ts:18-24`).
 - **Mantém o `JWT_SECRET` fora do worker** (autz numa fonte só). Alternativa (A): worker minta JWT com `JWT_SECRET` compartilhado e chama `/me/workspaces` — rejeitada por espalhar o secret.
 - **Cache**: leitura `(actor,workspace)→role` TTL 30–60s. **Escrita/DELETE/anonymize: sem cache** (revalida sempre — ex-admin não apaga na janela do TTL).
 - **5.1 é pré-requisito de 5.2/2.2** (sem ela, `actor` logado não é confiável).

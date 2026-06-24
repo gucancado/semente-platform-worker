@@ -14,7 +14,7 @@
 - **Contrato `whatsapp_v1` é aditivo.** Nenhum campo removido; nenhum enum `status` (`lead|not_lead`) alterado. Campos novos só ADICIONADOS.
 - **Sem DB de teste local** (a suíte faz TRUNCATE). Validação local = `pnpm typecheck` + build; a suíte de integração roda no servidor. Cada task: escrever o teste, garantir typecheck/build verde local, e marcar "suíte no servidor" como gate.
 - **SQL parametrizado (`$n`) sempre.** NÃO copiar o padrão de interpolação de `src/whatsapp/lead-filter.ts` para inputs novos (tag/stage/source) → risco de SQLi.
-- **Autorização de escrita = `role === 'admin'` ESTRITO** (igual `bloquim-mcp/src/lib/workspace-access.ts:18-24`; `editor`/`owner` NÃO contam). Leitura = membro (`role != null`).
+- **Autorização de escrita = `role === 'admin'` ESTRITO** (igual `bloquim-mcp/src/lib/workspace-access.ts:18-24`; `editor`/`executor` NÃO contam). Leitura = membro (`role != null`). ⚠️ Enum real de role no Bloquim = `["admin","editor","executor"]` (não há `member`/`owner`).
 - **Migrations numeradas sequenciais**: próximas livres a partir de `033`.
 - **Deploy:** push pra master NÃO auto-deploya de forma confiável; disparar manual via Coolify API `POST /api/v1/deploy?uuid=<app_uuid>` (worker `qlp2n4fi3jlklisftet1y7cz`).
 - **Não tocar** SSO, ingestão core, nem grupos (hard-gate por default permanece).
@@ -49,7 +49,7 @@
 - Test: teste de rota do api-server (padrão do repo).
 
 **Interfaces:**
-- Produces: `POST /api/internal/authz/workspace-role` — header `X-Service-Token: <INTERNAL_SERVICE_TOKEN>`; body `{ userId: string (uuid), workspaceId: string (uuid) }` → `200 { role: 'admin'|'editor'|'member'|null }` (null = não-membro); `401` se service token inválido.
+- Produces: `POST /api/internal/authz/workspace-role` — header `X-Service-Token: <INTERNAL_SERVICE_TOKEN>`; body `{ userId: string (uuid), workspaceId: string (uuid) }` → `200 { role: 'admin'|'editor'|'executor'|null }` (null = não-membro); `401` se service token inválido. ⚠️ Enum real = `["admin","editor","executor"]` (não há `member`/`owner`); reusar `getMemberRole()` de `permissions.ts:183`.
 - Semântica de `role`: reaproveitar a resolução de membership já usada por `/api/auth/me/workspaces` (mesma fonte que o MCP consome), mas resolvendo por `userId` passado, não pelo JWT do request.
 
 - [ ] **Step 1:** Ler como `/api/auth/me/workspaces` resolve role hoje (membership query) no api-server; identificar a função reaproveitável.
@@ -66,7 +66,7 @@
 
 **Interfaces:**
 - Produces:
-  - `resolveActorRole(userId: string, workspaceId: string): Promise<'admin'|'editor'|'member'|null>` — chama o endpoint da Task 1 com `X-Service-Token` (env `BLOQUIM_SERVICE_TOKEN`), **cache TTL 45s** por `(userId, workspaceId)`.
+  - `resolveActorRole(userId: string, workspaceId: string): Promise<'admin'|'editor'|'executor'|null>` — chama o endpoint da Task 1 com `X-Service-Token` (env `BLOQUIM_SERVICE_TOKEN`), **cache TTL 45s** por `(userId, workspaceId)`.
   - `resolveActorRoleFresh(userId, workspaceId)` — mesma coisa, **sem cache** (para escrita/ações sensíveis).
   - `assertActorMember(actor, ws)` (lança se role==null) e `assertActorAdmin(actor, ws)` (lança se role!=='admin'; usa a versão fresh).
 - Consumes: env `BLOQUIM_INTERNAL_URL`, `BLOQUIM_SERVICE_TOKEN`.
