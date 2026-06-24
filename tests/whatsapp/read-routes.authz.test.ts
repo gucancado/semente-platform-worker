@@ -114,6 +114,13 @@ function makeMemberMisconfigured(): RouteAuthz {
   };
 }
 
+function makeMemberUnauthorized(): RouteAuthz {
+  return {
+    async assertMember() { throw new AuthzError('unauth', 'UNAUTHORIZED'); },
+    async assertAdmin() { throw new AuthzError('unauth', 'UNAUTHORIZED'); },
+  };
+}
+
 function makeAdminForbidden(): RouteAuthz & { memberCalls: number; adminCalls: number } {
   return {
     memberCalls: 0,
@@ -190,6 +197,24 @@ test('(c) GET /whatsapp/threads — MISCONFIGURED → 500', async () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// (c2) threads: assertMember throws UNAUTHORIZED → 401
+// Future-proofs the AuthzError code→status mapping (UNAUTHORIZED is in the union).
+// ─────────────────────────────────────────────────────────────────────────────
+test('(c2) GET /whatsapp/threads — UNAUTHORIZED → 401', async () => {
+  const authz = makeMemberUnauthorized();
+  const app = Fastify({ logger: false });
+  registerReadRoutes(app, { pool: PANIC_POOL, panelToken: PANEL_TOKEN, authz });
+  const res = await app.inject({
+    method: 'GET',
+    url: '/whatsapp/threads?workspace_id=ws-1&number_id=1',
+    headers: ACTOR_HEADERS,
+  });
+  assert.equal(res.statusCode, 401);
+  assert.equal(res.json().error, 'unauthorized');
+  await app.close();
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 // (g) numbers: actor absent → 400
 // ─────────────────────────────────────────────────────────────────────────────
 test('(g) GET /whatsapp/numbers — actor absent → 400', async () => {
@@ -239,6 +264,27 @@ test('(i) GET /whatsapp/search — actor absent → 400', async () => {
   assert.equal(res.statusCode, 400);
   assert.equal(res.json().error, 'x-acting-user required');
   assert.equal(spy.memberCalls, 0);
+  await app.close();
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// (i2) search: actor present, assertMember FORBIDDEN → 403, assertMember called.
+// search IS workspace-scoped (workspace_id in query) → gate runs before any DB,
+// so PANIC_POOL is safe. Removing the gate would let the query hit the DB and
+// fail the PANIC_POOL guard / drop the 403, so this locks the gate in place.
+// ─────────────────────────────────────────────────────────────────────────────
+test('(i2) GET /whatsapp/search — actor present, FORBIDDEN → 403', async () => {
+  const spy = makeMemberForbidden();
+  const app = Fastify({ logger: false });
+  registerReadRoutes(app, { pool: PANIC_POOL, panelToken: PANEL_TOKEN, authz: spy });
+  const res = await app.inject({
+    method: 'GET',
+    url: '/whatsapp/search?workspace_id=ws-1&number_id=1&query=test',
+    headers: ACTOR_HEADERS,
+  });
+  assert.equal(res.statusCode, 403);
+  assert.equal(res.json().error, 'forbidden');
+  assert.equal(spy.memberCalls, 1, 'assertMember must be called (gate present)');
   await app.close();
 });
 
@@ -313,10 +359,24 @@ test('GET /whatsapp/threads/:id/messages — actor absent → 400 (no DB call)',
 
 // messages: actor present, number exists, assertMember FORBIDDEN → 403
 // (uses makeNumberPool — no real DB; no Bloquim call since authz is injected)
-test('GET /whatsapp/threads/:id/messages — actor present, FORBIDDEN → 403', async () => {
-  const spy = makeMemberForbidden();
+// Mirrors export's (k): the messages route has NO workspace_id query param, so the
+// gate MUST authorize against the workspace DERIVED from number_id. We capture the
+// workspace the fake authz was asked to gate and assert it is the number's real
+// workspace (ws-real) — the same value later fed into the listThreadMessages SQL
+// backstop. Guards against a future regression that gates a wrong/blank workspace.
+test('GET /whatsapp/threads/:id/messages — actor present, FORBIDDEN → 403 (gates workspace derived from number_id)', async () => {
+  let gatedWorkspace: string | null = null;
+  const spy: RouteAuthz & { memberCalls: number } = {
+    memberCalls: 0,
+    async assertMember(_u, w) {
+      this.memberCalls++;
+      gatedWorkspace = w;
+      throw new AuthzError('forbidden', 'FORBIDDEN');
+    },
+    async assertAdmin() { /* unused */ },
+  };
   const app = Fastify({ logger: false });
-  registerReadRoutes(app, { pool: makeNumberPool('ws-1'), panelToken: PANEL_TOKEN, authz: spy });
+  registerReadRoutes(app, { pool: makeNumberPool('ws-real'), panelToken: PANEL_TOKEN, authz: spy });
   const res = await app.inject({
     method: 'GET',
     url: '/whatsapp/threads/c-1/messages?number_id=1',
@@ -325,6 +385,7 @@ test('GET /whatsapp/threads/:id/messages — actor present, FORBIDDEN → 403', 
   assert.equal(res.statusCode, 403);
   assert.equal(res.json().error, 'forbidden');
   assert.equal(spy.memberCalls, 1);
+  assert.equal(gatedWorkspace, 'ws-real', 'messages must authorize against the number\'s derived workspace');
   await app.close();
 });
 

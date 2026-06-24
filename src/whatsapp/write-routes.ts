@@ -23,7 +23,7 @@ export function registerWriteRoutes(
     const num = await getNumber(deps.pool, Number(number_id));
     if (!num) return reply.code(404).send({ error: 'number not found' });
     if (!await gateAdmin(req, reply, num.workspaceId, authz)) return;
-    await setLeadStatus(deps.pool, { numberId: Number(number_id), identifier: req.params.identifier, isLead: status === 'lead', updatedBy: req.actingUser ?? 'panel' });
+    await setLeadStatus(deps.pool, { numberId: Number(number_id), identifier: req.params.identifier, isLead: status === 'lead', updatedBy: req.actingUser });
     return reply.send({ schema: 'whatsapp_v1', ok: true, identifier: req.params.identifier, leadStatus: status });
   });
 }

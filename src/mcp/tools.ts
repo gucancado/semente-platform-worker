@@ -36,7 +36,7 @@ export async function whatsappListThreadsHandler(p: Pool, input: { workspace_id:
 export async function whatsappThreadMessagesHandler(p: Pool, input: { workspace_id: string; number_id: number; identifier: string; limit?: number; cursor?: string }) {
   if (!input?.workspace_id) throw new Error('workspace_id required');
   if (!input?.number_id || !input?.identifier) throw new Error('number_id and identifier required');
-  return { schema: 'whatsapp_v1', ...await listThreadMessages(p, { numberId: Number(input.number_id), identifier: input.identifier, limit: input.limit ?? 50, cursor: input.cursor }) };
+  return { schema: 'whatsapp_v1', ...await listThreadMessages(p, { workspaceId: input.workspace_id, numberId: Number(input.number_id), identifier: input.identifier, limit: input.limit ?? 50, cursor: input.cursor }) };
 }
 
 /**

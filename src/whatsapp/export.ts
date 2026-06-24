@@ -16,7 +16,7 @@ export async function exportConversation(pool: Pool, p: { workspaceId: string; n
   let cursor: string | undefined = undefined;
   let truncated = false;
   while (collected.length < cap) {
-    const page = await listThreadMessages(pool, { numberId: p.numberId, identifier: p.identifier, limit: Math.min(100, cap - collected.length), cursor, since: p.since, until: p.until });
+    const page = await listThreadMessages(pool, { workspaceId: p.workspaceId, numberId: p.numberId, identifier: p.identifier, limit: Math.min(100, cap - collected.length), cursor, since: p.since, until: p.until });
     collected.push(...page.messages.map(m => ({ direction: m.direction, text: m.text, author: m.author, authorName: m.authorName, createdAt: m.createdAt })));
     if (!page.nextCursor) break;
     cursor = page.nextCursor;

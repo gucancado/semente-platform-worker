@@ -41,21 +41,28 @@ export function checkActorPresent(req: any, reply: any): boolean {
 /**
  * Map an AuthzError to the appropriate HTTP response.
  *
+ * UNAUTHORIZED  → 401 { error: 'unauthorized' }
  * MISCONFIGURED → 500 { error: 'authz_misconfigured' }
  * FORBIDDEN     → 403 { error: 'forbidden' }
- * Other error   → rethrow (becomes Fastify 500).
+ * Non-AuthzError → rethrow (becomes Fastify 500).
  *
- * @returns true if the error was handled (gate denied); false if it was rethrown.
+ * Returns `true` when the error was handled (reply already sent). When the error
+ * is not an AuthzError it rethrows (never returns), so the return type is `true`:
+ * callers can treat a normal return as "handled".
  */
-export function handleAuthzError(err: unknown, reply: any): boolean {
+export function handleAuthzError(err: unknown, reply: any): true {
   if (err instanceof AuthzError) {
-    if (err.code === 'MISCONFIGURED') {
-      reply.code(500).send({ error: 'authz_misconfigured' });
-      return true;
+    switch (err.code) {
+      case 'UNAUTHORIZED':
+        reply.code(401).send({ error: 'unauthorized' });
+        return true;
+      case 'MISCONFIGURED':
+        reply.code(500).send({ error: 'authz_misconfigured' });
+        return true;
+      case 'FORBIDDEN':
+        reply.code(403).send({ error: 'forbidden' });
+        return true;
     }
-    // FORBIDDEN (or any other AuthzError code)
-    reply.code(403).send({ error: 'forbidden' });
-    return true;
   }
   throw err;
 }
@@ -76,6 +83,8 @@ export async function gateMember(
     await authz.assertMember(req.actingUser, workspaceId);
     return true;
   } catch (err) {
+    // handleAuthzError sends the reply when it handles an AuthzError, or rethrows
+    // (→ Fastify 500) otherwise. A normal return means "gate denied" → false.
     handleAuthzError(err, reply);
     return false;
   }
@@ -97,6 +106,8 @@ export async function gateAdmin(
     await authz.assertAdmin(req.actingUser, workspaceId);
     return true;
   } catch (err) {
+    // handleAuthzError sends the reply when it handles an AuthzError, or rethrows
+    // (→ Fastify 500) otherwise. A normal return means "gate denied" → false.
     handleAuthzError(err, reply);
     return false;
   }

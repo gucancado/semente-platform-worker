@@ -44,7 +44,7 @@ export function registerReadRoutes(
     const num = await getNumber(deps.pool, Number(number_id));
     if (!num) return reply.code(404).send({ error: 'number not found' });
     if (!await gateMember(req, reply, num.workspaceId, authz)) return;
-    return reply.send({ schema: 'whatsapp_v1', ...await listThreadMessages(deps.pool, { numberId: Number(number_id), identifier: req.params.identifier, limit: Number(limit ?? 50), cursor }) });
+    return reply.send({ schema: 'whatsapp_v1', ...await listThreadMessages(deps.pool, { workspaceId: num.workspaceId, numberId: Number(number_id), identifier: req.params.identifier, limit: Number(limit ?? 50), cursor }) });
   });
 
   // ── GET /whatsapp/search ─────────────────────────────────────────────────────
