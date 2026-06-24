@@ -122,20 +122,30 @@ test('logAccess: INSERT targets whatsapp_access_log with actor/action/workspace/
 // ─────────────────────────────────────────────────────────────────────────────
 // 2. logAccess: does NOT throw when pool.query rejects (fire-and-forget safety)
 // ─────────────────────────────────────────────────────────────────────────────
-test('logAccess: does not throw or reject when pool.query rejects', async () => {
+test('logAccess: routes pool.query rejection to onError exactly once and does not throw', async () => {
   const pool = makeRejectingPool();
 
-  // Must NOT throw synchronously or return a rejected promise.
-  await assert.doesNotReject(async () => {
-    logAccess(pool, {
-      actor: 'user-1',
-      action: 'export',
-      workspaceId: 'ws-1',
-      numberId: 1,
-    });
-    // Wait a tick so the fire-and-forget settles.
-    await new Promise(r => setImmediate(r));
-  }, 'logAccess must swallow pool errors (fire-and-forget)');
+  // Inject a spy error handler. This proves the `.catch()` branch actually ran
+  // (a vacuous doesNotReject would pass even if the .catch() were removed and the
+  // rejection became an unhandledRejection). Injecting also keeps stderr pristine —
+  // no real console.error fires.
+  let onErrorCalls = 0;
+  let lastErr: unknown = undefined;
+  const onError = (err: unknown) => { onErrorCalls += 1; lastErr = err; };
+
+  // Must NOT throw synchronously.
+  logAccess(pool, {
+    actor: 'user-1',
+    action: 'export',
+    workspaceId: 'ws-1',
+    numberId: 1,
+  }, onError);
+
+  // Wait a tick so the fire-and-forget settles.
+  await new Promise(r => setImmediate(r));
+
+  assert.equal(onErrorCalls, 1, 'onError must be invoked exactly once (proves the .catch() ran)');
+  assert.ok(lastErr instanceof Error, 'onError receives the rejection error');
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -197,6 +207,43 @@ test('GET /whatsapp/threads — logAccess NOT called on 400 (actor absent)', asy
 
   assert.equal(res.statusCode, 400);
   assert.equal(logCalled, false, 'logAccess must NOT be called when actor is absent');
+  await app.close();
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 4c. Numeric guard: non-numeric number_id → 400 BEFORE any DB hit
+//     Number('abc') = NaN is truthy-bypasses the !number_id guard; without the
+//     NaN guard it would reach Postgres as a BIGINT param → 500.
+// ─────────────────────────────────────────────────────────────────────────────
+test('GET /whatsapp/threads — number_id=abc → 400 (numeric guard, no DB hit)', async () => {
+  let dbHit = false;
+  const trapPool = {
+    query: async () => { dbHit = true; return { rows: [] }; },
+    connect: async () => { dbHit = true; throw new Error('must not connect'); },
+  } as unknown as Pool;
+
+  const passAuthz: RouteAuthz = {
+    async assertMember() { /* pass */ },
+    async assertAdmin() { /* pass */ },
+  };
+
+  const app = Fastify({ logger: false });
+  registerReadRoutes(app, {
+    pool: trapPool,
+    panelToken: PANEL_TOKEN,
+    authz: passAuthz,
+    logAccess: () => { /* no-op */ },
+  });
+
+  const res = await app.inject({
+    method: 'GET',
+    url: '/whatsapp/threads?workspace_id=ws-1&number_id=abc',
+    headers: ACTOR_HEADERS,
+  });
+
+  assert.equal(res.statusCode, 400);
+  assert.equal(JSON.parse(res.body).error, 'number_id must be numeric');
+  assert.equal(dbHit, false, 'no DB query/connect must happen when number_id is non-numeric');
   await app.close();
 });
 
@@ -349,6 +396,33 @@ test('setLeadStatus: ROLLBACK is called and error is re-thrown when upsert fails
     'error must be re-thrown after ROLLBACK',
   );
   assert.equal(rolled, true, 'ROLLBACK must be called on failure');
+});
+
+test('setLeadStatus: original error propagates even when ROLLBACK itself throws', async () => {
+  const fakeClient = {
+    query: async (sql: string) => {
+      const s = sql.trim();
+      if (s === 'BEGIN') return { rows: [] };
+      if (s.includes('SELECT is_lead')) return { rows: [] };
+      if (s.includes('ON CONFLICT')) throw new Error('original upsert failure');
+      if (s === 'ROLLBACK') throw new Error('rollback failure (dead connection)');
+      return { rows: [] };
+    },
+    release: () => { /* no-op */ },
+  };
+
+  const fakePool = {
+    connect: async () => fakeClient,
+  } as unknown as Pool;
+
+  const { setLeadStatus } = await import('../../src/whatsapp/thread-meta.js');
+
+  // The original upsert error must surface — NOT the rollback error.
+  await assert.rejects(
+    () => setLeadStatus(fakePool, { numberId: 10, identifier: 'y@s.whatsapp.net', isLead: false, updatedBy: 'u' }),
+    /original upsert failure/,
+    'original error must propagate even when ROLLBACK throws',
+  );
 });
 
 // ─────────────────────────────────────────────────────────────────────────────

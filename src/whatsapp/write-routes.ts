@@ -20,6 +20,7 @@ export function registerWriteRoutes(
   app.post('/whatsapp/threads/:identifier/lead', { preHandler: auth }, async (req: any, reply) => {
     const { number_id, status } = req.body ?? {};
     if (!number_id || (status !== 'lead' && status !== 'not_lead')) return reply.code(400).send({ error: 'number_id e status (lead|not_lead) obrigatórios' });
+    if (Number.isNaN(Number(number_id))) return reply.code(400).send({ error: 'number_id must be numeric' });
     // Actor check first (before any DB call).
     if (!req.actingUser) return reply.code(400).send({ error: 'x-acting-user required' });
     const num = await getNumber(deps.pool, Number(number_id));

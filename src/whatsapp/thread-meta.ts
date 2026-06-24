@@ -34,7 +34,9 @@ export async function setLeadStatus(pool: Pool, p: { numberId: number; identifie
 
     await client.query('COMMIT');
   } catch (err) {
-    await client.query('ROLLBACK');
+    // ROLLBACK may itself throw on a dead connection; isolate it so the original
+    // error always propagates to the caller instead of a misleading rollback error.
+    try { await client.query('ROLLBACK'); } catch { /* ignore rollback failure */ }
     throw err;
   } finally {
     client.release();

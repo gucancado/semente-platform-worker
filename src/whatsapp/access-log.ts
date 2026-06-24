@@ -6,7 +6,8 @@
  * into `whatsapp_access_log` (LGPD art. 37).
  *
  * Contract:
- *   - NEVER throws; any INSERT error is swallowed and logged to stderr.
+ *   - NEVER throws; any INSERT error is routed to an injectable error handler
+ *     (defaults to stderr via console.error) and swallowed.
  *   - Safe to call with `void logAccess(...)` — does not block the response.
  *   - Uses parameterized SQL only.
  */
@@ -22,9 +23,17 @@ export interface LogAccessParams {
   meta?: Record<string, unknown> | null;
 }
 
-export type LogAccessFn = (pool: Pool, p: LogAccessParams) => void;
+/** Error sink for the fire-and-forget INSERT. Injectable so tests can assert the
+ *  `.catch()` actually ran (proving the regression guard) without polluting stderr. */
+export type LogAccessErrorHandler = (err: unknown) => void;
 
-export function logAccess(pool: Pool, p: LogAccessParams): void {
+const defaultOnError: LogAccessErrorHandler = (err) => {
+  console.error('[access-log] INSERT failed:', err instanceof Error ? err.message : err);
+};
+
+export type LogAccessFn = (pool: Pool, p: LogAccessParams, onError?: LogAccessErrorHandler) => void;
+
+export function logAccess(pool: Pool, p: LogAccessParams, onError: LogAccessErrorHandler = defaultOnError): void {
   pool
     .query(
       `INSERT INTO whatsapp_access_log (actor, action, workspace_id, number_id, identifier, meta)
@@ -39,7 +48,7 @@ export function logAccess(pool: Pool, p: LogAccessParams): void {
       ],
     )
     .catch((err: unknown) => {
-      // Fire-and-forget: swallow errors so audit failures never affect the request.
-      console.error('[access-log] INSERT failed:', err instanceof Error ? err.message : err);
+      // Fire-and-forget: route the error to the handler so audit failures never affect the request.
+      onError(err);
     });
 }

@@ -31,6 +31,7 @@ export function registerReadRoutes(
   app.get('/whatsapp/threads', { preHandler: auth }, async (req: any, reply) => {
     const { workspace_id, number_id, limit, cursor, kind, lead_status } = req.query;
     if (!workspace_id || !number_id) return reply.code(400).send({ error: 'workspace_id and number_id required' });
+    if (Number.isNaN(Number(number_id))) return reply.code(400).send({ error: 'number_id must be numeric' });
     if (!await gateMember(req, reply, workspace_id, authz)) return;
     const k = kind === 'dm' || kind === 'group' ? kind : 'all';
     const ls = lead_status === 'lead' || lead_status === 'not_lead' ? lead_status : 'all';
@@ -45,6 +46,7 @@ export function registerReadRoutes(
   app.get('/whatsapp/threads/:identifier/messages', { preHandler: auth }, async (req: any, reply) => {
     const { number_id, limit, cursor } = req.query;
     if (!number_id) return reply.code(400).send({ error: 'number_id required' });
+    if (Number.isNaN(Number(number_id))) return reply.code(400).send({ error: 'number_id must be numeric' });
     // Actor check first (before any DB call).
     if (!req.actingUser) return reply.code(400).send({ error: 'x-acting-user required' });
     const num = await getNumber(deps.pool, Number(number_id));
@@ -60,6 +62,7 @@ export function registerReadRoutes(
   app.get('/whatsapp/search', { preHandler: auth }, async (req: any, reply) => {
     const { workspace_id, number_id, query, since, until, kind, lead_status, limit } = req.query;
     if (!workspace_id || !number_id || !query) return reply.code(400).send({ error: 'workspace_id, number_id e query required' });
+    if (Number.isNaN(Number(number_id))) return reply.code(400).send({ error: 'number_id must be numeric' });
     if (!await gateMember(req, reply, workspace_id, authz)) return;
     const k = kind === 'dm' || kind === 'group' ? kind : 'all';
     const ls = lead_status === 'lead' || lead_status === 'not_lead' ? lead_status : 'all';
@@ -76,6 +79,7 @@ export function registerReadRoutes(
   app.get('/whatsapp/threads/:identifier/export', { preHandler: auth }, async (req: any, reply) => {
     const { number_id, since, until, max_messages } = req.query;
     if (!number_id) return reply.code(400).send({ error: 'number_id required' });
+    if (Number.isNaN(Number(number_id))) return reply.code(400).send({ error: 'number_id must be numeric' });
     // Actor check first (before any DB call).
     if (!req.actingUser) return reply.code(400).send({ error: 'x-acting-user required' });
     const num = await getNumber(deps.pool, Number(number_id));
