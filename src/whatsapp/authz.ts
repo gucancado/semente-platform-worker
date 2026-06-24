@@ -9,19 +9,36 @@
  *   assertActorMember     — throws AuthzError if role == null (cached path)
  *   assertActorAdmin      — throws AuthzError if role !== 'admin' (fresh path)
  *
- * Fail-closed in all error conditions (missing secret, non-OK HTTP, timeout).
+ * Fail-closed in all error conditions (missing secret, malformed Bloquim URL,
+ * non-OK HTTP, network error, timeout).
  *
- * NOTE on lazy config: config.ts runs Zod parse at module-load time and throws
- * if required env vars are absent. To allow this module to be imported in tests
- * without a full env, config is accessed LAZILY — only inside function bodies
- * after a deps-override check. Tests supply `secret` and `bloquimOrigin` via
- * AuthzDeps and config is never actually evaluated. This follows the worker's
- * established pattern (see CLAUDE.md "Bug-traps: JWT_SECRET env var is required").
+ * NOTE on ESM-safe config: the worker runs native ESM (`"type":"module"`,
+ * `node dist/index.js`), so `require` is undefined at runtime — using it here
+ * would crash the FIRST real authz call (no deps). We therefore read config
+ * straight from `process.env` (NOT importing `../config.js`, which would re-run
+ * `EnvSchema.parse` at import and break the no-DB local unit tests). Defaults
+ * are overridable via AuthzDeps so the client stays fully unit-testable without
+ * a populated env. This mirrors the worker bug-trap "JWT_SECRET env var is
+ * required" (lazy env access) in CLAUDE.md.
  */
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 export type ActorRole = 'admin' | 'editor' | 'executor' | null;
+
+/**
+ * Result of a single role fetch. We distinguish a DEFINITIVE answer (the Bloquim
+ * endpoint replied 200 — including a real `role: null` = confirmed non-member)
+ * from a TRANSIENT failure (missing config, non-OK HTTP, network error, timeout).
+ * Only definitive answers may be cached; transient failures must NOT poison the
+ * cache, or a brief Bloquim blip would lock a legitimate user out for the full
+ * TTL.
+ */
+interface RoleResult {
+  role: ActorRole;
+  /** True only when Bloquim returned an authoritative 200 answer. */
+  definitive: boolean;
+}
 
 /**
  * Injectable dependencies for testability. Mirrors the pattern in
@@ -34,37 +51,46 @@ export interface AuthzDeps {
   /** Overrides Date.now() — useful in tests to control TTL expiry. */
   now?: () => number;
   /**
-   * Overrides config.INTERNAL_API_SECRET — provided in tests to avoid
-   * importing config (which requires a full process.env at parse time).
+   * Overrides the default secret (process.env.INTERNAL_API_SECRET) — provided
+   * in tests to avoid depending on a populated env.
    */
   secret?: string;
   /**
-   * Overrides the derived Bloquim origin — provided in tests so no URL
-   * parsing of config.BLOQUIM_API_URL is needed.
+   * Overrides the derived Bloquim origin (from process.env.BLOQUIM_API_URL) —
+   * provided in tests so no URL parsing of env is needed.
    */
   bloquimOrigin?: string;
 }
 
-// ── Lazy config accessor ──────────────────────────────────────────────────────
-// Imported lazily to avoid Zod throwing at module-load time in test environments.
+// ── Config accessors (ESM-safe, process.env directly) ─────────────────────────
 
 function getSecret(deps: AuthzDeps): string | undefined {
   if (deps.secret !== undefined) return deps.secret || undefined;
-  // Only reach config when NOT in test (test always supplies deps.secret).
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const { config } = require('../config.js') as typeof import('../config.js');
-  return config.INTERNAL_API_SECRET;
+  return process.env.INTERNAL_API_SECRET || undefined;
 }
+
+/**
+ * Memoized default Bloquim origin, derived once from process.env.BLOQUIM_API_URL.
+ * `undefined` = not yet computed; `null` = computed and failed (missing/malformed)
+ * → fail-closed without re-parsing on every call.
+ */
+let memoizedOrigin: string | null | undefined;
 
 function getBloquimOrigin(deps: AuthzDeps): string | null {
   if (deps.bloquimOrigin !== undefined) return deps.bloquimOrigin;
+  if (memoizedOrigin !== undefined) return memoizedOrigin;
   try {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { config } = require('../config.js') as typeof import('../config.js');
-    return new URL(config.BLOQUIM_API_URL).origin;
+    memoizedOrigin = new URL(process.env.BLOQUIM_API_URL ?? '').origin;
   } catch {
-    return null;
+    // Missing or malformed BLOQUIM_API_URL → fail-closed (deny), don't crash.
+    memoizedOrigin = null;
   }
+  return memoizedOrigin;
+}
+
+/** Test-only: reset the memoized origin so env changes take effect mid-suite. */
+export function __resetOriginMemoForTests(): void {
+  memoizedOrigin = undefined;
 }
 
 // ── Custom error ──────────────────────────────────────────────────────────────
@@ -82,6 +108,8 @@ export class AuthzError extends Error {
 // ── Cache ─────────────────────────────────────────────────────────────────────
 
 const CACHE_TTL_MS = 45_000;
+/** Cap cache size to avoid unbounded growth (mirror Bloquim permissionsCache). */
+const MAX_ENTRIES = 5000;
 
 interface CacheEntry {
   value: ActorRole;
@@ -94,20 +122,35 @@ function cacheKey(userId: string, workspaceId: string): string {
   return `${userId}::${workspaceId}`;
 }
 
+function cacheSet(key: string, value: ActorRole, expiresAt: number): void {
+  // Refresh insertion order so the cap evicts genuinely-oldest entries.
+  if (roleCache.has(key)) roleCache.delete(key);
+  roleCache.set(key, { value, expiresAt });
+  while (roleCache.size > MAX_ENTRIES) {
+    const oldest = roleCache.keys().next().value;
+    if (oldest === undefined) break;
+    roleCache.delete(oldest);
+  }
+}
+
 // ── Internal fetch helper ─────────────────────────────────────────────────────
 
+/**
+ * Fetch the role from Bloquim. Returns a RoleResult so the caller can decide
+ * whether the answer is cacheable. Fail-closed (role:null) on every failure,
+ * but only `definitive: true` results should be written to the cache.
+ */
 async function fetchRole(
   userId: string,
   workspaceId: string,
   deps: AuthzDeps,
-): Promise<ActorRole> {
+): Promise<RoleResult> {
   const secret = getSecret(deps);
-
-  // Fail-closed: no secret → deny without fetching.
-  if (!secret) return null;
+  // Misconfiguration is treated as a non-definitive deny (do not cache).
+  if (!secret) return { role: null, definitive: false };
 
   const origin = getBloquimOrigin(deps);
-  if (!origin) return null;
+  if (!origin) return { role: null, definitive: false };
 
   const f = deps.fetch ?? fetch;
 
@@ -123,14 +166,15 @@ async function fetchRole(
       signal: AbortSignal.timeout(5000),
     } as RequestInit);
 
-    // Fail-closed: non-OK HTTP → deny.
-    if (!res.ok) return null;
+    // Non-OK HTTP → transient deny, do NOT cache (Bloquim blip must not lock out).
+    if (!res.ok) return { role: null, definitive: false };
 
     const data = (await res.json()) as { role?: ActorRole };
-    return data.role ?? null;
+    // 200 OK is authoritative — including role:null (confirmed non-member).
+    return { role: data.role ?? null, definitive: true };
   } catch {
-    // Network error or timeout → fail-closed.
-    return null;
+    // Network error or timeout → transient deny, do NOT cache.
+    return { role: null, definitive: false };
   }
 }
 
@@ -139,6 +183,8 @@ async function fetchRole(
 /**
  * Resolve the actor's role in a workspace, with a 45s in-process cache.
  * Use for read-path gates (member check). On any failure → returns null.
+ * Only DEFINITIVE answers (Bloquim 200) are cached; transient failures retry
+ * on the next call.
  */
 export async function resolveActorRole(
   userId: string,
@@ -152,9 +198,12 @@ export async function resolveActorRole(
     return cached.value;
   }
 
-  const value = await fetchRole(userId, workspaceId, deps);
-  roleCache.set(key, { value, expiresAt: now() + CACHE_TTL_MS });
-  return value;
+  const result = await fetchRole(userId, workspaceId, deps);
+  // Never cache transient failures — only a confirmed answer from Bloquim.
+  if (result.definitive) {
+    cacheSet(key, result.role, now() + CACHE_TTL_MS);
+  }
+  return result.role;
 }
 
 /**
@@ -167,21 +216,25 @@ export async function resolveActorRoleFresh(
   deps: AuthzDeps = {},
 ): Promise<ActorRole> {
   // Intentionally bypass and do not populate the shared cache.
-  return fetchRole(userId, workspaceId, deps);
+  const result = await fetchRole(userId, workspaceId, deps);
+  return result.role;
 }
 
 /**
  * Assert the actor is a member (any non-null role) of the workspace.
  * Uses the cached path — suitable for read operations.
- * Throws AuthzError on deny or misconfiguration.
+ * Throws AuthzError on deny (FORBIDDEN) or misconfiguration (MISCONFIGURED).
  */
 export async function assertActorMember(
   userId: string,
   workspaceId: string,
   deps: AuthzDeps = {},
 ): Promise<void> {
-  const secret = getSecret(deps);
-  if (!secret) {
+  // Single source of truth for MISCONFIGURED: the secret check lives here so the
+  // unset-secret case surfaces distinctly from a denied role (HTTP 500 vs 403 in
+  // the route). fetchRole also fail-closes on a missing secret, so behaviour is
+  // identical regardless of path.
+  if (!getSecret(deps)) {
     throw new AuthzError(
       'Authz not configured (INTERNAL_API_SECRET missing)',
       'MISCONFIGURED',
@@ -201,15 +254,15 @@ export async function assertActorMember(
  * Assert the actor has admin role in the workspace.
  * Uses the FRESH (uncached) path — admin checks must never be served from
  * a stale cache (spec §5.1).
- * Throws AuthzError on deny, non-admin role, or misconfiguration.
+ * Throws AuthzError on deny / non-admin (FORBIDDEN) or misconfiguration
+ * (MISCONFIGURED).
  */
 export async function assertActorAdmin(
   userId: string,
   workspaceId: string,
   deps: AuthzDeps = {},
 ): Promise<void> {
-  const secret = getSecret(deps);
-  if (!secret) {
+  if (!getSecret(deps)) {
     throw new AuthzError(
       'Authz not configured (INTERNAL_API_SECRET missing)',
       'MISCONFIGURED',
