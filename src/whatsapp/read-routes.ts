@@ -5,12 +5,14 @@ import { listThreads, listThreadMessages, searchThreads } from './read-queries.j
 import { exportConversation } from './export.js';
 import { requirePanelToken } from './provision-routes.js';
 import { defaultRouteAuthz, gateMember, type RouteAuthz } from './route-authz.js';
+import { logAccess as defaultLogAccess, type LogAccessFn } from './access-log.js';
 
 export function registerReadRoutes(
   app: FastifyInstance,
-  deps: { pool: Pool; panelToken: string; authz?: RouteAuthz },
+  deps: { pool: Pool; panelToken: string; authz?: RouteAuthz; logAccess?: LogAccessFn },
 ) {
   const authz = deps.authz ?? defaultRouteAuthz;
+  const logAccess = deps.logAccess ?? defaultLogAccess;
   const auth = requirePanelToken(deps.panelToken);
 
   // ── GET /whatsapp/numbers ────────────────────────────────────────────────────
@@ -19,7 +21,9 @@ export function registerReadRoutes(
     const ws = req.query.workspace_id;
     if (!ws) return reply.code(400).send({ error: 'workspace_id required' });
     if (!await gateMember(req, reply, ws, authz)) return;
-    return reply.send({ schema: 'whatsapp_v1', numbers: await listNumbers(deps.pool, ws) });
+    const numbers = await listNumbers(deps.pool, ws);
+    logAccess(deps.pool, { actor: req.actingUser, action: 'list_numbers', workspaceId: ws });
+    return reply.send({ schema: 'whatsapp_v1', numbers });
   });
 
   // ── GET /whatsapp/threads ────────────────────────────────────────────────────
@@ -30,7 +34,9 @@ export function registerReadRoutes(
     if (!await gateMember(req, reply, workspace_id, authz)) return;
     const k = kind === 'dm' || kind === 'group' ? kind : 'all';
     const ls = lead_status === 'lead' || lead_status === 'not_lead' ? lead_status : 'all';
-    return reply.send({ schema: 'whatsapp_v1', ...await listThreads(deps.pool, { workspaceId: workspace_id, numberId: Number(number_id), limit: Number(limit ?? 30), cursor, kind: k, leadStatus: ls }) });
+    const result = await listThreads(deps.pool, { workspaceId: workspace_id, numberId: Number(number_id), limit: Number(limit ?? 30), cursor, kind: k, leadStatus: ls });
+    logAccess(deps.pool, { actor: req.actingUser, action: 'list_threads', workspaceId: workspace_id, numberId: Number(number_id) });
+    return reply.send({ schema: 'whatsapp_v1', ...result });
   });
 
   // ── GET /whatsapp/threads/:identifier/messages ───────────────────────────────
@@ -44,7 +50,9 @@ export function registerReadRoutes(
     const num = await getNumber(deps.pool, Number(number_id));
     if (!num) return reply.code(404).send({ error: 'number not found' });
     if (!await gateMember(req, reply, num.workspaceId, authz)) return;
-    return reply.send({ schema: 'whatsapp_v1', ...await listThreadMessages(deps.pool, { workspaceId: num.workspaceId, numberId: Number(number_id), identifier: req.params.identifier, limit: Number(limit ?? 50), cursor }) });
+    const result = await listThreadMessages(deps.pool, { workspaceId: num.workspaceId, numberId: Number(number_id), identifier: req.params.identifier, limit: Number(limit ?? 50), cursor });
+    logAccess(deps.pool, { actor: req.actingUser, action: 'thread_messages', workspaceId: num.workspaceId, numberId: Number(number_id), identifier: req.params.identifier });
+    return reply.send({ schema: 'whatsapp_v1', ...result });
   });
 
   // ── GET /whatsapp/search ─────────────────────────────────────────────────────
@@ -55,7 +63,9 @@ export function registerReadRoutes(
     if (!await gateMember(req, reply, workspace_id, authz)) return;
     const k = kind === 'dm' || kind === 'group' ? kind : 'all';
     const ls = lead_status === 'lead' || lead_status === 'not_lead' ? lead_status : 'all';
-    return reply.send({ schema: 'whatsapp_v1', ...await searchThreads(deps.pool, { workspaceId: workspace_id, numberId: Number(number_id), query, since, until, kind: k, leadStatus: ls, limit: limit ? Number(limit) : undefined }) });
+    const result = await searchThreads(deps.pool, { workspaceId: workspace_id, numberId: Number(number_id), query, since, until, kind: k, leadStatus: ls, limit: limit ? Number(limit) : undefined });
+    logAccess(deps.pool, { actor: req.actingUser, action: 'search', workspaceId: workspace_id, numberId: Number(number_id), meta: { query, count: result.results.length } });
+    return reply.send({ schema: 'whatsapp_v1', ...result });
   });
 
   // ── GET /whatsapp/threads/:identifier/export ─────────────────────────────────
@@ -72,6 +82,7 @@ export function registerReadRoutes(
     if (!num) return reply.code(404).send({ error: 'number not found' });
     if (!await gateMember(req, reply, num.workspaceId, authz)) return;
     const out = await exportConversation(deps.pool, { workspaceId: num.workspaceId, numberId: Number(number_id), identifier: req.params.identifier, since, until, maxMessages: max_messages ? Number(max_messages) : undefined });
+    logAccess(deps.pool, { actor: req.actingUser, action: 'export', workspaceId: num.workspaceId, numberId: Number(number_id), identifier: req.params.identifier, meta: { messageCount: out.messageCount } });
     return reply.send({ schema: 'whatsapp_v1', ...out });
   });
 }
