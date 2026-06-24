@@ -618,6 +618,7 @@ test('default path: no deps, uses process.env + global fetch (no require())', as
     if (prevUrl === undefined) delete process.env.BLOQUIM_API_URL;
     else process.env.BLOQUIM_API_URL = prevUrl;
     globalThis.fetch = prevFetch;
+    __resetOriginMemoForTests(); // don't leak the env-derived origin memo to later no-deps paths
   }
 });
 
