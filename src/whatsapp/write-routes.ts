@@ -6,6 +6,7 @@ import { setLeadStatus } from './thread-meta.js';
 import { getNumber } from './numbers.js';
 import { defaultRouteAuthz, gateAdmin, type RouteAuthz } from './route-authz.js';
 import { logAccess as defaultLogAccess, type LogAccessFn } from './access-log.js';
+import { validateLeadQualifyFields, validateDisqualifyReason } from './lead-qualify.js';
 
 export function registerWriteRoutes(
   app: FastifyInstance,
@@ -18,16 +19,40 @@ export function registerWriteRoutes(
   // ── POST /whatsapp/threads/:identifier/lead ──────────────────────────────────
   // NO workspace_id in body; derive workspace from number_id, then assertAdmin (fresh).
   app.post('/whatsapp/threads/:identifier/lead', { preHandler: auth }, async (req: any, reply) => {
-    const { number_id, status } = req.body ?? {};
+    const { number_id, status, stage, temperature, source, disqualifyReason, tags, notes } = req.body ?? {};
     if (!number_id || (status !== 'lead' && status !== 'not_lead')) return reply.code(400).send({ error: 'number_id e status (lead|not_lead) obrigatórios' });
     if (Number.isNaN(Number(number_id))) return reply.code(400).send({ error: 'number_id must be numeric' });
     // Actor check first (before any DB call).
     if (!req.actingUser) return reply.code(400).send({ error: 'x-acting-user required' });
+
+    // Validate qualification fields (pure, no DB needed).
+    const qualifyErr = validateLeadQualifyFields({ status, stage: stage ?? null, disqualifyReason: disqualifyReason ?? null });
+    if (qualifyErr) return reply.code(400).send({ error: qualifyErr });
+
+    // Validate disqualify_reason against DB reference table (if provided).
+    if (disqualifyReason != null) {
+      const valid = await validateDisqualifyReason(deps.pool, disqualifyReason);
+      if (!valid) return reply.code(400).send({ error: `disqualifyReason '${disqualifyReason}' não encontrado ou inativo` });
+    }
+
     const num = await getNumber(deps.pool, Number(number_id));
     if (!num) return reply.code(404).send({ error: 'number not found' });
     if (!await gateAdmin(req, reply, num.workspaceId, authz)) return;
-    await setLeadStatus(deps.pool, { numberId: Number(number_id), identifier: req.params.identifier, isLead: status === 'lead', updatedBy: req.actingUser });
-    logAccess(deps.pool, { actor: req.actingUser, action: 'set_lead', workspaceId: num.workspaceId, numberId: Number(number_id), identifier: req.params.identifier, meta: { status } });
+
+    await setLeadStatus(deps.pool, {
+      numberId: Number(number_id),
+      identifier: req.params.identifier,
+      isLead: status === 'lead',
+      updatedBy: req.actingUser,
+      stage: stage ?? undefined,
+      temperature: temperature ?? undefined,
+      source: source ?? undefined,
+      disqualifyReason: disqualifyReason ?? undefined,
+      tags: Array.isArray(tags) ? tags : undefined,
+      notes: notes ?? undefined,
+    });
+
+    logAccess(deps.pool, { actor: req.actingUser, action: 'set_lead', workspaceId: num.workspaceId, numberId: Number(number_id), identifier: req.params.identifier, meta: { status, stage, source } });
     return reply.send({ schema: 'whatsapp_v1', ok: true, identifier: req.params.identifier, leadStatus: status });
   });
 }
