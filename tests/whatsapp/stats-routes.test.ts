@@ -65,6 +65,25 @@ function makeMemberMisconfigured(): RouteAuthz {
   };
 }
 
+function makeMemberAllowed(): RouteAuthz {
+  return {
+    async assertMember() { /* allow */ },
+    async assertAdmin() { /* allow */ },
+  };
+}
+
+// ── Stub pool: records every query() call, returns empty rows ──────────────────
+function makeStubPool() {
+  const calls: { text: string; params: unknown[] }[] = [];
+  const pool = {
+    query(text: string, params: unknown[] = []) {
+      calls.push({ text, params });
+      return Promise.resolve({ rows: [] as any[], rowCount: 0 });
+    },
+  } as any;
+  return { pool, calls };
+}
+
 const PANEL_TOKEN = 'test-panel';
 const PANEL_HEADERS = { 'x-panel-token': PANEL_TOKEN };
 const ACTOR_HEADERS = { 'x-panel-token': PANEL_TOKEN, 'x-acting-user': 'user-abc' };
@@ -219,6 +238,73 @@ test('threads-fib: GET /whatsapp/threads include_first_inbound=true — actor ab
   assert.equal(res.statusCode, 400);
   assert.equal(res.json().error, 'x-acting-user required');
   assert.equal(spy.memberCalls, 0);
+  await app.close();
+});
+
+// threads-fib-3: include_first_inbound=TRUE (uppercase) → flag parsed case-insensitively
+// (MINOR #7). With a member-allowed gate + stub pool, the listThreads query must bind
+// the includeFirstInbound boolean ($10) to `true` even though the value was uppercase.
+test('threads-fib-3: include_first_inbound=TRUE (uppercase) → $10 bound true (case-insensitive)', async () => {
+  const { pool, calls } = makeStubPool();
+  const app = Fastify({ logger: false });
+  registerReadRoutes(app, { pool, panelToken: PANEL_TOKEN, authz: makeMemberAllowed(), logAccess: () => {} });
+
+  const res = await app.inject({
+    method: 'GET',
+    url: '/whatsapp/threads?workspace_id=ws-1&number_id=1&include_first_inbound=TRUE',
+    headers: ACTOR_HEADERS,
+  });
+
+  assert.equal(res.statusCode, 200);
+  const threadsCall = calls.find(c => /FROM agg a/.test(c.text));
+  assert.ok(threadsCall, 'listThreads query must have run');
+  // $10 is the last pushed param = includeFirstInbound flag.
+  assert.equal(threadsCall!.params[9], true, 'uppercase TRUE must parse to the flag = true');
+  await app.close();
+});
+
+// threads-fib-4: include_first_inbound=off → $10 bound false (sanity for the parser)
+test('threads-fib-4: include_first_inbound absent → $10 bound false', async () => {
+  const { pool, calls } = makeStubPool();
+  const app = Fastify({ logger: false });
+  registerReadRoutes(app, { pool, panelToken: PANEL_TOKEN, authz: makeMemberAllowed(), logAccess: () => {} });
+
+  const res = await app.inject({
+    method: 'GET',
+    url: '/whatsapp/threads?workspace_id=ws-1&number_id=1',
+    headers: ACTOR_HEADERS,
+  });
+
+  assert.equal(res.statusCode, 200);
+  const threadsCall = calls.find(c => /FROM agg a/.test(c.text));
+  assert.ok(threadsCall, 'listThreads query must have run');
+  assert.equal(threadsCall!.params[9], false, 'absent flag → false');
+  await app.close();
+});
+
+// stats-7: stats logAccess MUST omit `meta` (MINOR #8) so access-log stores NULL,
+// not the literal string '{}'.
+test('stats-7: GET /whatsapp/stats — logAccess called without meta', async () => {
+  const { pool } = makeStubPool();
+  let logged: any = null;
+  const app = Fastify({ logger: false });
+  registerReadRoutes(app, {
+    pool,
+    panelToken: PANEL_TOKEN,
+    authz: makeMemberAllowed(),
+    logAccess: (_pool, p) => { logged = p; },
+  });
+
+  const res = await app.inject({
+    method: 'GET',
+    url: '/whatsapp/stats?workspace_id=ws-1',
+    headers: ACTOR_HEADERS,
+  });
+
+  assert.equal(res.statusCode, 200);
+  assert.ok(logged, 'logAccess must have been called');
+  assert.equal(logged.action, 'stats');
+  assert.equal('meta' in logged, false, 'stats logAccess must NOT pass a meta key (→ NULL, not "{}")');
   await app.close();
 });
 

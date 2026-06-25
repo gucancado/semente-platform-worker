@@ -55,16 +55,26 @@ export async function getStats(
   // When $2 IS NULL it becomes a no-op (workspace alone is the scope).
   const numFilter = `AND ($2::int IS NULL OR m.whatsapp_number_id = $2)`;
 
+  // The 4 aggregate queries below are independent (no data dependency) and share
+  // the same immutable params, so we fire them in parallel (MINOR #3).
+
   // ── (1) total + byKind + byLeadStatus + byStage ──────────────────────────
   // Single CTE pass: per-thread aggregation → classify kind / lead / stage.
   // A thread is a "group" if any message has author IS NOT NULL OR a whatsapp_groups row exists.
-  const mainRes = await pool.query(
+  //
+  // byLeadStatus semantics MUST stay in sync with `leadFilterSql` in lead-filter.ts
+  // (MINOR #5): lead = no meta row (is_lead IS NULL) OR is_lead = TRUE;
+  //             not_lead = is_lead = FALSE. A change to one MUST update the other.
+  //
+  // Empty workspace → the inner subquery returns 0 rows → COUNT(*) = 0 but bare
+  // SUM(...) would be NULL; COALESCE(...,0) keeps every field a number (IMPORTANT #1).
+  const mainQuery = pool.query(
     `SELECT
        COUNT(*)::int AS total,
-       SUM(CASE WHEN is_group THEN 1 ELSE 0 END)::int AS group_count,
-       SUM(CASE WHEN NOT is_group THEN 1 ELSE 0 END)::int AS dm_count,
-       SUM(CASE WHEN (tm_is_lead IS NULL OR tm_is_lead = TRUE) THEN 1 ELSE 0 END)::int AS lead_count,
-       SUM(CASE WHEN tm_is_lead = FALSE THEN 1 ELSE 0 END)::int AS not_lead_count
+       COALESCE(SUM(CASE WHEN is_group THEN 1 ELSE 0 END), 0)::int AS group_count,
+       COALESCE(SUM(CASE WHEN NOT is_group THEN 1 ELSE 0 END), 0)::int AS dm_count,
+       COALESCE(SUM(CASE WHEN (tm_is_lead IS NULL OR tm_is_lead = TRUE) THEN 1 ELSE 0 END), 0)::int AS lead_count,
+       COALESCE(SUM(CASE WHEN tm_is_lead = FALSE THEN 1 ELSE 0 END), 0)::int AS not_lead_count
      FROM (
        SELECT
          a.identifier,
@@ -95,11 +105,9 @@ export async function getStats(
     params,
   );
 
-  const mainRow = mainRes.rows[0] ?? { total: 0, group_count: 0, dm_count: 0, lead_count: 0, not_lead_count: 0 };
-
   // ── (2) byStage — per thread ──────────────────────────────────────────────
   // Threads without a thread_meta row → stage = NULL (bucketed as "null").
-  const stageRes = await pool.query(
+  const stageQuery = pool.query(
     `SELECT COALESCE(tm.lead_stage, 'null') AS stage, COUNT(*)::int AS cnt
        FROM (
          SELECT DISTINCT m.identifier
@@ -117,15 +125,10 @@ export async function getStats(
     params,
   );
 
-  const byStage: Record<string, number> = {};
-  for (const r of stageRes.rows) {
-    byStage[r.stage as string] = r.cnt as number;
-  }
-
   // ── (3) byIngestSource — message-level count ──────────────────────────────
   // NOTE: this is a MESSAGE count (not thread count); callers should be aware
   // that a thread with 5 live messages and 1 backfill message contributes 5+1.
-  const ingestRes = await pool.query(
+  const ingestQuery = pool.query(
     `SELECT COALESCE(m.ingest_source, 'live') AS src, COUNT(*)::int AS cnt
        FROM messages m
       WHERE m.workspace_id = $1 ${numFilter}
@@ -133,27 +136,47 @@ export async function getStats(
     params,
   );
 
-  const byIngestSource: Record<string, number> = {};
-  for (const r of ingestRes.rows) {
-    byIngestSource[r.src as string] = r.cnt as number;
-  }
-
   // ── (4) byTag — thread count per tag ─────────────────────────────────────
   // Threads that have no tags are simply absent from this record.
-  // We scope tags to threads that exist in messages for this workspace/number.
-  const tagRes = await pool.query(
+  //
+  // Scope tags DIRECTLY to the workspace's own numbers (IMPORTANT #2). Earlier we
+  // matched tag rows via an identifier-EXISTS-in-messages trick; with $2 absent that
+  // trick is workspace-blind on the tag side, so a tag attached to ANOTHER
+  // workspace's number that happens to share an identifier (e.g. the same phone JID)
+  // would leak into this workspace's byTag. Restricting tt.whatsapp_number_id to the
+  // set of numbers owned by $1 (and to $2 when a single number is requested) makes a
+  // cross-workspace leak impossible.
+  const tagQuery = pool.query(
     `SELECT tt.tag, COUNT(DISTINCT tt.identifier)::int AS cnt
        FROM whatsapp_thread_tags tt
-      WHERE EXISTS (
-        SELECT 1 FROM messages m
-         WHERE m.workspace_id = $1
-           ${numFilter}
-           AND m.identifier = tt.identifier
-      )
+      WHERE tt.whatsapp_number_id IN (
+              SELECT id FROM whatsapp_numbers WHERE workspace_id = $1
+            )
         AND ($2::int IS NULL OR tt.whatsapp_number_id = $2)
       GROUP BY tt.tag`,
     params,
   );
+
+  const [mainRes, stageRes, ingestRes, tagRes] = await Promise.all([
+    mainQuery,
+    stageQuery,
+    ingestQuery,
+    tagQuery,
+  ]);
+
+  // Empty workspace → mainRes still returns exactly one row of zeros (COALESCE above),
+  // but guard the no-row case defensively so every field stays a number.
+  const mainRow = mainRes.rows[0] ?? { total: 0, group_count: 0, dm_count: 0, lead_count: 0, not_lead_count: 0 };
+
+  const byStage: Record<string, number> = {};
+  for (const r of stageRes.rows) {
+    byStage[r.stage as string] = r.cnt as number;
+  }
+
+  const byIngestSource: Record<string, number> = {};
+  for (const r of ingestRes.rows) {
+    byIngestSource[r.src as string] = r.cnt as number;
+  }
 
   const byTag: Record<string, number> = {};
   for (const r of tagRes.rows) {
@@ -161,15 +184,15 @@ export async function getStats(
   }
 
   return {
-    total: mainRow.total as number,
+    total: Number(mainRow.total) || 0,
     byLeadStatus: {
-      lead: mainRow.lead_count as number,
-      not_lead: mainRow.not_lead_count as number,
+      lead: Number(mainRow.lead_count) || 0,
+      not_lead: Number(mainRow.not_lead_count) || 0,
     },
     byStage,
     byKind: {
-      dm: mainRow.dm_count as number,
-      group: mainRow.group_count as number,
+      dm: Number(mainRow.dm_count) || 0,
+      group: Number(mainRow.group_count) || 0,
     },
     byIngestSource,
     byTag,

@@ -37,7 +37,8 @@ export function registerReadRoutes(
     if (!await gateMember(req, reply, workspace_id, authz)) return;
     const k = kind === 'dm' || kind === 'group' ? kind : 'all';
     const ls = lead_status === 'lead' || lead_status === 'not_lead' ? lead_status : 'all';
-    const includeFirstInbound = include_first_inbound === 'true' || include_first_inbound === '1';
+    const fib = typeof include_first_inbound === 'string' ? include_first_inbound.toLowerCase() : '';
+    const includeFirstInbound = fib === 'true' || fib === '1' || fib === 'yes';
     const result = await listThreads(deps.pool, {
       workspaceId: workspace_id, numberId: Number(number_id), limit: Number(limit ?? 30), cursor,
       kind: k, leadStatus: ls,
@@ -63,12 +64,14 @@ export function registerReadRoutes(
       workspaceId: workspace_id,
       numberId: number_id !== undefined ? Number(number_id) : undefined,
     });
+    // Omit `meta` entirely: access-log serialises a truthy `{}` to the literal
+    // string '{}' instead of NULL. The stats route has no meta payload, so leave
+    // it undefined to store NULL like the other reads.
     logAccess(deps.pool, {
       actor: req.actingUser,
       action: 'stats',
       workspaceId: workspace_id,
       numberId: number_id !== undefined ? Number(number_id) : null,
-      meta: {},
     });
     return reply.send({ schema: 'whatsapp_v1', ...stats });
   });

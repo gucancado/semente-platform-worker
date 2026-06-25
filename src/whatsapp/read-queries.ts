@@ -52,13 +52,13 @@ export async function listThreads(pool: Pool, p: {
     p.tag ?? null,
   ];
 
-  // $10=includeFirstInbound (only appended when the flag is on, to avoid a
-  // boolean cast in the middle of a big query). We use a conditional SELECT
-  // expression instead — cleaner for the CASE WHEN approach.
-  // The correlated subquery is wrapped in a CASE so it is only evaluated when
-  // includeFirstInbound = true; the boolean is appended as $10.
+  // $10 = includeFirstInbound flag. This boolean is ALWAYS pushed at this fixed
+  // position (unconditionally) so the `$10` placeholder in the SQL is always bound.
+  // Do NOT make this push conditional — the correlated subquery is gated at query
+  // time via `CASE WHEN $10::boolean THEN (...) ELSE NULL END`, so when the flag is
+  // false the subquery is skipped by the planner while $10 still resolves cleanly.
   params.push(includeFirstInbound);
-  // $10 is now pushed → used as CASE WHEN $10 THEN (...) ELSE NULL END
+  // $10 is now bound → used as CASE WHEN $10 THEN (...) ELSE NULL END
 
   const { rows } = await pool.query(
     `WITH agg AS (
