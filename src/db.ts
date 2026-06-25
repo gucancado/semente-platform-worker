@@ -279,6 +279,7 @@ export async function insertMessage(args: {
   whatsapp_number_id?: number | null;
   workspace_id?: string | null;
 }): Promise<{ id: number; duplicate: boolean }> {
+  // ingest_source: todas as linhas inseridas aqui recebem 'live' via DEFAULT da coluna (migration 034).
   // Number-path (monitored/agent_operated): dedup por (whatsapp_number_id, evolution_event_id).
   // Cobre inbound E outbound — cada número grava sua própria cópia, mesmo que a mesma
   // mensagem (mesmo evolution_event_id) seja vista por outro número do mesmo worker.
