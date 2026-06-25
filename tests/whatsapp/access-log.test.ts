@@ -290,7 +290,8 @@ test('setLeadStatus: issues BEGIN, SELECT, upsert, INSERT meta_log, COMMIT in or
     query: async (sql: string, params?: unknown[]) => {
       queries.push({ sql: sql.trim(), params });
       // For the SELECT, return an existing row (is_lead = true) so we can assert old_value.
-      if (sql.includes('SELECT is_lead FROM whatsapp_thread_meta')) {
+      // T7 estendeu o SELECT para `SELECT is_lead, lead_stage FROM ...` (captura old stage também).
+      if (sql.includes('SELECT is_lead') && sql.includes('FROM whatsapp_thread_meta')) {
         return { rows: [{ is_lead: true }] };
       }
       return { rows: [] };
@@ -316,7 +317,7 @@ test('setLeadStatus: issues BEGIN, SELECT, upsert, INSERT meta_log, COMMIT in or
   const sqls = queries.map(q => q.sql);
   assert.equal(sqls[0], 'BEGIN', 'first query must be BEGIN');
 
-  const selectIdx = sqls.findIndex(s => s.includes('SELECT is_lead FROM whatsapp_thread_meta'));
+  const selectIdx = sqls.findIndex(s => s.includes('SELECT is_lead') && s.includes('FROM whatsapp_thread_meta'));
   assert.ok(selectIdx > 0, 'SELECT old value must be issued after BEGIN');
 
   const upsertIdx = sqls.findIndex(s => s.includes('ON CONFLICT'));

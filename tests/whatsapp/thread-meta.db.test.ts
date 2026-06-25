@@ -27,7 +27,7 @@ test('setGroupExposure + getNumberExposure', async () => {
 
 test('isGroupThread: author presente OR whatsapp_groups.jid', async () => {
   await pool.query(`INSERT INTO whatsapp_numbers (id, workspace_id, evolution_instance) VALUES (1,'ws','i')`);
-  await pool.query(`INSERT INTO messages (whatsapp_number_id, workspace_id, identifier, author, direction, text, created_at) VALUES (1,'ws','g@g.us','+55','inbound','x',NOW())`);
+  await pool.query(`INSERT INTO messages (whatsapp_number_id, workspace_id, channel, identifier, author, direction, text, created_at) VALUES (1,'ws','whatsapp','g@g.us','+55','inbound','x',NOW())`);
   assert.equal(await isGroupThread(pool, 1, 'g@g.us'), true);
   assert.equal(await isGroupThread(pool, 1, 'dm'), false);
 });

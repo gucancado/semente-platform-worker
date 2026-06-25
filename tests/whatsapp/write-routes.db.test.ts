@@ -6,7 +6,11 @@ import { pool } from '../../src/db.js';
 import { registerWriteRoutes } from '../../src/whatsapp/write-routes.js';
 
 const TOKEN = 'tkn';
-function buildApp() { const app = Fastify(); registerWriteRoutes(app, { pool, panelToken: TOKEN }); return app; }
+// authz fake que passa: estes testes validam o caminho de ESCRITA no DB, não a
+// authz (que tem teste próprio em read-routes.authz.test.ts). Sem injetar, a
+// authz real chamaria o Bloquim e fail-closaria (403).
+const passAuthz = { assertMember: async () => {}, assertAdmin: async () => {} };
+function buildApp() { const app = Fastify(); registerWriteRoutes(app, { pool, panelToken: TOKEN, authz: passAuthz }); return app; }
 
 beforeEach(async () => { await pool.query('TRUNCATE whatsapp_numbers, whatsapp_thread_meta RESTART IDENTITY CASCADE'); });
 after(() => pool.end());
