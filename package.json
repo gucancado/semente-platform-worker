@@ -9,6 +9,7 @@
     "dev": "tsx watch src/index.ts",
     "start": "node dist/index.js",
     "migrate": "tsx src/migrate.ts",
+    "deploy": "node scripts/deploy.mjs",
     "test": "node --test --import tsx tests/**/*.test.ts",
     "test:watch": "node --test --watch --import tsx tests/**/*.test.ts",
     "typecheck": "tsc --noEmit",
