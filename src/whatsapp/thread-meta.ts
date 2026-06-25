@@ -92,10 +92,14 @@ async function replaceTags(client: PoolClient, numberId: number, identifier: str
     `DELETE FROM whatsapp_thread_tags WHERE whatsapp_number_id = $1 AND identifier = $2`,
     [numberId, identifier],
   );
-  for (const tag of tags) {
+  // Set-based insert (single round-trip). Skip entirely when empty — the DELETE
+  // above already cleared the tags.
+  if (tags.length > 0) {
     await client.query(
-      `INSERT INTO whatsapp_thread_tags (whatsapp_number_id, identifier, tag) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`,
-      [numberId, identifier, tag],
+      `INSERT INTO whatsapp_thread_tags (whatsapp_number_id, identifier, tag)
+       SELECT $1, $2, unnest($3::text[])
+       ON CONFLICT DO NOTHING`,
+      [numberId, identifier, tags],
     );
   }
 }

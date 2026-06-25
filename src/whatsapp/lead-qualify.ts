@@ -1,5 +1,8 @@
 // src/whatsapp/lead-qualify.ts
-// Pure validation helpers for lead qualification fields (no DB required).
+// Lead qualification validation helpers.
+// Most are PURE (no DB) — `isValidStage`, `validateLeadQualifyFields` — and are
+// importable without a Pool. The single DB-backed validator is
+// `validateDisqualifyReason`, which queries the reasons reference table.
 
 import type { Pool } from 'pg';
 

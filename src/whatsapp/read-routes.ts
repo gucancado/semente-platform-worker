@@ -6,6 +6,7 @@ import { exportConversation } from './export.js';
 import { requirePanelToken } from './provision-routes.js';
 import { defaultRouteAuthz, gateMember, type RouteAuthz } from './route-authz.js';
 import { logAccess as defaultLogAccess, type LogAccessFn } from './access-log.js';
+import { emptyToUndefined } from './query-coerce.js';
 
 export function registerReadRoutes(
   app: FastifyInstance,
@@ -38,9 +39,9 @@ export function registerReadRoutes(
     const result = await listThreads(deps.pool, {
       workspaceId: workspace_id, numberId: Number(number_id), limit: Number(limit ?? 30), cursor,
       kind: k, leadStatus: ls,
-      leadStage: lead_stage ?? undefined,
-      leadSource: lead_source ?? undefined,
-      tag: tag ?? undefined,
+      leadStage: emptyToUndefined(lead_stage),
+      leadSource: emptyToUndefined(lead_source),
+      tag: emptyToUndefined(tag),
     });
     logAccess(deps.pool, { actor: req.actingUser, action: 'list_threads', workspaceId: workspace_id, numberId: Number(number_id) });
     return reply.send({ schema: 'whatsapp_v1', ...result });
@@ -75,9 +76,9 @@ export function registerReadRoutes(
     const result = await searchThreads(deps.pool, {
       workspaceId: workspace_id, numberId: Number(number_id), query, since, until,
       kind: k, leadStatus: ls, limit: limit ? Number(limit) : undefined,
-      leadStage: lead_stage ?? undefined,
-      leadSource: lead_source ?? undefined,
-      tag: tag ?? undefined,
+      leadStage: emptyToUndefined(lead_stage),
+      leadSource: emptyToUndefined(lead_source),
+      tag: emptyToUndefined(tag),
     });
     logAccess(deps.pool, { actor: req.actingUser, action: 'search', workspaceId: workspace_id, numberId: Number(number_id), meta: { query, count: result.results.length } });
     return reply.send({ schema: 'whatsapp_v1', ...result });

@@ -2,6 +2,24 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { isValidStage, validateLeadQualifyFields, VALID_STAGES } from '../../src/whatsapp/lead-qualify.js';
+import { emptyToUndefined } from '../../src/whatsapp/query-coerce.js';
+
+// ── emptyToUndefined (filter coercion) ───────────────────────────────────────
+test('emptyToUndefined: empty / whitespace-only string → undefined (no-filter)', () => {
+  assert.equal(emptyToUndefined(''), undefined);
+  assert.equal(emptyToUndefined('   '), undefined);
+  assert.equal(emptyToUndefined('\t\n'), undefined);
+});
+
+test('emptyToUndefined: absent value → undefined', () => {
+  assert.equal(emptyToUndefined(undefined), undefined);
+  assert.equal(emptyToUndefined(null), undefined);
+});
+
+test('emptyToUndefined: real value passes through (trimmed)', () => {
+  assert.equal(emptyToUndefined('qualificado'), 'qualificado');
+  assert.equal(emptyToUndefined('  vip  '), 'vip');
+});
 
 // ── isValidStage ──────────────────────────────────────────────────────────────
 test('isValidStage: aceita todos os valores válidos', () => {

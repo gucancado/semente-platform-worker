@@ -25,19 +25,29 @@ export function registerWriteRoutes(
     // Actor check first (before any DB call).
     if (!req.actingUser) return reply.code(400).send({ error: 'x-acting-user required' });
 
-    // Validate qualification fields (pure, no DB needed).
+    // ── Pure (no-DB) validation — safe to run before the authz gate (cheap, no info leak).
+    // Validate qualification fields (stage whitelist + coherence).
     const qualifyErr = validateLeadQualifyFields({ status, stage: stage ?? null, disqualifyReason: disqualifyReason ?? null });
     if (qualifyErr) return reply.code(400).send({ error: qualifyErr });
 
-    // Validate disqualify_reason against DB reference table (if provided).
+    // `tags`, when present, must be an array of strings. A genuinely omitted `tags`
+    // means "don't touch tags"; `[]` means "clear all tags". A non-array (e.g. the
+    // string "vendas") is a client error — fail loudly instead of silently ignoring.
+    if (tags !== undefined && !(Array.isArray(tags) && tags.every((t) => typeof t === 'string'))) {
+      return reply.code(400).send({ error: 'tags must be an array of strings' });
+    }
+
+    // ── Number existence + authz gate. DB-backed validation MUST come AFTER the
+    // admin gate so a non-admin panel-token holder can't probe reference tables.
+    const num = await getNumber(deps.pool, Number(number_id));
+    if (!num) return reply.code(404).send({ error: 'number not found' });
+    if (!await gateAdmin(req, reply, num.workspaceId, authz)) return;
+
+    // Validate disqualify_reason against DB reference table (if provided) — AFTER authz.
     if (disqualifyReason != null) {
       const valid = await validateDisqualifyReason(deps.pool, disqualifyReason);
       if (!valid) return reply.code(400).send({ error: `disqualifyReason '${disqualifyReason}' não encontrado ou inativo` });
     }
-
-    const num = await getNumber(deps.pool, Number(number_id));
-    if (!num) return reply.code(404).send({ error: 'number not found' });
-    if (!await gateAdmin(req, reply, num.workspaceId, authz)) return;
 
     await setLeadStatus(deps.pool, {
       numberId: Number(number_id),

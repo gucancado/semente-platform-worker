@@ -451,6 +451,80 @@ test('POST /whatsapp/threads/:id/lead — number not found → 404', async () =>
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// (#3) lead POST: tags is present but NOT an array of strings → 400.
+// Pure validation (no DB) runs BEFORE the gate, so PANIC_POOL is safe and the
+// admin gate is never reached.
+// ─────────────────────────────────────────────────────────────────────────────
+test('(#3) POST /whatsapp/threads/:id/lead — tags="x" (non-array) → 400, no DB, gate not reached', async () => {
+  const spy = makeAdminForbidden();
+  const app = Fastify({ logger: false });
+  registerWriteRoutes(app, { pool: PANIC_POOL, panelToken: PANEL_TOKEN, authz: spy });
+  const res = await app.inject({
+    method: 'POST',
+    url: '/whatsapp/threads/c-1/lead',
+    headers: ACTOR_HEADERS,
+    payload: { number_id: 1, status: 'lead', tags: 'vendas' },
+  });
+  assert.equal(res.statusCode, 400);
+  assert.equal(res.json().error, 'tags must be an array of strings');
+  assert.equal(spy.adminCalls, 0, 'gate must not be reached on pure-validation failure');
+  await app.close();
+});
+
+test('(#3b) POST /whatsapp/threads/:id/lead — tags=[1,2] (array of non-strings) → 400', async () => {
+  const spy = makeAdminForbidden();
+  const app = Fastify({ logger: false });
+  registerWriteRoutes(app, { pool: PANIC_POOL, panelToken: PANEL_TOKEN, authz: spy });
+  const res = await app.inject({
+    method: 'POST',
+    url: '/whatsapp/threads/c-1/lead',
+    headers: ACTOR_HEADERS,
+    payload: { number_id: 1, status: 'lead', tags: [1, 2] },
+  });
+  assert.equal(res.statusCode, 400);
+  assert.equal(res.json().error, 'tags must be an array of strings');
+  assert.equal(spy.adminCalls, 0);
+  await app.close();
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// (#5) DB-backed disqualifyReason validation runs AFTER the admin gate.
+// A non-admin (assertAdmin FORBIDDEN) sending a disqualifyReason must get 403
+// (authz) and NOT reach the reasons-table query → no info leak. PANIC_POOL panics
+// on any query other than getNumber, so we use a pool that resolves the number but
+// PANICS on the disqualify-reasons query — proving it is never reached.
+// ─────────────────────────────────────────────────────────────────────────────
+test('(#5) POST /whatsapp/threads/:id/lead — non-admin + disqualifyReason → 403, reasons table NOT queried', async () => {
+  const spy = makeAdminForbidden();
+  let reasonsQueried = false;
+  const pool = {
+    query: async (sql: string, params: any[]) => {
+      if (sql.includes('WHERE id =')) {
+        return { rows: [{ id: params[0], workspace_id: 'ws-1', phone: null, evolution_instance: 'i', label: null, status: 'connected', mode: 'monitored', expose_groups_in_mcp: false, created_by: null, created_at: new Date(), updated_at: new Date() }] };
+      }
+      if (sql.includes('whatsapp_disqualify_reasons')) {
+        reasonsQueried = true;
+        throw new Error('reasons table must NOT be queried before the admin gate (info leak)');
+      }
+      throw new Error(`Unexpected DB call: ${sql}`);
+    },
+  } as any;
+  const app = Fastify({ logger: false });
+  registerWriteRoutes(app, { pool, panelToken: PANEL_TOKEN, authz: spy });
+  const res = await app.inject({
+    method: 'POST',
+    url: '/whatsapp/threads/c-1/lead',
+    headers: ACTOR_HEADERS,
+    payload: { number_id: 1, status: 'not_lead', stage: 'desqualificado', disqualifyReason: 'sem_fit' },
+  });
+  assert.equal(res.statusCode, 403);
+  assert.equal(res.json().error, 'forbidden');
+  assert.equal(spy.adminCalls, 1);
+  assert.equal(reasonsQueried, false, 'disqualify-reasons table must not be queried by a non-admin');
+  await app.close();
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 // SERVER-GATED (happy paths — require real DB + real Bloquim):
 //   - GET /whatsapp/numbers with valid member → 200 (numbers array)
 //   - GET /whatsapp/threads with valid member → 200
