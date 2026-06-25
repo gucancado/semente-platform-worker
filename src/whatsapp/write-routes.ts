@@ -7,6 +7,7 @@ import { getNumber } from './numbers.js';
 import { defaultRouteAuthz, gateAdmin, type RouteAuthz } from './route-authz.js';
 import { logAccess as defaultLogAccess, type LogAccessFn } from './access-log.js';
 import { validateLeadQualifyFields, validateDisqualifyReason } from './lead-qualify.js';
+import { bulkSetLeadStatus, BulkLeadIdentifierError, BULK_LEAD_MAX } from './bulk-lead.js';
 
 export function registerWriteRoutes(
   app: FastifyInstance,
@@ -64,5 +65,100 @@ export function registerWriteRoutes(
 
     logAccess(deps.pool, { actor: req.actingUser, action: 'set_lead', workspaceId: num.workspaceId, numberId: Number(number_id), identifier: req.params.identifier, meta: { status, stage, source } });
     return reply.send({ schema: 'whatsapp_v1', ok: true, identifier: req.params.identifier, leadStatus: status });
+  });
+
+  // ── POST /whatsapp/threads/bulk-lead ─────────────────────────────────────────
+  // Transactional batch set-lead for many threads at once (admin, all-or-nothing).
+  app.post('/whatsapp/threads/bulk-lead', { preHandler: auth }, async (req: any, reply) => {
+    const { number_id, updates } = req.body ?? {};
+
+    // ── 1. Actor check (before any validation or DB) ──────────────────────────
+    if (!req.actingUser) return reply.code(400).send({ error: 'x-acting-user required' });
+
+    // ── 2. Pure structural validation ─────────────────────────────────────────
+    if (number_id === undefined || number_id === null) {
+      return reply.code(400).send({ error: 'number_id obrigatório' });
+    }
+    if (Number.isNaN(Number(number_id))) {
+      return reply.code(400).send({ error: 'number_id must be numeric' });
+    }
+    if (!Array.isArray(updates) || updates.length === 0) {
+      return reply.code(400).send({ error: 'updates must be a non-empty array' });
+    }
+    if (updates.length > BULK_LEAD_MAX) {
+      return reply.code(400).send({ error: `updates must not exceed ${BULK_LEAD_MAX} items` });
+    }
+
+    // Per-update pure validation: status enum + stage whitelist/coherence + tags type.
+    for (let i = 0; i < updates.length; i++) {
+      const upd = updates[i];
+      if (!upd || typeof upd !== 'object') {
+        return reply.code(400).send({ error: `updates[${i}]: must be an object` });
+      }
+      if (typeof upd.identifier !== 'string' || upd.identifier.trim() === '') {
+        return reply.code(400).send({ error: `updates[${i}]: identifier is required` });
+      }
+      if (upd.status !== 'lead' && upd.status !== 'not_lead') {
+        return reply.code(400).send({ error: `updates[${i}] (${upd.identifier}): status must be 'lead' or 'not_lead'` });
+      }
+      const qualifyErr = validateLeadQualifyFields({ status: upd.status, stage: upd.stage ?? null, disqualifyReason: upd.disqualifyReason ?? null });
+      if (qualifyErr) {
+        return reply.code(400).send({ error: `updates[${i}] (${upd.identifier}): ${qualifyErr}` });
+      }
+      if (upd.tags !== undefined && !(Array.isArray(upd.tags) && upd.tags.every((t: unknown) => typeof t === 'string'))) {
+        return reply.code(400).send({ error: `updates[${i}] (${upd.identifier}): tags must be an array of strings` });
+      }
+    }
+
+    // ── 3. Number existence + admin gate ──────────────────────────────────────
+    const num = await getNumber(deps.pool, Number(number_id));
+    if (!num) return reply.code(404).send({ error: 'number not found' });
+    if (!await gateAdmin(req, reply, num.workspaceId, authz)) return;
+
+    // ── 4. DB-backed disqualifyReason validation (AFTER authz, no info leak) ─
+    for (let i = 0; i < updates.length; i++) {
+      const upd = updates[i];
+      if (upd.disqualifyReason != null) {
+        const valid = await validateDisqualifyReason(deps.pool, upd.disqualifyReason);
+        if (!valid) {
+          return reply.code(400).send({ error: `updates[${i}] (${upd.identifier}): disqualifyReason '${upd.disqualifyReason}' não encontrado ou inativo` });
+        }
+      }
+    }
+
+    // ── 5. Transactional bulk write ───────────────────────────────────────────
+    let result: { updated: number; identifiers: string[] };
+    try {
+      result = await bulkSetLeadStatus(deps.pool, {
+        numberId: Number(number_id),
+        workspaceId: num.workspaceId,
+        updatedBy: req.actingUser,
+        updates: updates.map((u: any) => ({
+          identifier: u.identifier,
+          status: u.status as 'lead' | 'not_lead',
+          stage: u.stage ?? null,
+          temperature: u.temperature ?? null,
+          source: u.source ?? null,
+          disqualifyReason: u.disqualifyReason ?? null,
+          tags: Array.isArray(u.tags) ? u.tags : undefined,
+          notes: u.notes ?? null,
+        })),
+      });
+    } catch (err) {
+      if (err instanceof BulkLeadIdentifierError) {
+        return reply.code(400).send({ error: 'identifiers not found', unknownIdentifiers: err.unknownIdentifiers });
+      }
+      throw err;
+    }
+
+    logAccess(deps.pool, {
+      actor: req.actingUser,
+      action: 'set_lead_bulk',
+      workspaceId: num.workspaceId,
+      numberId: Number(number_id),
+      meta: { count: updates.length },
+    });
+
+    return reply.send({ schema: 'whatsapp_v1', ok: true, updated: result.updated, identifiers: result.identifiers });
   });
 }
