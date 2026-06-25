@@ -14,6 +14,8 @@ export type Thread = {
   leadSource: string | null;
   disqualifyReason: string | null;
   tags: string[];
+  /** Present only when `includeFirstInboundText` was requested. Null if no inbound message exists. */
+  firstInboundText?: string | null;
 };
 function encode(c: { lastAt: string; identifier: string }) { return Buffer.from(JSON.stringify(c)).toString('base64'); }
 function decode(s: string): { lastAt: string; identifier: string } { return JSON.parse(Buffer.from(s, 'base64').toString()); }
@@ -28,10 +30,13 @@ export async function listThreads(pool: Pool, p: {
   leadStage?: string;
   leadSource?: string;
   tag?: string;
+  /** When true, adds `firstInboundText` to each thread (correlated subquery, opt-in). */
+  includeFirstInboundText?: boolean;
 }) {
   const cur = p.cursor ? decode(p.cursor) : null;
   const kind = p.kind ?? 'all';
   const leadStatus = p.leadStatus ?? 'all';
+  const includeFirstInbound = p.includeFirstInboundText === true;
 
   // $1=numberId $2=workspaceId $3=cur.lastAt $4=cur.identifier $5=limit $6=kind
   // $7=leadStage $8=leadSource $9=tag
@@ -46,6 +51,14 @@ export async function listThreads(pool: Pool, p: {
     p.leadSource ?? null,
     p.tag ?? null,
   ];
+
+  // $10=includeFirstInbound (only appended when the flag is on, to avoid a
+  // boolean cast in the middle of a big query). We use a conditional SELECT
+  // expression instead — cleaner for the CASE WHEN approach.
+  // The correlated subquery is wrapped in a CASE so it is only evaluated when
+  // includeFirstInbound = true; the boolean is appended as $10.
+  params.push(includeFirstInbound);
+  // $10 is now pushed → used as CASE WHEN $10 THEN (...) ELSE NULL END
 
   const { rows } = await pool.query(
     `WITH agg AS (
@@ -73,7 +86,17 @@ export async function listThreads(pool: Pool, p: {
                  FROM whatsapp_thread_tags t
                 WHERE t.whatsapp_number_id = $1 AND t.identifier = a.identifier),
               '{}'::text[]
-            ) AS tags
+            ) AS tags,
+            CASE WHEN $10::boolean THEN (
+              SELECT mi.text
+                FROM messages mi
+               WHERE mi.whatsapp_number_id = $1
+                 AND mi.workspace_id = $2
+                 AND mi.identifier = a.identifier
+                 AND mi.direction = 'inbound'
+               ORDER BY mi.created_at ASC
+               LIMIT 1
+            ) ELSE NULL END AS first_inbound_text
        FROM agg a
        LEFT JOIN whatsapp_groups g
          ON g.whatsapp_number_id = $1 AND g.jid = a.identifier
@@ -95,16 +118,22 @@ export async function listThreads(pool: Pool, p: {
       ORDER BY a.last_at DESC, a.identifier ASC
       LIMIT $5`,
     params);
-  const threads: Thread[] = rows.map(r => ({
-    identifier: r.identifier, lastAt: r.last_at.toISOString(), lastText: r.last_text, count: r.count,
-    kind: r.is_group ? 'group' : 'dm', name: r.name ?? null,
-    leadStatus: r.not_lead ? 'not_lead' : 'lead',
-    leadStage: r.lead_stage ?? null,
-    leadTemperature: r.lead_temperature ?? null,
-    leadSource: r.lead_source ?? null,
-    disqualifyReason: r.disqualify_reason ?? null,
-    tags: r.tags ?? [],
-  }));
+  const threads: Thread[] = rows.map(r => {
+    const t: Thread = {
+      identifier: r.identifier, lastAt: r.last_at.toISOString(), lastText: r.last_text, count: r.count,
+      kind: r.is_group ? 'group' : 'dm', name: r.name ?? null,
+      leadStatus: r.not_lead ? 'not_lead' : 'lead',
+      leadStage: r.lead_stage ?? null,
+      leadTemperature: r.lead_temperature ?? null,
+      leadSource: r.lead_source ?? null,
+      disqualifyReason: r.disqualify_reason ?? null,
+      tags: r.tags ?? [],
+    };
+    if (includeFirstInbound) {
+      t.firstInboundText = r.first_inbound_text ?? null;
+    }
+    return t;
+  });
   const last = threads.at(-1);
   const nextCursor = threads.length === p.limit && last ? encode({ lastAt: last.lastAt, identifier: last.identifier }) : null;
   return { threads, nextCursor };
