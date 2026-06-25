@@ -9,10 +9,10 @@ after(() => pool.end());
 
 test('searchThreads agrupa por identifier e conta matches', async () => {
   await pool.query(`INSERT INTO whatsapp_numbers (id, workspace_id, evolution_instance) VALUES (1,'ws','i')`);
-  await pool.query(`INSERT INTO messages (whatsapp_number_id, workspace_id, identifier, direction, text, created_at) VALUES
-    (1,'ws','c1','inbound','quero orçamento', NOW()),
-    (1,'ws','c1','inbound','orçamento urgente', NOW()),
-    (1,'ws','c2','inbound','bom dia', NOW())`);
+  await pool.query(`INSERT INTO messages (whatsapp_number_id, workspace_id, channel, identifier, direction, text, created_at) VALUES
+    (1,'ws','whatsapp','c1','inbound','quero orçamento', NOW()),
+    (1,'ws','whatsapp','c1','inbound','orçamento urgente', NOW()),
+    (1,'ws','whatsapp','c2','inbound','bom dia', NOW())`);
   const { results } = await searchThreads(pool, { workspaceId: 'ws', numberId: 1, query: 'orçamento' });
   assert.equal(results.length, 1);
   assert.equal(results[0].identifier, 'c1');

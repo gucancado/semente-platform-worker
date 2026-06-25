@@ -45,8 +45,11 @@ export async function backfillNumber(
       const createdAt = ts ? new Date(ts * 1000) : new Date();
       try {
         const res = await pool.query(
-          `INSERT INTO messages (whatsapp_number_id, workspace_id, agent, channel, identifier, author, direction, text, evolution_event_id, created_at)
-           VALUES ($1, $2, NULL, 'whatsapp', $3, $4, $5, $6, $7, $8)
+          // ingest_source='backfill' marca proveniência do histórico Evolution.
+          // IMPORTANTE: ingest_source deliberadamente ausente do DO UPDATE SET —
+          // re-backfill de uma linha já ingerida via webhook ('live') NÃO rebaixa p/ 'backfill'.
+          `INSERT INTO messages (whatsapp_number_id, workspace_id, agent, channel, identifier, author, direction, text, evolution_event_id, created_at, ingest_source)
+           VALUES ($1, $2, NULL, 'whatsapp', $3, $4, $5, $6, $7, $8, 'backfill')
            ON CONFLICT (whatsapp_number_id, evolution_event_id)
              WHERE whatsapp_number_id IS NOT NULL AND evolution_event_id IS NOT NULL
              DO UPDATE SET identifier = EXCLUDED.identifier, author = EXCLUDED.author

@@ -4,9 +4,13 @@ import Fastify from 'fastify';
 import { pool } from '../../src/db.js';
 import { registerReadRoutes } from '../../src/whatsapp/read-routes.js';
 
+// authz fake que passa: este teste valida o contrato de LEITURA (numbers), não a
+// authz (testada em read-routes.authz.test.ts). Sem injetar, a authz real
+// chamaria o Bloquim e fail-closaria (403).
+const passAuthz = { assertMember: async () => {}, assertAdmin: async () => {} };
 function buildApp() {
   const app = Fastify();
-  registerReadRoutes(app, { pool, panelToken: 'test-panel' });
+  registerReadRoutes(app, { pool, panelToken: 'test-panel', authz: passAuthz });
   return app;
 }
 
