@@ -90,6 +90,9 @@ export function registerWriteRoutes(
     }
 
     // Per-update pure validation: status enum + stage whitelist/coherence + tags type.
+    // Also track identifiers to reject duplicates (silent last-write-wins + overcount).
+    const seenIdentifiers = new Set<string>();
+    const duplicateIdentifiers = new Set<string>();
     for (let i = 0; i < updates.length; i++) {
       const upd = updates[i];
       if (!upd || typeof upd !== 'object') {
@@ -108,6 +111,13 @@ export function registerWriteRoutes(
       if (upd.tags !== undefined && !(Array.isArray(upd.tags) && upd.tags.every((t: unknown) => typeof t === 'string'))) {
         return reply.code(400).send({ error: `updates[${i}] (${upd.identifier}): tags must be an array of strings` });
       }
+      if (seenIdentifiers.has(upd.identifier)) duplicateIdentifiers.add(upd.identifier);
+      seenIdentifiers.add(upd.identifier);
+    }
+    // Reject duplicate identifiers: applying them sequentially is silent last-write-wins
+    // and would overcount `updated`/`identifiers`. Pure, DB-free, before the gate.
+    if (duplicateIdentifiers.size > 0) {
+      return reply.code(400).send({ error: 'duplicate identifiers', duplicates: [...duplicateIdentifiers] });
     }
 
     // ── 3. Number existence + admin gate ──────────────────────────────────────
@@ -116,13 +126,22 @@ export function registerWriteRoutes(
     if (!await gateAdmin(req, reply, num.workspaceId, authz)) return;
 
     // ── 4. DB-backed disqualifyReason validation (AFTER authz, no info leak) ─
-    for (let i = 0; i < updates.length; i++) {
-      const upd = updates[i];
-      if (upd.disqualifyReason != null) {
-        const valid = await validateDisqualifyReason(deps.pool, upd.disqualifyReason);
-        if (!valid) {
-          return reply.code(400).send({ error: `updates[${i}] (${upd.identifier}): disqualifyReason '${upd.disqualifyReason}' não encontrado ou inativo` });
-        }
+    // Batch: collect DISTINCT non-null reasons and validate in ONE query instead of
+    // up to 500 sequential round-trips. Kept after gateAdmin (no info leak).
+    const reasons = [...new Set(
+      updates
+        .map((u: any) => u.disqualifyReason)
+        .filter((r: unknown): r is string => r != null),
+    )];
+    if (reasons.length > 0) {
+      const { rows } = await deps.pool.query<{ code: string }>(
+        `SELECT code FROM whatsapp_disqualify_reasons WHERE code = ANY($1::text[]) AND active = TRUE`,
+        [reasons],
+      );
+      const validReasons = new Set(rows.map((r) => r.code));
+      const invalidReasons = reasons.filter((r) => !validReasons.has(r));
+      if (invalidReasons.length > 0) {
+        return reply.code(400).send({ error: 'invalid disqualifyReason', invalidReasons });
       }
     }
 
@@ -133,15 +152,20 @@ export function registerWriteRoutes(
         numberId: Number(number_id),
         workspaceId: num.workspaceId,
         updatedBy: req.actingUser,
+        // Pass optional qualification fields THROUGH preserving `undefined`
+        // (= "not provided"). Coercing omitted→null would make applyLeadUpdate's
+        // `p.stage !== undefined` guard fire a bogus "stage cleared" meta_log row
+        // while COALESCE actually preserves the old value. Matches single route's
+        // `?? undefined` semantics.
         updates: updates.map((u: any) => ({
           identifier: u.identifier,
           status: u.status as 'lead' | 'not_lead',
-          stage: u.stage ?? null,
-          temperature: u.temperature ?? null,
-          source: u.source ?? null,
-          disqualifyReason: u.disqualifyReason ?? null,
+          stage: u.stage,
+          temperature: u.temperature,
+          source: u.source,
+          disqualifyReason: u.disqualifyReason,
           tags: Array.isArray(u.tags) ? u.tags : undefined,
-          notes: u.notes ?? null,
+          notes: u.notes,
         })),
       });
     } catch (err) {
@@ -151,12 +175,21 @@ export function registerWriteRoutes(
       throw err;
     }
 
+    // Include the touched identifiers so an LGPD audit can trace which threads a
+    // bulk call affected. Cap the list to keep the log row bounded on big batches.
+    const AUDIT_IDENTIFIER_CAP = 200;
     logAccess(deps.pool, {
       actor: req.actingUser,
       action: 'set_lead_bulk',
       workspaceId: num.workspaceId,
       numberId: Number(number_id),
-      meta: { count: updates.length },
+      meta: {
+        count: result.updated,
+        identifiers: result.identifiers.slice(0, AUDIT_IDENTIFIER_CAP),
+        ...(result.identifiers.length > AUDIT_IDENTIFIER_CAP
+          ? { identifiersTruncated: result.identifiers.length - AUDIT_IDENTIFIER_CAP }
+          : {}),
+      },
     });
 
     return reply.send({ schema: 'whatsapp_v1', ok: true, updated: result.updated, identifiers: result.identifiers });

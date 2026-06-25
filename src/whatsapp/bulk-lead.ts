@@ -67,18 +67,16 @@ export async function bulkSetLeadStatus(
     // thread_meta row for this number+workspace.
     const inputIdentifiers = p.updates.map((u) => u.identifier);
 
-    // Use a single query with unnest to check all at once (one round-trip).
+    // Single query: UNION already dedupes, so no outer SELECT DISTINCT needed.
     const existenceResult = await client.query<{ identifier: string }>(
-      `SELECT DISTINCT identifier FROM (
-         SELECT identifier FROM messages
+      `SELECT identifier FROM messages
          WHERE whatsapp_number_id = $1
            AND workspace_id = $2
            AND identifier = ANY($3::text[])
-         UNION
-         SELECT identifier FROM whatsapp_thread_meta
+       UNION
+       SELECT identifier FROM whatsapp_thread_meta
          WHERE whatsapp_number_id = $1
-           AND identifier = ANY($3::text[])
-       ) existing`,
+           AND identifier = ANY($3::text[])`,
       [p.numberId, p.workspaceId, inputIdentifiers],
     );
 
@@ -86,8 +84,12 @@ export async function bulkSetLeadStatus(
     const unknownIdentifiers = inputIdentifiers.filter((id) => !existingSet.has(id));
 
     if (unknownIdentifiers.length > 0) {
-      // Abort before any write — throw outside the catch so ROLLBACK runs in finally.
-      await client.query('ROLLBACK');
+      // Abort before any write. Throw the identifier error FIRST: no rows have been
+      // written, so the open transaction is rolled back implicitly by the catch's
+      // ROLLBACK (and ultimately client.release() in finally). Issuing an explicit
+      // ROLLBACK here would let a dead-connection rollback error mask the identifier
+      // error → the route's `instanceof BulkLeadIdentifierError` catch would miss it
+      // and return 500 instead of 400.
       throw new BulkLeadIdentifierError(unknownIdentifiers);
     }
 
@@ -114,10 +116,12 @@ export async function bulkSetLeadStatus(
       identifiers: inputIdentifiers,
     };
   } catch (err) {
-    if (!(err instanceof BulkLeadIdentifierError)) {
-      // BulkLeadIdentifierError already issued ROLLBACK above; don't double-rollback.
-      try { await client.query('ROLLBACK'); } catch { /* ignore rollback failure */ }
-    }
+    // Roll back on ANY error (including BulkLeadIdentifierError, which is thrown
+    // before any write). Isolate ROLLBACK so a dead-connection rollback error can
+    // never mask the original error — the caller must still see the real cause
+    // (e.g. BulkLeadIdentifierError → 400). client.release() in finally is the
+    // ultimate safety net for the open transaction.
+    try { await client.query('ROLLBACK'); } catch { /* ignore rollback failure */ }
     throw err;
   } finally {
     client.release();

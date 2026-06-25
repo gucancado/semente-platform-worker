@@ -299,6 +299,31 @@ test('✓ bulk-lead: invalid stage value → 400, no DB call', async () => {
   await app.close();
 });
 
+// ── (10b) duplicate identifiers in updates[] → 400 (pure, before gate) ───────
+test('✓ bulk-lead: duplicate identifiers → 400, no DB call', async () => {
+  const app = Fastify({ logger: false });
+  registerWriteRoutes(app, { pool: PANIC_POOL, panelToken: PANEL_TOKEN, authz: makeAllPass() });
+
+  const res = await app.inject({
+    method: 'POST',
+    url: '/whatsapp/threads/bulk-lead',
+    headers: ACTOR_HEADERS,
+    payload: {
+      number_id: 1,
+      updates: [
+        { identifier: 'c-1', status: 'lead' },
+        { identifier: 'c-2', status: 'not_lead' },
+        { identifier: 'c-1', status: 'not_lead' }, // duplicate of c-1
+      ],
+    },
+  });
+
+  assert.equal(res.statusCode, 400);
+  assert.equal(res.json().error, 'duplicate identifiers');
+  assert.deepEqual(res.json().duplicates, ['c-1']);
+  await app.close();
+});
+
 // ── (11) number not found → 404 (actor check + pure validation pass, getNumber returns empty) ─
 test('✓ bulk-lead: number not found → 404', async () => {
   const emptyPool = {
