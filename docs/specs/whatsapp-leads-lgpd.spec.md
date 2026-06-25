@@ -122,6 +122,7 @@ Quando for implementar, por **contato/thread** (`number_id`+`identifier`), tocar
 - `messages`: `text`, `author`.
 - **`webhook_logs`: `message_text` + `push_name`** ← era o vazamento principal omitido na v1.
 - `whatsapp_thread_meta`, `whatsapp_thread_tags`, `whatsapp_thread_meta_log`.
+- **`whatsapp_access_log`** (`actor` + `meta` JSONB pode conter `identifiers` de bulk — PII-adjacente; criado na Fase 1/T4). ⚠️ Nem `whatsapp_access_log` nem `whatsapp_thread_meta_log` têm CASCADE por thread — só por número; a eliminação por contato/thread precisa scrubá-los explicitamente.
 - `whatsapp_groups.subject` (quando aplicável).
 - **`episodes`/`episode_chunks`** (embeddings derivados do texto) — DELETE/recompute; sem isso, PII persiste em vetor.
 - `pending_triggers`/`event_outbox` residuais.
