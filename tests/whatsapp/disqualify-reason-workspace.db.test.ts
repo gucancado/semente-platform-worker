@@ -75,8 +75,12 @@ beforeEach(async () => {
   );
 
   // ── Seed a thread for the single-route write to target ───────────────────────
+  // NOTE: real `messages` columns are (whatsapp_number_id, workspace_id, channel,
+  // identifier, direction, text, created_at) — NOT remote_jid/message_id/timestamp.
   await pool.query(
-    `INSERT INTO messages (whatsapp_number_id, remote_jid, message_id, timestamp, direction) VALUES (10, 'anti-leak-jid', 'msg-al-1', NOW(), 'inbound')`,
+    `INSERT INTO messages (whatsapp_number_id, workspace_id, channel, identifier, direction, text, created_at)
+     VALUES (10, $1, 'whatsapp', 'anti-leak-jid', 'inbound', 'oi', NOW())`,
+    [WS_A],
   );
 });
 
