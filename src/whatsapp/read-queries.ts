@@ -131,8 +131,8 @@ export async function listThreads(pool: Pool, p: {
        LEFT JOIN whatsapp_thread_meta tm
          ON tm.whatsapp_number_id = $1 AND tm.identifier = a.identifier
       WHERE ($3::timestamptz IS NULL
-          OR ${orderCol} < $3
-          OR (${orderCol} = $3 AND a.identifier > $4))
+          OR date_trunc('milliseconds', ${orderCol}) < $3
+          OR (date_trunc('milliseconds', ${orderCol}) = $3 AND a.identifier > $4))
         AND ($6 = 'all'
           OR ($6 = 'group' AND (a.has_author OR g.jid IS NOT NULL))
           OR ($6 = 'dm' AND NOT (a.has_author OR g.jid IS NOT NULL)))
@@ -145,7 +145,7 @@ export async function listThreads(pool: Pool, p: {
                WHERE t.whatsapp_number_id = $1 AND t.identifier = a.identifier AND t.tag = $9
             ))
         ${periodFilterSql}
-      ORDER BY ${orderCol} DESC, a.identifier ASC
+      ORDER BY date_trunc('milliseconds', ${orderCol}) DESC, a.identifier ASC
       LIMIT $5`,
     params);
   const threads: Thread[] = rows.map(r => {
