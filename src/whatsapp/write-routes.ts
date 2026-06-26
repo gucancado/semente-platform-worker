@@ -46,7 +46,7 @@ export function registerWriteRoutes(
 
     // Validate disqualify_reason against DB reference table (if provided) — AFTER authz.
     if (disqualifyReason != null) {
-      const valid = await validateDisqualifyReason(deps.pool, disqualifyReason);
+      const valid = await validateDisqualifyReason(deps.pool, num.workspaceId, disqualifyReason);
       if (!valid) return reply.code(400).send({ error: `disqualifyReason '${disqualifyReason}' não encontrado ou inativo` });
     }
 
@@ -135,8 +135,8 @@ export function registerWriteRoutes(
     )];
     if (reasons.length > 0) {
       const { rows } = await deps.pool.query<{ code: string }>(
-        `SELECT code FROM whatsapp_disqualify_reasons WHERE code = ANY($1::text[]) AND active = TRUE`,
-        [reasons],
+        `SELECT code FROM whatsapp_disqualify_reasons WHERE code = ANY($1::text[]) AND active = TRUE AND workspace_id = $2`,
+        [reasons, num.workspaceId],
       );
       const validReasons = new Set(rows.map((r) => r.code));
       const invalidReasons = reasons.filter((r) => !validReasons.has(r));
