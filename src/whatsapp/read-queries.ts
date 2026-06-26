@@ -17,8 +17,8 @@ export type Thread = {
   /** Present only when `includeFirstInboundText` was requested. Null if no inbound message exists. */
   firstInboundText?: string | null;
 };
-function encode(c: { lastAt: string; identifier: string }) { return Buffer.from(JSON.stringify(c)).toString('base64'); }
-function decode(s: string): { lastAt: string; identifier: string } { return JSON.parse(Buffer.from(s, 'base64').toString()); }
+function encode(c: { key: string; identifier: string }) { return Buffer.from(JSON.stringify(c)).toString('base64'); }
+function decode(s: string): { key: string; identifier: string } { return JSON.parse(Buffer.from(s, 'base64').toString()); }
 
 export async function listThreads(pool: Pool, p: {
   workspaceId: string;
@@ -32,18 +32,37 @@ export async function listThreads(pool: Pool, p: {
   tag?: string;
   /** When true, adds `firstInboundText` to each thread (correlated subquery, opt-in). */
   includeFirstInboundText?: boolean;
+  since?: string;
+  until?: string;
+  periodBasis?: 'arrival' | 'activity';
 }) {
   const cur = p.cursor ? decode(p.cursor) : null;
   const kind = p.kind ?? 'all';
   const leadStatus = p.leadStatus ?? 'all';
   const includeFirstInbound = p.includeFirstInboundText === true;
 
-  // $1=numberId $2=workspaceId $3=cur.lastAt $4=cur.identifier $5=limit $6=kind
+  // Resolve period mode. arrivalMode is only active when there is an actual window;
+  // without bounds the behavior must be identical to today (backward compat).
+  const periodBasis = p.periodBasis ?? 'arrival';
+  const hasWindow = (p.since != null) || (p.until != null);
+  const arrivalMode = periodBasis === 'arrival' && hasWindow;
+
+  // The cursor carries the ordering key (either min_created or last_at) + identifier.
+  // $3 is the ordering-key bound from the cursor; $4 is identifier.
+  const orderCol = arrivalMode ? 'a.min_created' : 'a.last_at';
+
+  // Period filter SQL fragment (resolved in JS, not a SQL param).
+  // With both bounds null, both branches reduce to a no-op (TRUE).
+  const periodFilterSql = periodBasis === 'activity'
+    ? 'AND a.in_window'
+    : 'AND ($11::timestamptz IS NULL OR a.min_created >= $11) AND ($12::timestamptz IS NULL OR a.min_created <= $12)';
+
+  // $1=numberId $2=workspaceId $3=cursor.key $4=cursor.identifier $5=limit $6=kind
   // $7=leadStage $8=leadSource $9=tag
   const params: unknown[] = [
     p.numberId,
     p.workspaceId,
-    cur?.lastAt ?? null,
+    cur?.key ?? null,
     cur?.identifier ?? null,
     p.limit,
     kind,
@@ -60,18 +79,24 @@ export async function listThreads(pool: Pool, p: {
   params.push(includeFirstInbound);
   // $10 is now bound → used as CASE WHEN $10 THEN (...) ELSE NULL END
 
+  // $11=since $12=until — appended AFTER $10 at fixed positions.
+  params.push(p.since ?? null);
+  params.push(p.until ?? null);
+
   const { rows } = await pool.query(
     `WITH agg AS (
        SELECT m.identifier,
               MAX(m.created_at) AS last_at,
+              MIN(m.created_at) AS min_created,
               COUNT(*)::int AS count,
               (ARRAY_AGG(m.text ORDER BY m.created_at DESC))[1] AS last_text,
-              bool_or(m.author IS NOT NULL) AS has_author
+              bool_or(m.author IS NOT NULL) AS has_author,
+              bool_or(($11::timestamptz IS NULL OR m.created_at >= $11) AND ($12::timestamptz IS NULL OR m.created_at <= $12)) AS in_window
          FROM messages m
         WHERE m.whatsapp_number_id = $1 AND m.workspace_id = $2
         GROUP BY m.identifier
      )
-     SELECT a.identifier, a.last_at, a.count, a.last_text,
+     SELECT a.identifier, a.last_at, a.min_created, a.count, a.last_text,
             (a.has_author OR g.jid IS NOT NULL) AS is_group,
             (tm.is_lead = FALSE) AS not_lead,
             tm.lead_stage, tm.lead_temperature, tm.lead_source, tm.disqualify_reason,
@@ -103,8 +128,8 @@ export async function listThreads(pool: Pool, p: {
        LEFT JOIN whatsapp_thread_meta tm
          ON tm.whatsapp_number_id = $1 AND tm.identifier = a.identifier
       WHERE ($3::timestamptz IS NULL
-          OR a.last_at < $3
-          OR (a.last_at = $3 AND a.identifier > $4))
+          OR ${orderCol} < $3
+          OR (${orderCol} = $3 AND a.identifier > $4))
         AND ($6 = 'all'
           OR ($6 = 'group' AND (a.has_author OR g.jid IS NOT NULL))
           OR ($6 = 'dm' AND NOT (a.has_author OR g.jid IS NOT NULL)))
@@ -115,7 +140,8 @@ export async function listThreads(pool: Pool, p: {
               SELECT 1 FROM whatsapp_thread_tags t
                WHERE t.whatsapp_number_id = $1 AND t.identifier = a.identifier AND t.tag = $9
             ))
-      ORDER BY a.last_at DESC, a.identifier ASC
+        ${periodFilterSql}
+      ORDER BY ${orderCol} DESC, a.identifier ASC
       LIMIT $5`,
     params);
   const threads: Thread[] = rows.map(r => {
@@ -134,8 +160,10 @@ export async function listThreads(pool: Pool, p: {
     }
     return t;
   });
-  const last = threads.at(-1);
-  const nextCursor = threads.length === p.limit && last ? encode({ lastAt: last.lastAt, identifier: last.identifier }) : null;
+  const lastRow = rows[rows.length - 1];
+  const nextCursor = rows.length === p.limit && lastRow
+    ? encode({ key: (arrivalMode ? lastRow.min_created : lastRow.last_at).toISOString(), identifier: lastRow.identifier })
+    : null;
   return { threads, nextCursor };
 }
 
