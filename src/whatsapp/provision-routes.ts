@@ -3,6 +3,7 @@ import type { Pool } from 'pg';
 import { randomBytes } from 'node:crypto';
 import { createNumber, getNumber, updateNumberStatus } from './numbers.js';
 import { createEvolutionInstance, getQrCode, logoutInstance, deleteInstance, type EvolutionDeps } from '../evolution/client.js';
+import { seedDefaultReasons } from './disqualify-reasons.js';
 import { syncGroupSubjects } from './group-sync.js';
 import { backfillNumber } from './backfill.js';
 import { setGroupExposure } from './thread-meta.js';
@@ -29,6 +30,7 @@ export function registerProvisionRoutes(app: FastifyInstance, deps: { pool: Pool
     const instance = generateInstanceName(workspace_id);
     // INSERT primeiro (P0.3): garante que connection.update encontre a linha.
     const n = await createNumber(deps.pool, { workspaceId: workspace_id, evolutionInstance: instance, label: label ?? null, createdBy: req.actingUser });
+    await seedDefaultReasons(deps.pool, workspace_id);
     await updateNumberStatus(deps.pool, instance, { status: 'connecting' });
     try { await createEvolutionInstance(deps.evolution, instance, deps.webhook); }
     catch (e) { await updateNumberStatus(deps.pool, instance, { status: 'disconnected' }); throw e; }
