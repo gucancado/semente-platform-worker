@@ -86,6 +86,15 @@ test('037: row (ws, fora_escopo) existe após backfill com thread_meta usando fo
     [WS]
   );
   assert.equal(Number(res.rows[0].count), 1, "row (ws, 'fora_escopo') deve existir");
+
+  // REGRESSÃO: workspace com número E thread_meta deve ter EXATAMENTE 11 reasons,
+  // não 22. O backfill antigo (dois INSERTs com ON CONFLICT sem árbitro) duplicava
+  // cada (workspace_id, code) e quebrava o ADD PRIMARY KEY do PASSO 8 (erro 23505).
+  const total = await pool.query<{ count: string }>(
+    `SELECT COUNT(*) AS count FROM whatsapp_disqualify_reasons WHERE workspace_id = $1`,
+    [WS]
+  );
+  assert.equal(Number(total.rows[0].count), 11, 'workspace com número + thread_meta não pode ter reasons duplicadas');
 });
 
 test('037: idempotente — re-execução não lança', async () => {

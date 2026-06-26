@@ -49,17 +49,22 @@ ALTER TABLE whatsapp_disqualify_reasons
   ADD COLUMN IF NOT EXISTS created_by   UUID,
   ADD COLUMN IF NOT EXISTS created_at   TIMESTAMPTZ NOT NULL DEFAULT now();
 
--- PASSO 5: backfill por workspace — DUAS fontes (números E thread_meta), cobre
--- workspaces sem número ativo mas com reasons em uso.
+-- PASSO 5: backfill por workspace — DUAS fontes UNIDAS (números E thread_meta),
+-- cobre workspaces sem número ativo mas com reasons em uso.
+-- CRÍTICO: UNION deduplica o conjunto de workspaces ANTES do CROSS JOIN. Sem isso,
+-- dois INSERTs separados geram (workspace_id, code) duplicado para qualquer workspace
+-- que tenha número E thread_meta, porque neste ponto NÃO existe constraint única
+-- (PK antiga dropada no PASSO 3, nova só no PASSO 8) → ON CONFLICT DO NOTHING fica
+-- SEM árbitro e não deduplica entre os INSERTs, quebrando o ADD PRIMARY KEY do PASSO 8.
 INSERT INTO whatsapp_disqualify_reasons (workspace_id, code, label, active)
-SELECT n.workspace_id, d.code, d.label, TRUE
-  FROM (SELECT DISTINCT workspace_id FROM whatsapp_numbers) n
-  CROSS JOIN whatsapp_disqualify_reason_defaults d
-ON CONFLICT DO NOTHING;
-INSERT INTO whatsapp_disqualify_reasons (workspace_id, code, label, active)
-SELECT DISTINCT wn.workspace_id, d.code, d.label, TRUE
-  FROM whatsapp_thread_meta tm
-  JOIN whatsapp_numbers wn ON wn.id = tm.whatsapp_number_id
+SELECT ws.workspace_id, d.code, d.label, TRUE
+  FROM (
+    SELECT workspace_id FROM whatsapp_numbers
+    UNION
+    SELECT wn.workspace_id
+      FROM whatsapp_thread_meta tm
+      JOIN whatsapp_numbers wn ON wn.id = tm.whatsapp_number_id
+  ) ws
   CROSS JOIN whatsapp_disqualify_reason_defaults d
 ON CONFLICT DO NOTHING;
 
@@ -78,6 +83,15 @@ END; $$;
 
 -- PASSO 7: remove linhas globais
 DELETE FROM whatsapp_disqualify_reasons WHERE workspace_id IS NULL;
+
+-- PASSO 7.5: dedup defensivo — garante no máximo 1 linha por (workspace_id, code)
+-- antes da PK composta. Idempotente e barato; defense-in-depth além do UNION do
+-- PASSO 5 (protege contra qualquer estado duplicado pré-existente).
+DELETE FROM whatsapp_disqualify_reasons a
+ USING whatsapp_disqualify_reasons b
+ WHERE a.ctid < b.ctid
+   AND a.workspace_id = b.workspace_id
+   AND a.code = b.code;
 
 -- PASSO 8: NOT NULL + PK composta
 ALTER TABLE whatsapp_disqualify_reasons ALTER COLUMN workspace_id SET NOT NULL;
