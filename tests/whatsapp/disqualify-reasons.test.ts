@@ -129,6 +129,32 @@ test('upsertDisqualifyReason: relabel de código já ativo → reactivated=false
 
 // ── deactivateDisqualifyReason ───────────────────────────────────────────
 
+test('deactivateDisqualifyReason: marca active=FALSE no DB', async () => {
+  // Insere linha ativa
+  await pool.query(
+    `INSERT INTO whatsapp_disqualify_reasons (workspace_id, code, label, active)
+     VALUES ($1,'para_desativar','Para desativar',TRUE)`,
+    [WS]
+  );
+  await deactivateDisqualifyReason(pool, { workspaceId: WS, code: 'para_desativar' });
+  // Verifica diretamente no DB que active ficou FALSE
+  const { rows } = await pool.query(
+    `SELECT active FROM whatsapp_disqualify_reasons WHERE workspace_id=$1 AND code=$2`,
+    [WS, 'para_desativar']
+  );
+  assert.equal(rows[0].active, false, 'active deve ser false após deactivate');
+
+  // Idempotência: segunda chamada não lança e active continua FALSE
+  await assert.doesNotReject(
+    deactivateDisqualifyReason(pool, { workspaceId: WS, code: 'para_desativar' })
+  );
+  const { rows: rows2 } = await pool.query(
+    `SELECT active FROM whatsapp_disqualify_reasons WHERE workspace_id=$1 AND code=$2`,
+    [WS, 'para_desativar']
+  );
+  assert.equal(rows2[0].active, false, 'active ainda deve ser false na segunda chamada');
+});
+
 test('deactivateDisqualifyReason: idempotente (já inativo ou ausente não falha)', async () => {
   // Ausente — não deve lançar
   await assert.doesNotReject(

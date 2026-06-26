@@ -48,11 +48,12 @@ export async function upsertDisqualifyReason(
      RETURNING (SELECT prev_active FROM prev) AS prev_active`,
     [workspaceId, code, label, createdBy ?? null]
   );
-  const prevActive = rows[0]?.prev_active;
+  const row = rows[0];
+  if (!row) throw new Error('upsertDisqualifyReason: no row returned');
   // new row → prev_active NULL → reactivated false
   // already active → prev_active true → reactivated false
   // was inactive → prev_active false → reactivated true
-  return { reactivated: prevActive === false };
+  return { reactivated: row.prev_active === false };
 }
 
 export async function deactivateDisqualifyReason(
