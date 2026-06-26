@@ -79,17 +79,20 @@ export async function getStats(
     since?: string;
     until?: string;
     periodBasis?: 'arrival' | 'activity';
+    kind?: 'dm' | 'group' | 'all';
   },
 ): Promise<Stats> {
   const periodBasis = p.periodBasis ?? 'arrival';
+  const kind = p.kind ?? 'all';
 
-  // $1=workspaceId, $2=numberId|null, $3=since|null, $4=until|null, $5=periodBasis
+  // $1=workspaceId, $2=numberId|null, $3=since|null, $4=until|null, $5=periodBasis, $6=kind
   const params: unknown[] = [
     p.workspaceId,
     p.numberId ?? null,
     p.since ?? null,
     p.until ?? null,
     periodBasis,
+    kind,
   ];
 
   // The number-filter clause reused across all per-thread queries.
@@ -124,6 +127,31 @@ export async function getStats(
            END
   )`;
 
+  // threads_scoped = threads_in_period filtrado por `kind` ($6). Deriva is_group por
+  // thread (has_author via bool_or + EXISTS em whatsapp_groups) e aplica o predicado kind.
+  // Usado pelos buckets thread-level (stage/temperature/source/tag). NÃO usado pela
+  // mainQuery (que precisa do escopo TOTAL para byKind) nem pela ingestQuery (imune).
+  const scopedCte = `${periodCte},
+  threads_scoped AS (
+    SELECT a.identifier
+      FROM (
+        SELECT m.identifier, bool_or(m.author IS NOT NULL) AS has_author
+          FROM messages m
+         WHERE m.workspace_id = $1 ${numFilter}
+           AND m.identifier IN (SELECT identifier FROM threads_in_period)
+         GROUP BY m.identifier
+      ) a
+      LEFT JOIN LATERAL (
+        SELECT g2.jid FROM whatsapp_groups g2
+         WHERE g2.jid = a.identifier
+           AND ($2::int IS NULL OR g2.whatsapp_number_id = $2)
+         LIMIT 1
+      ) g ON TRUE
+     WHERE ($6 = 'all'
+         OR ($6 = 'dm' AND NOT (a.has_author OR g.jid IS NOT NULL))
+         OR ($6 = 'group' AND (a.has_author OR g.jid IS NOT NULL)))
+  )`;
+
   // The 6 aggregate queries below are independent (no data dependency) and share
   // the same immutable params, so we fire them in parallel.
 
@@ -140,15 +168,18 @@ export async function getStats(
   const mainQuery = pool.query(
     `WITH ${periodCte}
      SELECT
-       COUNT(*)::int AS total,
+       COUNT(*) FILTER (WHERE kind_match)::int AS total,
        COALESCE(SUM(CASE WHEN is_group THEN 1 ELSE 0 END), 0)::int AS group_count,
        COALESCE(SUM(CASE WHEN NOT is_group THEN 1 ELSE 0 END), 0)::int AS dm_count,
-       COALESCE(SUM(CASE WHEN (tm_is_lead IS NULL OR tm_is_lead = TRUE) THEN 1 ELSE 0 END), 0)::int AS lead_count,
-       COALESCE(SUM(CASE WHEN tm_is_lead = FALSE THEN 1 ELSE 0 END), 0)::int AS not_lead_count
+       COUNT(*) FILTER (WHERE kind_match AND (tm_is_lead IS NULL OR tm_is_lead = TRUE))::int AS lead_count,
+       COUNT(*) FILTER (WHERE kind_match AND tm_is_lead = FALSE)::int AS not_lead_count
      FROM (
        SELECT
          a.identifier,
          (a.has_author OR g.jid IS NOT NULL) AS is_group,
+         ($6 = 'all'
+           OR ($6 = 'dm' AND NOT (a.has_author OR g.jid IS NOT NULL))
+           OR ($6 = 'group' AND (a.has_author OR g.jid IS NOT NULL))) AS kind_match,
          tm.is_lead                           AS tm_is_lead
          FROM (
            SELECT m.identifier,
@@ -179,13 +210,13 @@ export async function getStats(
   // ── (2) byStage — per thread ──────────────────────────────────────────────
   // Threads without a thread_meta row → stage = NULL (bucketed as "null").
   const stageQuery = pool.query(
-    `WITH ${periodCte}
+    `WITH ${scopedCte}
      SELECT COALESCE(tm.lead_stage, 'null') AS stage, COUNT(*)::int AS cnt
        FROM (
          SELECT DISTINCT m.identifier
            FROM messages m
           WHERE m.workspace_id = $1 ${numFilter}
-            AND m.identifier IN (SELECT identifier FROM threads_in_period)
+            AND m.identifier IN (SELECT identifier FROM threads_scoped)
        ) t
        LEFT JOIN LATERAL (
          SELECT tm2.lead_stage
@@ -201,13 +232,13 @@ export async function getStats(
   // ── (3) byTemperature — per thread ───────────────────────────────────────
   // Mirrors byStage, using lead_temperature instead. Key "null" = no temperature set.
   const temperatureQuery = pool.query(
-    `WITH ${periodCte}
+    `WITH ${scopedCte}
      SELECT COALESCE(tm.lead_temperature, 'null') AS temperature, COUNT(*)::int AS cnt
        FROM (
          SELECT DISTINCT m.identifier
            FROM messages m
           WHERE m.workspace_id = $1 ${numFilter}
-            AND m.identifier IN (SELECT identifier FROM threads_in_period)
+            AND m.identifier IN (SELECT identifier FROM threads_scoped)
        ) t
        LEFT JOIN LATERAL (
          SELECT tm2.lead_temperature
@@ -223,13 +254,13 @@ export async function getStats(
   // ── (4) bySource — per thread ────────────────────────────────────────────
   // Mirrors byStage, using lead_source instead. Key "null" = no source set.
   const sourceQuery = pool.query(
-    `WITH ${periodCte}
+    `WITH ${scopedCte}
      SELECT COALESCE(tm.lead_source, 'null') AS source, COUNT(*)::int AS cnt
        FROM (
          SELECT DISTINCT m.identifier
            FROM messages m
           WHERE m.workspace_id = $1 ${numFilter}
-            AND m.identifier IN (SELECT identifier FROM threads_in_period)
+            AND m.identifier IN (SELECT identifier FROM threads_scoped)
        ) t
        LEFT JOIN LATERAL (
          SELECT tm2.lead_source
@@ -251,9 +282,8 @@ export async function getStats(
   // stays message-level granularity and may diverge from per-thread counts (spec §6.2).
   // NOTE: this query references only $1..$4 (it does NOT use $5/periodBasis — it's
   // message-level, not thread-level). Postgres rejects a bind that supplies MORE
-  // params than the statement declares ("bind message supplies 5 parameters, but
-  // prepared statement requires 4"), so pass ONLY the 4 params it uses, not the
-  // full 5-element `params` array shared by the per-thread queries.
+  // params than the statement declares, so pass ONLY the 4 params it uses, not the
+  // full `params` array shared by the per-thread queries.
   const ingestQuery = pool.query(
     `SELECT COALESCE(m.ingest_source, 'live') AS src, COUNT(*)::int AS cnt
        FROM messages m
@@ -278,14 +308,14 @@ export async function getStats(
   // Period-filtered for coherence: tags are restricted to threads in threads_in_period
   // so that byTag does not diverge from `total` under a window.
   const tagQuery = pool.query(
-    `WITH ${periodCte}
+    `WITH ${scopedCte}
      SELECT tt.tag, COUNT(DISTINCT tt.identifier)::int AS cnt
        FROM whatsapp_thread_tags tt
       WHERE tt.whatsapp_number_id IN (
               SELECT id FROM whatsapp_numbers WHERE workspace_id = $1
             )
         AND ($2::int IS NULL OR tt.whatsapp_number_id = $2)
-        AND tt.identifier IN (SELECT identifier FROM threads_in_period)
+        AND tt.identifier IN (SELECT identifier FROM threads_scoped)
       GROUP BY tt.tag`,
     params,
   );
