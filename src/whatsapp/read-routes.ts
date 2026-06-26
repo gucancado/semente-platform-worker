@@ -4,6 +4,7 @@ import { listNumbers, getNumber } from './numbers.js';
 import { listThreads, listThreadMessages, searchThreads } from './read-queries.js';
 import { exportConversation } from './export.js';
 import { getStats } from './stats.js';
+import { listDisqualifyReasons } from './disqualify-reasons.js';
 import { requirePanelToken } from './provision-routes.js';
 import { defaultRouteAuthz, gateMember, type RouteAuthz } from './route-authz.js';
 import { logAccess as defaultLogAccess, type LogAccessFn } from './access-log.js';
@@ -111,6 +112,19 @@ export function registerReadRoutes(
     });
     logAccess(deps.pool, { actor: req.actingUser, action: 'search', workspaceId: workspace_id, numberId: Number(number_id), meta: { query, count: result.results.length } });
     return reply.send({ schema: 'whatsapp_v1', ...result });
+  });
+
+  // ── GET /whatsapp/disqualify-reasons ─────────────────────────────────────────
+  // workspace_id required; workspace-scoped → gateMember before DB.
+  app.get('/whatsapp/disqualify-reasons', { preHandler: auth }, async (req: any, reply) => {
+    const { workspace_id, include_inactive } = req.query as Record<string, string | undefined>;
+    if (!workspace_id) return reply.code(400).send({ error: 'workspace_id required' });
+    if (!await gateMember(req, reply, workspace_id, authz)) return;
+    const inc = typeof include_inactive === 'string' ? include_inactive.toLowerCase() : '';
+    const includeInactive = inc === 'true' || inc === '1' || inc === 'yes';
+    const reasons = await listDisqualifyReasons(deps.pool, { workspaceId: workspace_id, includeInactive });
+    logAccess(deps.pool, { actor: req.actingUser, action: 'list_disqualify_reasons', workspaceId: workspace_id });
+    return reply.send({ schema: 'whatsapp_v1', reasons });
   });
 
   // ── GET /whatsapp/threads/:identifier/export ─────────────────────────────────

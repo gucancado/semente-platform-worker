@@ -8,6 +8,14 @@ import { defaultRouteAuthz, gateAdmin, type RouteAuthz } from './route-authz.js'
 import { logAccess as defaultLogAccess, type LogAccessFn } from './access-log.js';
 import { validateLeadQualifyFields, validateDisqualifyReason } from './lead-qualify.js';
 import { bulkSetLeadStatus, BulkLeadIdentifierError, BULK_LEAD_MAX } from './bulk-lead.js';
+import { upsertDisqualifyReason, deactivateDisqualifyReason } from './disqualify-reasons.js';
+
+/** Normalise and validate a disqualify-reason code. Returns null when valid; an error string otherwise. */
+function normaliseCode(raw: unknown): { code: string } | { error: string } {
+  const code = String(raw ?? '').trim().toLowerCase();
+  if (!/^[a-z0-9_]+$/.test(code)) return { error: 'invalid code: must match /^[a-z0-9_]+$/' };
+  return { code };
+}
 
 export function registerWriteRoutes(
   app: FastifyInstance,
@@ -193,5 +201,41 @@ export function registerWriteRoutes(
     });
 
     return reply.send({ schema: 'whatsapp_v1', ok: true, updated: result.updated, identifiers: result.identifiers });
+  });
+
+  // ── POST /whatsapp/disqualify-reasons ────────────────────────────────────────
+  // Creates or reactivates a disqualify reason for the workspace. Admin gate.
+  app.post('/whatsapp/disqualify-reasons', { preHandler: auth }, async (req: any, reply) => {
+    const { workspace_id, code: rawCode, label } = req.body ?? {};
+    if (!workspace_id) return reply.code(400).send({ error: 'workspace_id required' });
+    if (!label || typeof label !== 'string' || label.trim() === '') {
+      return reply.code(400).send({ error: 'label required' });
+    }
+    const codeResult = normaliseCode(rawCode);
+    if ('error' in codeResult) return reply.code(400).send({ error: codeResult.error });
+    const { code } = codeResult;
+    if (!await gateAdmin(req, reply, workspace_id, authz)) return;
+    const { reactivated } = await upsertDisqualifyReason(deps.pool, {
+      workspaceId: workspace_id,
+      code,
+      label: label.trim(),
+      createdBy: req.actingUser,
+    });
+    logAccess(deps.pool, { actor: req.actingUser, action: 'upsert_disqualify_reason', workspaceId: workspace_id, meta: { code, reactivated } });
+    return reply.send({ schema: 'whatsapp_v1', ok: true, reactivated });
+  });
+
+  // ── POST /whatsapp/disqualify-reasons/:code/deactivate ───────────────────────
+  // Soft-deactivates a disqualify reason. Idempotent. Admin gate.
+  app.post('/whatsapp/disqualify-reasons/:code/deactivate', { preHandler: auth }, async (req: any, reply) => {
+    const codeResult = normaliseCode(req.params.code);
+    if ('error' in codeResult) return reply.code(400).send({ error: codeResult.error });
+    const { code } = codeResult;
+    const { workspace_id } = req.body ?? {};
+    if (!workspace_id) return reply.code(400).send({ error: 'workspace_id required' });
+    if (!await gateAdmin(req, reply, workspace_id, authz)) return;
+    await deactivateDisqualifyReason(deps.pool, { workspaceId: workspace_id, code });
+    logAccess(deps.pool, { actor: req.actingUser, action: 'deactivate_disqualify_reason', workspaceId: workspace_id, meta: { code } });
+    return reply.send({ schema: 'whatsapp_v1', ok: true });
   });
 }
