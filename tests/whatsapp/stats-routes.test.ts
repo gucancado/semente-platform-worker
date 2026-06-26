@@ -282,6 +282,63 @@ test('threads-fib-4: include_first_inbound absent → $10 bound false', async ()
   await app.close();
 });
 
+// stats-kind-1: kind=dm → mainQuery $6 bound to 'dm'
+test('stats-kind-1: GET /whatsapp/stats?kind=dm → mainQuery $6 = "dm"', async () => {
+  const { pool, calls } = makeStubPool();
+  const app = Fastify({ logger: false });
+  registerReadRoutes(app, { pool, panelToken: PANEL_TOKEN, authz: makeMemberAllowed(), logAccess: () => {} });
+
+  const res = await app.inject({
+    method: 'GET',
+    url: '/whatsapp/stats?workspace_id=ws-1&number_id=1&kind=dm',
+    headers: ACTOR_HEADERS,
+  });
+
+  assert.equal(res.statusCode, 200);
+  const mainCall = calls.find(c => /kind_match/.test(c.text));
+  assert.ok(mainCall, 'mainQuery (kind_match) must have run');
+  assert.equal(mainCall!.params[5], 'dm', 'kind=dm deve ser repassado como $6');
+  await app.close();
+});
+
+// stats-kind-2: kind ausente → mainQuery $6 bound to 'all'
+test('stats-kind-2: GET /whatsapp/stats sem kind → mainQuery $6 = "all"', async () => {
+  const { pool, calls } = makeStubPool();
+  const app = Fastify({ logger: false });
+  registerReadRoutes(app, { pool, panelToken: PANEL_TOKEN, authz: makeMemberAllowed(), logAccess: () => {} });
+
+  const res = await app.inject({
+    method: 'GET',
+    url: '/whatsapp/stats?workspace_id=ws-1&number_id=1',
+    headers: ACTOR_HEADERS,
+  });
+
+  assert.equal(res.statusCode, 200);
+  const mainCall = calls.find(c => /kind_match/.test(c.text));
+  assert.ok(mainCall, 'mainQuery (kind_match) must have run');
+  assert.equal(mainCall!.params[5], 'all', 'kind ausente → $6 = "all"');
+  await app.close();
+});
+
+// stats-kind-3: kind=xpto (inválido) → mainQuery $6 bound to 'all'
+test('stats-kind-3: GET /whatsapp/stats?kind=xpto (inválido) → mainQuery $6 = "all"', async () => {
+  const { pool, calls } = makeStubPool();
+  const app = Fastify({ logger: false });
+  registerReadRoutes(app, { pool, panelToken: PANEL_TOKEN, authz: makeMemberAllowed(), logAccess: () => {} });
+
+  const res = await app.inject({
+    method: 'GET',
+    url: '/whatsapp/stats?workspace_id=ws-1&number_id=1&kind=xpto',
+    headers: ACTOR_HEADERS,
+  });
+
+  assert.equal(res.statusCode, 200);
+  const mainCall = calls.find(c => /kind_match/.test(c.text));
+  assert.ok(mainCall, 'mainQuery (kind_match) must have run');
+  assert.equal(mainCall!.params[5], 'all', 'kind inválido → coerced to "all"');
+  await app.close();
+});
+
 // stats-7: stats logAccess MUST omit `meta` (MINOR #8) so access-log stores NULL,
 // not the literal string '{}'.
 test('stats-7: GET /whatsapp/stats — logAccess called without meta', async () => {

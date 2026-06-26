@@ -63,7 +63,7 @@ export function registerReadRoutes(
   // ── GET /whatsapp/stats ──────────────────────────────────────────────────────
   // workspace_id required; number_id optional. Member gate (read-only aggregate).
   app.get('/whatsapp/stats', { preHandler: auth }, async (req: any, reply) => {
-    const { workspace_id, number_id, since, until, period_basis } = req.query as Record<string, string | undefined>;
+    const { workspace_id, number_id, since, until, period_basis, kind } = req.query as Record<string, string | undefined>;
     if (!workspace_id) return reply.code(400).send({ error: 'workspace_id required' });
     if (number_id !== undefined && Number.isNaN(Number(number_id))) {
       return reply.code(400).send({ error: 'number_id must be numeric' });
@@ -74,12 +74,14 @@ export function registerReadRoutes(
     }
     const periodBasis = pb as 'arrival' | 'activity' | undefined;
     if (!await gateMember(req, reply, workspace_id, authz)) return;
+    const k = kind === 'dm' || kind === 'group' ? kind : 'all';
     const stats = await getStats(deps.pool, {
       workspaceId: workspace_id,
       numberId: number_id !== undefined ? Number(number_id) : undefined,
       since: emptyToUndefined(since),
       until: emptyToUndefined(until),
       periodBasis,
+      kind: k,
     });
     // Omit `meta` entirely: access-log serialises a truthy `{}` to the literal
     // string '{}' instead of NULL. The stats route has no meta payload, so leave
