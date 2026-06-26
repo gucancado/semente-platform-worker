@@ -305,8 +305,8 @@ export async function getStats(
   // set of numbers owned by $1 (and to $2 when a single number is requested) makes a
   // cross-workspace leak impossible.
   //
-  // Period-filtered for coherence: tags are restricted to threads in threads_in_period
-  // so that byTag does not diverge from `total` under a window.
+  // Period- and kind-filtered for coherence: tags are restricted to threads in
+  // threads_scoped so that byTag does not diverge from `total` under a window/kind.
   const tagQuery = pool.query(
     `WITH ${scopedCte}
      SELECT tt.tag, COUNT(DISTINCT tt.identifier)::int AS cnt
