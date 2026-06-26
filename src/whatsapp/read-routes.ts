@@ -32,7 +32,7 @@ export function registerReadRoutes(
   // ── GET /whatsapp/threads ────────────────────────────────────────────────────
   // workspace_id + number_id in query; listThreads IS workspace-scoped → authz before DB.
   app.get('/whatsapp/threads', { preHandler: auth }, async (req: any, reply) => {
-    const { workspace_id, number_id, limit, cursor, kind, lead_status, lead_stage, lead_source, tag, include_first_inbound, since, until, period_basis } = req.query;
+    const { workspace_id, number_id, limit, cursor, kind, lead_status, lead_stage, lead_source, tag, temperature, include_first_inbound, since, until, period_basis } = req.query;
     if (!workspace_id || !number_id) return reply.code(400).send({ error: 'workspace_id and number_id required' });
     if (Number.isNaN(Number(number_id))) return reply.code(400).send({ error: 'number_id must be numeric' });
     const pb = emptyToUndefined(period_basis);
@@ -50,6 +50,7 @@ export function registerReadRoutes(
       kind: k, leadStatus: ls,
       leadStage: emptyToUndefined(lead_stage),
       leadSource: emptyToUndefined(lead_source),
+      leadTemperature: emptyToUndefined(temperature),
       tag: emptyToUndefined(tag),
       includeFirstInboundText: includeFirstInbound,
       since: emptyToUndefined(since),
