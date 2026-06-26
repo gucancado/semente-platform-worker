@@ -110,66 +110,39 @@ test('037: orphan guard aborta migração quando thread_meta tem reason não cob
   try {
     await client.query('BEGIN');
 
+    // Drop da FK dentro da tx (idempotente via IF EXISTS; desfeito pelo ROLLBACK se existia).
+    // Isso permite inserir um code fantasma em whatsapp_thread_meta independentemente de
+    // o DB ser virgem (FK presente) ou já ter rodado a 037 (FK dropada).
+    // O guard comportamental é assim exercido em QUALQUER ambiente.
+    await client.query(
+      'ALTER TABLE whatsapp_thread_meta DROP CONSTRAINT IF EXISTS whatsapp_thread_meta_disqualify_reason_fkey'
+    );
+
     // Seed: número no workspace
     await client.query(
       `INSERT INTO whatsapp_numbers (id, workspace_id, evolution_instance) VALUES (2, $1, 'j')`,
       [WS]
     );
 
-    // A FK whatsapp_thread_meta_disqualify_reason_fkey pode ou não existir:
-    // - DB virgem (antes de 037): FK existe → precisamos do code na tabela global para inserir
-    // - DB com 037 já aplicada (servidor): FK foi dropada → podemos inserir direto
-    // Verificamos para escolher o caminho correto.
-    const fkRes = await client.query<{ exists: boolean }>(`
-      SELECT EXISTS (
-        SELECT 1 FROM information_schema.table_constraints
-         WHERE constraint_type = 'FOREIGN KEY'
-           AND table_name = 'whatsapp_thread_meta'
-           AND constraint_name = 'whatsapp_thread_meta_disqualify_reason_fkey'
-      ) AS exists
-    `);
+    // Garante que 'inexistente_x' não está nos defaults nem na tabela global,
+    // portanto o PASSO 1 da migration NÃO consegue sincronizá-lo → guard dispara.
+    await client.query(`DELETE FROM whatsapp_disqualify_reason_defaults WHERE code = 'inexistente_x'`);
+    await client.query(`DELETE FROM whatsapp_disqualify_reasons WHERE code = 'inexistente_x'`);
 
-    if (fkRes.rows[0].exists) {
-      // FK ainda existe: inserir 'inexistente_x' na tabela global para satisfazê-la,
-      // mas NÃO nos defaults — assim PASSO 1 vai copiá-la para defaults, cobrindo o thread.
-      // Neste cenário o guard NÃO dispara (a migration foi projetada para ser segura).
-      // Verificamos apenas que a migration roda sem erro neste sub-cenário.
-      await client.query(
-        `INSERT INTO whatsapp_disqualify_reasons (code, label) VALUES ('inexistente_x', 'Teste FK') ON CONFLICT DO NOTHING`
-      );
-      await client.query(
-        `INSERT INTO whatsapp_thread_meta (whatsapp_number_id, identifier, disqualify_reason) VALUES (2, 'orphan_thread', 'inexistente_x')`
-      );
-      // PASSO 1 sincronizará 'inexistente_x' → guard não dispara
-      // Verificamos somente que RAISE EXCEPTION existe no SQL (guard estrutural)
-      assert.ok(sql037.includes('RAISE EXCEPTION'), 'Migration deve conter RAISE EXCEPTION para orphan guard');
-    } else {
-      // FK já foi dropada: podemos inserir um code fantasma direto em thread_meta
-      // sem precisar que ele exista em whatsapp_disqualify_reasons.
-      // Garante que o code NÃO está nos defaults nem em globals.
-      await client.query(
-        `DELETE FROM whatsapp_disqualify_reason_defaults WHERE code = 'inexistente_x'`
-      );
-      await client.query(
-        `DELETE FROM whatsapp_disqualify_reasons WHERE code = 'inexistente_x'`
-      );
-      await client.query(
-        `INSERT INTO whatsapp_thread_meta (whatsapp_number_id, identifier, disqualify_reason) VALUES (2, 'orphan_thread', 'inexistente_x')`
-      );
-      // Agora a migration deve disparar o guard com RAISE EXCEPTION
-      await assert.rejects(
-        () => client.query(sql037),
-        /ABORT.*orphan|ficariam com disqualify_reason/i,
-        'Guard deve abortar a migration quando há thread_meta com reason órfã'
-      );
-    }
+    // Insere thread_meta com reason órfã (o DROP acima libera a FK para isso).
+    await client.query(
+      `INSERT INTO whatsapp_thread_meta (whatsapp_number_id, identifier, disqualify_reason) VALUES (2, 'orphan_thread', 'inexistente_x')`
+    );
 
-    await client.query('ROLLBACK');
-  } catch (err) {
-    await client.query('ROLLBACK');
-    // Se o erro veio do assert.rejects (não foi rejeitado quando deveria), propaga
-    throw err;
+    // A migration deve disparar o guard com RAISE EXCEPTION (msg contém "ficariam com disqualify_reason").
+    await assert.rejects(
+      () => client.query(sql037),
+      /ficariam com disqualify_reason/i,
+      'Guard deve abortar a migration quando há thread_meta com reason órfã'
+    );
   } finally {
+    // Após statement com erro a tx está abortada; ROLLBACK desfaz tudo (inclusive o DROP FK se existia).
+    await client.query('ROLLBACK');
     client.release();
   }
 });
