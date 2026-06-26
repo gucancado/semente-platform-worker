@@ -29,6 +29,7 @@ export async function listThreads(pool: Pool, p: {
   leadStatus?: LeadStatus;
   leadStage?: string;
   leadSource?: string;
+  leadTemperature?: string;
   tag?: string;
   /** When true, adds `firstInboundText` to each thread (correlated subquery, opt-in). */
   includeFirstInboundText?: boolean;
@@ -82,6 +83,8 @@ export async function listThreads(pool: Pool, p: {
   // $11=since $12=until — appended AFTER $10 at fixed positions.
   params.push(p.since ?? null);
   params.push(p.until ?? null);
+  // $13 = leadTemperature (filtro opcional; null = sem filtro)
+  params.push(p.leadTemperature ?? null);
 
   const { rows } = await pool.query(
     `WITH agg AS (
@@ -136,6 +139,7 @@ export async function listThreads(pool: Pool, p: {
         AND ${leadFilterSql(leadStatus)}
         AND ($7::text IS NULL OR tm.lead_stage = $7)
         AND ($8::text IS NULL OR tm.lead_source = $8)
+        AND ($13::text IS NULL OR tm.lead_temperature = $13)
         AND ($9::text IS NULL OR EXISTS (
               SELECT 1 FROM whatsapp_thread_tags t
                WHERE t.whatsapp_number_id = $1 AND t.identifier = a.identifier AND t.tag = $9
