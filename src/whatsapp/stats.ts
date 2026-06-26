@@ -249,6 +249,11 @@ export async function getStats(
   // Under a period window this counts messages whose created_at ∈ [since, until]
   // directly — NOT via threads_in_period. This is intentional: byIngestSource
   // stays message-level granularity and may diverge from per-thread counts (spec §6.2).
+  // NOTE: this query references only $1..$4 (it does NOT use $5/periodBasis — it's
+  // message-level, not thread-level). Postgres rejects a bind that supplies MORE
+  // params than the statement declares ("bind message supplies 5 parameters, but
+  // prepared statement requires 4"), so pass ONLY the 4 params it uses, not the
+  // full 5-element `params` array shared by the per-thread queries.
   const ingestQuery = pool.query(
     `SELECT COALESCE(m.ingest_source, 'live') AS src, COUNT(*)::int AS cnt
        FROM messages m
@@ -256,7 +261,7 @@ export async function getStats(
         AND ($3::timestamptz IS NULL OR m.created_at >= $3)
         AND ($4::timestamptz IS NULL OR m.created_at <= $4)
       GROUP BY COALESCE(m.ingest_source, 'live')`,
-    params,
+    params.slice(0, 4),
   );
 
   // ── (6) byTag — thread count per tag ─────────────────────────────────────
