@@ -174,6 +174,9 @@ export function registerReadRoutes(
     if (number_id !== undefined && Number.isNaN(Number(number_id))) {
       return reply.code(400).send({ error: 'number_id must be numeric' });
     }
+    if (limit !== undefined && Number.isNaN(Number(limit))) {
+      return reply.code(400).send({ error: 'limit must be numeric' });
+    }
     if (!await gateAdmin(req, reply, workspace_id, authz)) return;
     const actions = scope === 'all' ? undefined : [...RELEVANT_ACTIONS];
     const result = await listAccessLog(deps.pool, {

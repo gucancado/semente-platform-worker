@@ -556,6 +556,26 @@ test('GET /whatsapp/audit — workspace_id absent → 400', async () => {
   await app.close();
 });
 
+test('GET /whatsapp/audit — number_id non-numeric → 400', async () => {
+  const spy = makeAllPass();
+  const app = Fastify({ logger: false });
+  registerReadRoutes(app, { pool: PANIC_POOL, panelToken: PANEL_TOKEN, authz: spy });
+  const res = await app.inject({ method: 'GET', url: '/whatsapp/audit?workspace_id=ws-1&number_id=abc', headers: ACTOR_HEADERS });
+  assert.equal(res.statusCode, 400);
+  assert.equal(res.json().error, 'number_id must be numeric');
+  await app.close();
+});
+
+test('GET /whatsapp/audit — limit non-numeric → 400', async () => {
+  const spy = makeAllPass();
+  const app = Fastify({ logger: false });
+  registerReadRoutes(app, { pool: PANIC_POOL, panelToken: PANEL_TOKEN, authz: spy });
+  const res = await app.inject({ method: 'GET', url: '/whatsapp/audit?workspace_id=ws-1&limit=foo', headers: ACTOR_HEADERS });
+  assert.equal(res.statusCode, 400);
+  assert.equal(res.json().error, 'limit must be numeric');
+  await app.close();
+});
+
 // ─────────────────────────────────────────────────────────────────────────────
 // SERVER-GATED (happy paths — require real DB + real Bloquim):
 //   - GET /whatsapp/numbers with valid member → 200 (numbers array)
