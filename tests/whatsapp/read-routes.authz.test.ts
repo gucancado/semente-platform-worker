@@ -524,6 +524,38 @@ test('(#5) POST /whatsapp/threads/:id/lead — non-admin + disqualifyReason → 
   await app.close();
 });
 
+// ── /whatsapp/audit — admin-only ──────────────────────────────────────────────
+test('GET /whatsapp/audit — actor absent → 400, assertAdmin not called', async () => {
+  const spy = makeAdminForbidden();
+  const app = Fastify({ logger: false });
+  registerReadRoutes(app, { pool: PANIC_POOL, panelToken: PANEL_TOKEN, authz: spy });
+  const res = await app.inject({ method: 'GET', url: '/whatsapp/audit?workspace_id=ws-1', headers: PANEL_HEADERS });
+  assert.equal(res.statusCode, 400);
+  assert.equal(spy.adminCalls, 0);
+  await app.close();
+});
+
+test('GET /whatsapp/audit — non-admin (assertAdmin FORBIDDEN) → 403, assertMember not called', async () => {
+  const spy = makeAdminForbidden();
+  const app = Fastify({ logger: false });
+  registerReadRoutes(app, { pool: PANIC_POOL, panelToken: PANEL_TOKEN, authz: spy });
+  const res = await app.inject({ method: 'GET', url: '/whatsapp/audit?workspace_id=ws-1', headers: ACTOR_HEADERS });
+  assert.equal(res.statusCode, 403);
+  assert.equal(res.json().error, 'forbidden');
+  assert.equal(spy.adminCalls, 1, 'audit usa assertAdmin');
+  assert.equal(spy.memberCalls, 0, 'audit NÃO usa assertMember');
+  await app.close();
+});
+
+test('GET /whatsapp/audit — workspace_id absent → 400', async () => {
+  const spy = makeAllPass();
+  const app = Fastify({ logger: false });
+  registerReadRoutes(app, { pool: PANIC_POOL, panelToken: PANEL_TOKEN, authz: spy });
+  const res = await app.inject({ method: 'GET', url: '/whatsapp/audit', headers: ACTOR_HEADERS });
+  assert.equal(res.statusCode, 400);
+  await app.close();
+});
+
 // ─────────────────────────────────────────────────────────────────────────────
 // SERVER-GATED (happy paths — require real DB + real Bloquim):
 //   - GET /whatsapp/numbers with valid member → 200 (numbers array)
@@ -532,6 +564,7 @@ test('(#5) POST /whatsapp/threads/:id/lead — non-admin + disqualifyReason → 
 //   - GET /whatsapp/search with valid member → 200
 //   - GET /whatsapp/threads/:id/export with valid member → 200
 //   - POST /whatsapp/threads/:id/lead with valid admin → 200
+//   - GET /whatsapp/audit with valid admin → 200 (entries array)
 // These are covered by read-routes.test.ts, read-routes-search-export.db.test.ts,
 // and write-routes.db.test.ts (all need DATABASE_URL + TRUNCATE).
 // ─────────────────────────────────────────────────────────────────────────────

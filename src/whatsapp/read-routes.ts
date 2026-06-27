@@ -6,7 +6,8 @@ import { exportConversation } from './export.js';
 import { getStats } from './stats.js';
 import { listDisqualifyReasons } from './disqualify-reasons.js';
 import { requirePanelToken } from './provision-routes.js';
-import { defaultRouteAuthz, gateMember, type RouteAuthz } from './route-authz.js';
+import { defaultRouteAuthz, gateMember, gateAdmin, type RouteAuthz } from './route-authz.js';
+import { listAccessLog, RELEVANT_ACTIONS } from './audit-queries.js';
 import { logAccess as defaultLogAccess, type LogAccessFn } from './access-log.js';
 import { emptyToUndefined } from './query-coerce.js';
 
@@ -163,5 +164,29 @@ export function registerReadRoutes(
     const out = await exportConversation(deps.pool, { workspaceId: num.workspaceId, numberId: Number(number_id), identifier: req.params.identifier, since, until, maxMessages: max_messages ? Number(max_messages) : undefined });
     logAccess(deps.pool, { actor: req.actingUser, action: 'export', workspaceId: num.workspaceId, numberId: Number(number_id), identifier: req.params.identifier, meta: { messageCount: out.messageCount } });
     return reply.send({ schema: 'whatsapp_v1', ...out });
+  });
+
+  // ── GET /whatsapp/audit ───────────────────────────────────────────────────────
+  // Feed de auditoria (whatsapp_access_log). workspace-scoped. ADMIN-only.
+  app.get('/whatsapp/audit', { preHandler: auth }, async (req: any, reply) => {
+    const { workspace_id, number_id, actor, scope, since, until, limit, cursor } = req.query as Record<string, string | undefined>;
+    if (!workspace_id) return reply.code(400).send({ error: 'workspace_id required' });
+    if (number_id !== undefined && Number.isNaN(Number(number_id))) {
+      return reply.code(400).send({ error: 'number_id must be numeric' });
+    }
+    if (!await gateAdmin(req, reply, workspace_id, authz)) return;
+    const actions = scope === 'all' ? undefined : [...RELEVANT_ACTIONS];
+    const result = await listAccessLog(deps.pool, {
+      workspaceId: workspace_id,
+      numberId: number_id !== undefined ? Number(number_id) : undefined,
+      actor: emptyToUndefined(actor),
+      actions,
+      since: emptyToUndefined(since),
+      until: emptyToUndefined(until),
+      limit: Number(limit ?? 50),
+      cursor: emptyToUndefined(cursor),
+    });
+    logAccess(deps.pool, { actor: req.actingUser, action: 'list_audit', workspaceId: workspace_id, numberId: number_id !== undefined ? Number(number_id) : null });
+    return reply.send({ schema: 'whatsapp_v1', ...result });
   });
 }
