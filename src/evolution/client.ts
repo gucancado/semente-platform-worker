@@ -22,6 +22,28 @@ export async function createEvolutionInstance(deps: EvolutionDeps, instance: str
   if (webhook) await setInstanceWebhook(deps, instance, webhook);
 }
 
+/**
+ * Garante a instância de forma idempotente. Se o create falhar mas a instância
+ * já existir (connectionState responde), segue. Sempre (re)registra o webhook
+ * por-instância; se o webhook falhar após o create, faz rollback (delete).
+ */
+export async function ensureEvolutionInstance(deps: EvolutionDeps, instance: string, webhook: { url: string; secret: string }) {
+  let created = false;
+  try {
+    await call(deps, 'POST', '/instance/create', { instanceName: instance, qrcode: true, integration: 'WHATSAPP-BAILEYS' });
+    created = true;
+  } catch (e) {
+    // pode já existir — confirma via connectionState; se não existir mesmo, propaga.
+    try { await getConnectionState(deps, instance); } catch { throw e; }
+  }
+  try {
+    await setInstanceWebhook(deps, instance, webhook);
+  } catch (e) {
+    if (created) { try { await deleteInstance(deps, instance); } catch { /* idempotente */ } }
+    throw e;
+  }
+}
+
 export async function setInstanceWebhook(deps: EvolutionDeps, instance: string, p: { url: string; secret: string }) {
   await call(deps, 'POST', `/webhook/set/${instance}`, {
     webhook: {
