@@ -1,8 +1,9 @@
 import type { Pool } from 'pg';
-import { updateNumberStatus, getNumberByInstance, upsertConnectedNumber } from './numbers.js';
+import { updateNumberStatus, getNumberByInstance, upsertConnectedNumber, reviveByWorkspacePhone, normalizePhone } from './numbers.js';
 import { getProvisioning, deleteProvisioning } from './provisioning.js';
 import { seedDefaultReasons } from './disqualify-reasons.js';
 import { config } from '../config.js';
+import { deleteInstance } from '../evolution/client.js';
 import { syncGroupSubjectsDebounced } from './group-sync.js';
 
 const STATE_MAP: Record<string, 'connected' | 'connecting' | 'disconnected'> = {
@@ -11,10 +12,7 @@ const STATE_MAP: Record<string, 'connected' | 'connecting' | 'disconnected'> = {
 const INSTANCE_EVENTS = new Set(['connection.update', 'qrcode.updated']);
 
 function extractPhone(data: any): string | undefined {
-  const wuid: string | undefined = data?.wuid ?? data?.me?.id ?? data?.owner;
-  if (!wuid) return undefined;
-  const digits = (wuid.split('@')[0] ?? '').split(':')[0]?.replace(/\D/g, '') ?? '';
-  return digits ? `+${digits}` : undefined;
+  return normalizePhone(data?.wuid ?? data?.me?.id ?? data?.owner);
 }
 
 export async function handleConnectionEvent(pool: Pool, payload: any): Promise<boolean> {
@@ -25,8 +23,6 @@ export async function handleConnectionEvent(pool: Pool, payload: any): Promise<b
   const instance: string = payload.instance;
 
   if (status !== 'connected') {
-    // connecting/disconnected só afetam números já existentes; sem linha = no-op.
-    // (instância em staging aguardando scan NÃO vira linha em whatsapp_numbers aqui.)
     await updateNumberStatus(pool, instance, { status });
     return true;
   }
@@ -35,24 +31,39 @@ export async function handleConnectionEvent(pool: Pool, payload: any): Promise<b
   let numberId: number | null = null;
   const existing = await getNumberByInstance(pool, instance);
   if (existing) {
-    // Reconexão / número legado já materializado.
     await updateNumberStatus(pool, instance, { status, phone: extractPhone(payload.data) });
     numberId = existing.id;
   } else {
-    // Onboarding QR-first: commita a partir do staging, se houver.
     const prov = await getProvisioning(pool, instance);
     if (prov) {
-      const num = await upsertConnectedNumber(pool, {
-        workspaceId: prov.workspaceId,
-        evolutionInstance: instance,
-        phone: extractPhone(payload.data),
-        createdBy: prov.createdBy,
-      });
+      const phone = extractPhone(payload.data);
+      const evoDeps = { baseUrl: config.EVOLUTION_API_URL, apiKey: config.EVOLUTION_API_KEY };
+      // Continuidade de histórico: revive ficha existente do MESMO telefone NESSE workspace.
+      const revived = phone
+        ? await reviveByWorkspacePhone(pool, { workspaceId: prov.workspaceId, phone, evolutionInstance: instance })
+        : null;
+      if (revived) {
+        numberId = revived.number.id;
+        if (revived.oldInstance && revived.oldInstance !== instance) {
+          deleteInstance(evoDeps, revived.oldInstance).catch(() => { /* instância antiga órfã — best-effort */ });
+        }
+      } else {
+        try {
+          const num = await upsertConnectedNumber(pool, {
+            workspaceId: prov.workspaceId, evolutionInstance: instance, phone, createdBy: prov.createdBy,
+          });
+          numberId = num.id;
+        } catch (e) {
+          // Telefone já ativo no ws via outra instância (partial unique). A instância nova é
+          // descartável; a ficha ativa permanece. Não materializa duplicata.
+          if ((e as any)?.code === '23505') {
+            deleteInstance(evoDeps, instance).catch(() => {});
+          } else { throw e; }
+        }
+      }
       await deleteProvisioning(pool, instance);
       await seedDefaultReasons(pool, prov.workspaceId);
-      numberId = num.id;
     }
-    // sem staging e sem número = instância desconhecida → no-op
   }
 
   if (numberId !== null) {

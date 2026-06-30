@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { pool } from '../../src/db.js';
 import { handleConnectionEvent } from '../../src/whatsapp/connection-events.js';
 import { createProvisioning, getProvisioning } from '../../src/whatsapp/provisioning.js';
+import { upsertConnectedNumber, setNumberLifecycle } from '../../src/whatsapp/numbers.js';
 
 beforeEach(async () => {
   await pool.query('TRUNCATE whatsapp_numbers RESTART IDENTITY CASCADE');
@@ -43,4 +44,42 @@ test('open SEM staging e SEM número = no-op (não cria nada)', async () => {
   assert.equal(handled, true);
   const { rows } = await pool.query(`SELECT count(*)::int n FROM whatsapp_numbers`);
   assert.equal(rows[0].n, 0);
+});
+
+test('staging open revive ficha removida de mesmo telefone+workspace (histórico volta)', async () => {
+  const old = await upsertConnectedNumber(pool, { workspaceId: 'ws-9', evolutionInstance: 'old-i', phone: '+5531777', createdBy: 'u1' });
+  // histórico atrelado ao number_id antigo
+  await pool.query(`INSERT INTO whatsapp_thread_meta (whatsapp_number_id, identifier) VALUES ($1,'+5531000')`, [old.id]);
+  await setNumberLifecycle(pool, old.id, { status: 'disconnected', removed: true });
+  // novo onboarding (instância nova) do mesmo telefone
+  await createProvisioning(pool, { evolutionInstance: 'new-i', workspaceId: 'ws-9', createdBy: 'u1', ttlSeconds: 90 });
+  await handleConnectionEvent(pool, { event: 'connection.update', instance: 'new-i', data: { state: 'open', wuid: '5531777@s.whatsapp.net' } });
+
+  const { rows } = await pool.query(`SELECT id, status, removed_at, evolution_instance FROM whatsapp_numbers WHERE workspace_id='ws-9'`);
+  assert.equal(rows.length, 1);          // não duplicou ficha
+  assert.equal(Number(rows[0].id), old.id); // mesma ficha → histórico acessível
+  assert.equal(rows[0].status, 'connected');
+  assert.equal(rows[0].removed_at, null);
+  assert.equal(rows[0].evolution_instance, 'new-i');
+  const meta = await pool.query(`SELECT count(*)::int n FROM whatsapp_thread_meta WHERE whatsapp_number_id=$1`, [old.id]);
+  assert.equal(meta.rows[0].n, 1);        // histórico segue atrelado
+});
+
+test('mesmo telefone em outro workspace NÃO herda histórico (ficha nova)', async () => {
+  const a = await upsertConnectedNumber(pool, { workspaceId: 'ws-A', evolutionInstance: 'a-i', phone: '+5531666', createdBy: null });
+  await setNumberLifecycle(pool, a.id, { status: 'disconnected', removed: true });
+  await createProvisioning(pool, { evolutionInstance: 'b-i', workspaceId: 'ws-B', createdBy: null, ttlSeconds: 90 });
+  await handleConnectionEvent(pool, { event: 'connection.update', instance: 'b-i', data: { state: 'open', wuid: '5531666@s.whatsapp.net' } });
+  const b = await pool.query(`SELECT id FROM whatsapp_numbers WHERE workspace_id='ws-B'`);
+  assert.equal(b.rows.length, 1);
+  assert.notEqual(Number(b.rows[0].id), a.id); // ficha nova, não a do ws-A
+});
+
+test('staging open SEM telefone extraível → não revive, cria ficha (phone null)', async () => {
+  await createProvisioning(pool, { evolutionInstance: 'np-i', workspaceId: 'ws-Z', createdBy: null, ttlSeconds: 90 });
+  await handleConnectionEvent(pool, { event: 'connection.update', instance: 'np-i', data: { state: 'open' } });
+  const { rows } = await pool.query(`SELECT phone, status FROM whatsapp_numbers WHERE evolution_instance='np-i'`);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].phone, null);
+  assert.equal(rows[0].status, 'connected');
 });
