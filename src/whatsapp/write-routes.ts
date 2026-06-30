@@ -71,7 +71,11 @@ export function registerWriteRoutes(
       notes: notes ?? undefined,
     });
 
-    logAccess(deps.pool, { actor: req.actingUser, action: 'set_lead', workspaceId: num.workspaceId, numberId: Number(number_id), identifier: req.params.identifier, meta: { status, stage, source } });
+    // Observabilidade: logar os campos de qualificação efetivamente recebidos no body
+    // (temperature/stage/source/disqualifyReason/tags) torna diagnosticável, pela aba
+    // Auditoria, se um "não persistiu" futuro foi o cliente NÃO enviar o campo vs falha
+    // de gravação. `notes` fica de fora de propósito (texto livre/PII — minimização LGPD).
+    logAccess(deps.pool, { actor: req.actingUser, action: 'set_lead', workspaceId: num.workspaceId, numberId: Number(number_id), identifier: req.params.identifier, meta: { status, stage, source, temperature, disqualifyReason, tags } });
     return reply.send({ schema: 'whatsapp_v1', ok: true, identifier: req.params.identifier, leadStatus: status });
   });
 
