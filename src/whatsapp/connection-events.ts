@@ -1,9 +1,11 @@
 import type { Pool } from 'pg';
-import { updateNumberStatus, getNumberByInstance } from './numbers.js';
+import { updateNumberStatus, getNumberByInstance, upsertConnectedNumber } from './numbers.js';
+import { getProvisioning, deleteProvisioning } from './provisioning.js';
+import { seedDefaultReasons } from './disqualify-reasons.js';
 import { config } from '../config.js';
 import { syncGroupSubjectsDebounced } from './group-sync.js';
 
-const STATE_MAP: Record<string, 'connected'|'connecting'|'disconnected'> = {
+const STATE_MAP: Record<string, 'connected' | 'connecting' | 'disconnected'> = {
   open: 'connected', connecting: 'connecting', close: 'disconnected',
 };
 const INSTANCE_EVENTS = new Set(['connection.update', 'qrcode.updated']);
@@ -18,17 +20,46 @@ function extractPhone(data: any): string | undefined {
 export async function handleConnectionEvent(pool: Pool, payload: any): Promise<boolean> {
   if (!INSTANCE_EVENTS.has(payload?.event)) return false;
   const status = STATE_MAP[payload?.data?.state];
-  if (status) {
-    await updateNumberStatus(pool, payload.instance, { status, phone: extractPhone(payload.data) });
-    if (status === 'connected') {
-      const num = await getNumberByInstance(pool, payload.instance);
-      if (num) {
-        const deps = { baseUrl: config.EVOLUTION_API_URL, apiKey: config.EVOLUTION_API_KEY };
-        syncGroupSubjectsDebounced(pool, deps, num.id).catch((err) =>
-          console.error('[group-sync] on-connect falhou (não-fatal):', (err as Error).message)
-        );
-      }
-    }
+  if (!status) return true;
+
+  const instance: string = payload.instance;
+
+  if (status !== 'connected') {
+    // connecting/disconnected só afetam números já existentes; sem linha = no-op.
+    // (instância em staging aguardando scan NÃO vira linha em whatsapp_numbers aqui.)
+    await updateNumberStatus(pool, instance, { status });
+    return true;
   }
-  return true; // tratado (mesmo que instância desconhecida = no-op no UPDATE)
+
+  // status === 'connected'
+  let numberId: number | null = null;
+  const existing = await getNumberByInstance(pool, instance);
+  if (existing) {
+    // Reconexão / número legado já materializado.
+    await updateNumberStatus(pool, instance, { status, phone: extractPhone(payload.data) });
+    numberId = existing.id;
+  } else {
+    // Onboarding QR-first: commita a partir do staging, se houver.
+    const prov = await getProvisioning(pool, instance);
+    if (prov) {
+      const num = await upsertConnectedNumber(pool, {
+        workspaceId: prov.workspaceId,
+        evolutionInstance: instance,
+        phone: extractPhone(payload.data),
+        createdBy: prov.createdBy,
+      });
+      await deleteProvisioning(pool, instance);
+      await seedDefaultReasons(pool, prov.workspaceId);
+      numberId = num.id;
+    }
+    // sem staging e sem número = instância desconhecida → no-op
+  }
+
+  if (numberId !== null) {
+    const deps = { baseUrl: config.EVOLUTION_API_URL, apiKey: config.EVOLUTION_API_KEY };
+    syncGroupSubjectsDebounced(pool, deps, numberId).catch((err) =>
+      console.error('[group-sync] on-connect falhou (não-fatal):', (err as Error).message),
+    );
+  }
+  return true;
 }
