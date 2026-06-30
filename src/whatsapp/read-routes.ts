@@ -25,7 +25,9 @@ export function registerReadRoutes(
     const ws = req.query.workspace_id;
     if (!ws) return reply.code(400).send({ error: 'workspace_id required' });
     if (!await gateMember(req, reply, ws, authz)) return;
-    const numbers = await listNumbers(deps.pool, ws);
+    const inc = typeof req.query.include_disconnected === 'string' ? req.query.include_disconnected.toLowerCase() : '';
+    const includeDisconnected = inc === 'true' || inc === '1' || inc === 'yes';
+    const numbers = await listNumbers(deps.pool, ws, { includeDisconnected });
     logAccess(deps.pool, { actor: req.actingUser, action: 'list_numbers', workspaceId: ws });
     return reply.send({ schema: 'whatsapp_v1', numbers });
   });

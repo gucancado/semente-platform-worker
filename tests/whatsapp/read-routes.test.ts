@@ -37,6 +37,15 @@ test('GET /whatsapp/numbers rejeita sem X-Panel-Token', async () => {
   assert.equal(res.statusCode, 401);
 });
 
+test('GET /whatsapp/numbers esconde disconnected; include_disconnected=true mostra', async () => {
+  await pool.query(`INSERT INTO whatsapp_numbers (workspace_id, evolution_instance, status) VALUES ('ws-1','on','connected'),('ws-1','off','disconnected')`);
+  const app = buildApp();
+  const def = await app.inject({ method: 'GET', url: '/whatsapp/numbers?workspace_id=ws-1', headers: { 'x-panel-token': 'test-panel', 'x-acting-user': 'u1' } });
+  assert.deepEqual(def.json().numbers.map((n: any) => n.evolutionInstance), ['on']);
+  const all = await app.inject({ method: 'GET', url: '/whatsapp/numbers?workspace_id=ws-1&include_disconnected=true', headers: { 'x-panel-token': 'test-panel', 'x-acting-user': 'u1' } });
+  assert.equal(all.json().numbers.length, 2);
+});
+
 test('GET /whatsapp/threads?temperature=quente filtra por lead_temperature', async () => {
   const ws = 'ws-temp';
   // Insere 1 número no workspace
