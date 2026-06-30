@@ -21,6 +21,7 @@ import { startHoldsCleanupCron } from './goals/scheduling/holds-cleanup.js';
 import { startReconcileCron } from './goals/scheduling/reconcile-trigger.js';
 import { startOutboxDispatcher } from './events/dispatcher.js';
 import { startLuaScheduler } from './lua/scheduler.js';
+import { startProvisioningReaperCron } from './whatsapp/provisioning-reaper.js';
 
 async function main() {
   const app = Fastify({
@@ -156,6 +157,14 @@ async function main() {
   // Self-check de LUA_ENABLED + janela a cada tick => iniciar sempre é seguro
   // (no-op enquanto desligado ou fora da janela 02h-05h local).
   startLuaScheduler(app.log);
+
+  // Cron que varre provisionamentos de WhatsApp vencidos (QR não escaneado):
+  // remove a instância Evolution órfã + a linha de staging. Rede de segurança
+  // anti-órfão (não depende do abort do painel).
+  startProvisioningReaperCron(app.log, {
+    pool,
+    evolution: { baseUrl: config.EVOLUTION_API_URL, apiKey: config.EVOLUTION_API_KEY },
+  });
 }
 
 main().catch((err) => {
