@@ -1,0 +1,49 @@
+import type { Pool } from 'pg';
+
+export type ProvisioningRow = {
+  evolutionInstance: string;
+  workspaceId: string;
+  createdBy: string | null;
+  createdAt: string;
+  expiresAt: string;
+};
+
+function map(r: any): ProvisioningRow {
+  return {
+    evolutionInstance: r.evolution_instance,
+    workspaceId: r.workspace_id,
+    createdBy: r.created_by,
+    createdAt: r.created_at.toISOString?.() ?? r.created_at,
+    expiresAt: r.expires_at.toISOString?.() ?? r.expires_at,
+  };
+}
+
+export async function createProvisioning(
+  pool: Pool,
+  p: { evolutionInstance: string; workspaceId: string; createdBy: string | null; ttlSeconds: number },
+): Promise<ProvisioningRow> {
+  const { rows } = await pool.query(
+    `INSERT INTO whatsapp_provisioning (evolution_instance, workspace_id, created_by, expires_at)
+     VALUES ($1, $2, $3, NOW() + ($4 || ' seconds')::interval)
+     RETURNING *`,
+    [p.evolutionInstance, p.workspaceId, p.createdBy, String(p.ttlSeconds)],
+  );
+  return map(rows[0]);
+}
+
+export async function getProvisioning(pool: Pool, instance: string): Promise<ProvisioningRow | null> {
+  const { rows } = await pool.query(`SELECT * FROM whatsapp_provisioning WHERE evolution_instance = $1`, [instance]);
+  return rows[0] ? map(rows[0]) : null;
+}
+
+export async function deleteProvisioning(pool: Pool, instance: string): Promise<void> {
+  await pool.query(`DELETE FROM whatsapp_provisioning WHERE evolution_instance = $1`, [instance]);
+}
+
+export async function listExpiredProvisioning(pool: Pool, limit = 200): Promise<ProvisioningRow[]> {
+  const { rows } = await pool.query(
+    `SELECT * FROM whatsapp_provisioning WHERE expires_at < NOW() ORDER BY expires_at ASC LIMIT $1`,
+    [limit],
+  );
+  return rows.map(map);
+}
