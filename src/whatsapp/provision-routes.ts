@@ -1,9 +1,9 @@
 import type { FastifyInstance } from 'fastify';
 import type { Pool } from 'pg';
 import { randomBytes } from 'node:crypto';
-import { getNumber, updateNumberStatus, renameNumberLabel, getNumberByInstance } from './numbers.js';
+import { getNumber, renameNumberLabel, getNumberByInstance, setNumberLifecycle } from './numbers.js';
 import { createProvisioning, getProvisioning, deleteProvisioning } from './provisioning.js';
-import { createEvolutionInstance, getQrCode, logoutInstance, deleteInstance, type EvolutionDeps } from '../evolution/client.js';
+import { createEvolutionInstance, ensureEvolutionInstance, getQrCode, logoutInstance, deleteInstance, type EvolutionDeps } from '../evolution/client.js';
 import { syncGroupSubjects } from './group-sync.js';
 import { backfillNumber } from './backfill.js';
 import { setGroupExposure } from './thread-meta.js';
@@ -92,11 +92,34 @@ export function registerProvisionRoutes(app: FastifyInstance, deps: { pool: Pool
   });
 
   app.delete('/admin/whatsapp/numbers/:id', async (req: any, reply) => {
+    const ws = req.query.workspace_id;
     const n = await getNumber(deps.pool, Number(req.params.id));
     if (!n) return reply.code(404).send({ error: 'not found' });
+    if (ws && n.workspaceId !== ws) return reply.code(404).send({ error: 'not found' });
     try { await logoutInstance(deps.evolution, n.evolutionInstance); await deleteInstance(deps.evolution, n.evolutionInstance); } catch { /* idempotente */ }
-    await updateNumberStatus(deps.pool, n.evolutionInstance, { status: 'disconnected' });
-    return reply.send({ status: 'disconnected' });
+    await setNumberLifecycle(deps.pool, n.id, { status: 'disconnected', removed: true });
+    return reply.send({ id: n.id, status: 'disconnected', removed: true });
+  });
+
+  // Desconectar: encerra a sessão mas MANTÉM a instância (pra reconectar sem perder histórico).
+  app.post('/admin/whatsapp/numbers/:id/disconnect', async (req: any, reply) => {
+    const ws = req.body?.workspace_id;
+    const n = await getNumber(deps.pool, Number(req.params.id));
+    if (!n) return reply.code(404).send({ error: 'not found' });
+    if (ws && n.workspaceId !== ws) return reply.code(404).send({ error: 'not found' });
+    try { await logoutInstance(deps.evolution, n.evolutionInstance); } catch { /* idempotente — fica disconnected mesmo assim */ }
+    await setNumberLifecycle(deps.pool, n.id, { status: 'disconnected', removed: false });
+    return reply.send({ id: n.id, status: 'disconnected' });
+  });
+
+  // Reconectar: garante instância + webhook; o painel puxa o QR via :id/qr e faz poll.
+  app.post('/admin/whatsapp/numbers/:id/reconnect', async (req: any, reply) => {
+    const ws = req.body?.workspace_id;
+    const n = await getNumber(deps.pool, Number(req.params.id));
+    if (!n) return reply.code(404).send({ error: 'not found' });
+    if (ws && n.workspaceId !== ws) return reply.code(404).send({ error: 'not found' });
+    await ensureEvolutionInstance(deps.evolution, n.evolutionInstance, deps.webhook);
+    return reply.send({ id: n.id, instance: n.evolutionInstance });
   });
 
   app.post('/admin/whatsapp/numbers/:id/sync-groups', async (req: any, reply) => {

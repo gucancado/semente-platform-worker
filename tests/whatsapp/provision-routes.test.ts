@@ -5,7 +5,7 @@ import { pool } from '../../src/db.js';
 import { registerProvisionRoutes } from '../../src/whatsapp/provision-routes.js';
 import type { EvolutionDeps } from '../../src/evolution/client.js';
 import { createProvisioning } from '../../src/whatsapp/provisioning.js';
-import { upsertConnectedNumber } from '../../src/whatsapp/numbers.js';
+import { upsertConnectedNumber, setNumberLifecycle } from '../../src/whatsapp/numbers.js';
 
 function buildApp(evolutionCalls: string[]) {
   const app = Fastify();
@@ -116,4 +116,54 @@ test('POST /numbers (antigo) responde 410', async () => {
   const res = await app.inject({ method: 'POST', url: '/admin/whatsapp/numbers',
     headers: { 'x-panel-token': 'test-panel' }, payload: { workspace_id: 'ws-1' } });
   assert.equal(res.statusCode, 410);
+});
+
+test('POST :id/disconnect → status=disconnected, removed_at NULL, NÃO deleta instância', async () => {
+  const calls: string[] = [];
+  const app = buildApp(calls); // se o buildApp atual não registra method, ver nota abaixo
+  const n = await upsertConnectedNumber(pool, { workspaceId: 'ws-1', evolutionInstance: 'd-i', phone: '+551', createdBy: null });
+  const res = await app.inject({ method: 'POST', url: `/admin/whatsapp/numbers/${n.id}/disconnect`,
+    headers: { 'x-panel-token': 'test-panel' }, payload: { workspace_id: 'ws-1' } });
+  assert.equal(res.statusCode, 200);
+  const { rows } = await pool.query(`SELECT status, removed_at FROM whatsapp_numbers WHERE id=$1`, [n.id]);
+  assert.equal(rows[0].status, 'disconnected');
+  assert.equal(rows[0].removed_at, null);
+});
+
+test('POST :id/disconnect rejeita workspace de outro tenant (404)', async () => {
+  const app = buildApp([]);
+  const n = await upsertConnectedNumber(pool, { workspaceId: 'ws-OWNER', evolutionInstance: 'o-i', phone: '+552', createdBy: null });
+  const res = await app.inject({ method: 'POST', url: `/admin/whatsapp/numbers/${n.id}/disconnect`,
+    headers: { 'x-panel-token': 'test-panel' }, payload: { workspace_id: 'ws-OTHER' } });
+  assert.equal(res.statusCode, 404);
+});
+
+test('POST :id/reconnect garante instância + webhook; devolve instance', async () => {
+  const app = buildApp([]);
+  const n = await upsertConnectedNumber(pool, { workspaceId: 'ws-1', evolutionInstance: 'r-i', phone: '+553', createdBy: null });
+  await setNumberLifecycle(pool, n.id, { status: 'disconnected', removed: false });
+  const res = await app.inject({ method: 'POST', url: `/admin/whatsapp/numbers/${n.id}/reconnect`,
+    headers: { 'x-panel-token': 'test-panel' }, payload: { workspace_id: 'ws-1' } });
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.json().instance, 'r-i');
+});
+
+test('DELETE :id marca removed_at + status=disconnected', async () => {
+  const app = buildApp([]);
+  const n = await upsertConnectedNumber(pool, { workspaceId: 'ws-1', evolutionInstance: 'x-i', phone: '+554', createdBy: null });
+  const res = await app.inject({ method: 'DELETE', url: `/admin/whatsapp/numbers/${n.id}?workspace_id=ws-1`,
+    headers: { 'x-panel-token': 'test-panel' } });
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.json().removed, true);
+  const { rows } = await pool.query(`SELECT status, removed_at FROM whatsapp_numbers WHERE id=$1`, [n.id]);
+  assert.equal(rows[0].status, 'disconnected');
+  assert.ok(rows[0].removed_at);
+});
+
+test('DELETE :id rejeita workspace de outro tenant (404)', async () => {
+  const app = buildApp([]);
+  const n = await upsertConnectedNumber(pool, { workspaceId: 'ws-OWNER', evolutionInstance: 'y-i', phone: '+555', createdBy: null });
+  const res = await app.inject({ method: 'DELETE', url: `/admin/whatsapp/numbers/${n.id}?workspace_id=ws-OTHER`,
+    headers: { 'x-panel-token': 'test-panel' } });
+  assert.equal(res.statusCode, 404);
 });
