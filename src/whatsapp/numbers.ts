@@ -32,9 +32,31 @@ export async function getNumber(pool: Pool, id: number) {
   const { rows } = await pool.query(`${SELECT} WHERE id = $1`, [id]);
   return rows[0] ? map(rows[0]) : null;
 }
-export async function listNumbers(pool: Pool, workspaceId: string) {
-  const { rows } = await pool.query(`${SELECT} WHERE workspace_id = $1 ORDER BY created_at DESC`, [workspaceId]);
+export async function listNumbers(pool: Pool, workspaceId: string, opts?: { includeDisconnected?: boolean }) {
+  const where = opts?.includeDisconnected
+    ? `WHERE workspace_id = $1`
+    : `WHERE workspace_id = $1 AND status <> 'disconnected'`;
+  const { rows } = await pool.query(`${SELECT} ${where} ORDER BY created_at DESC`, [workspaceId]);
   return rows.map(map);
+}
+export async function upsertConnectedNumber(
+  pool: Pool,
+  p: { workspaceId: string; evolutionInstance: string; phone: string | undefined; createdBy: string | null },
+): Promise<WhatsappNumber> {
+  const { rows } = await pool.query(
+    `INSERT INTO whatsapp_numbers (workspace_id, evolution_instance, phone, status, created_by)
+     VALUES ($1, $2, $3, 'connected', $4)
+     ON CONFLICT (evolution_instance) DO UPDATE
+       SET status = 'connected',
+           phone = COALESCE(EXCLUDED.phone, whatsapp_numbers.phone),
+           updated_at = NOW()
+     RETURNING *`,
+    [p.workspaceId, p.evolutionInstance, p.phone ?? null, p.createdBy],
+  );
+  return map(rows[0]);
+}
+export async function renameNumberLabel(pool: Pool, id: number, label: string | null): Promise<void> {
+  await pool.query(`UPDATE whatsapp_numbers SET label = $2, updated_at = NOW() WHERE id = $1`, [id, label]);
 }
 export async function updateNumberStatus(pool: Pool, instance: string, p: { status: WhatsappNumber['status']; phone?: string }) {
   await pool.query(
