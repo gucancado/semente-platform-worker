@@ -40,7 +40,7 @@ beforeEach(async () => {
       (1, 'ws-1', 'whatsapp', '+b', 'inbound', 'msg-b', 'live')
   `);
   // Inserir 1 reason ativo
-  await pool.query(`INSERT INTO whatsapp_disqualify_reasons (workspace_id, code, label, active, created_by) VALUES ('ws-1', 'sem_interesse', 'Sem interesse', TRUE, 'test')`);
+  await pool.query(`INSERT INTO whatsapp_disqualify_reasons (workspace_id, code, label, active, created_by) VALUES ('ws-1', 'sem_interesse', 'Sem interesse', TRUE, '00000000-0000-0000-0000-000000000001')`);
 });
 
 after(() => pool.end());
