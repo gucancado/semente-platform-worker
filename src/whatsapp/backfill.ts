@@ -3,6 +3,7 @@ import type { EvolutionDeps } from '../evolution/client.js';
 import { fetchMessages, normalizeGroupJid, canonicalJid } from '../evolution/client.js';
 import { extractMessageText } from '../webhook/evolution.js';
 import { getNumber } from './numbers.js';
+import { logAccess } from './access-log.js';
 
 export type BackfillResult = { scanned: number; inserted: number; updated: number; skippedNoText: number; pages: number; reachedCutoff: boolean };
 
@@ -66,5 +67,50 @@ export async function backfillNumber(
     if (page % 10 === 0) log(`[backfill] number=${numberId} page=${page} scanned=${scanned} inserted=${inserted}`);
   }
   log(`[backfill] DONE number=${numberId} pages=${page} scanned=${scanned} inserted=${inserted} updated=${updated} skippedNoText=${skippedNoText} reachedCutoff=${reachedCutoff}`);
+  try {
+    await markBackfillFragments(pool, numberId, num.workspaceId, log);
+  } catch (err) {
+    log(`[backfill] markBackfillFragments falhou: ${(err as Error).message}`);
+  }
   return { scanned, inserted, updated, skippedNoText, pages: page, reachedCutoff };
+}
+
+/**
+ * S5: marca fragmentos de backfill (thread com exatamente 1 msg E identifier @lid
+ * não-resolvido) como not_lead + tag fragmento_backfill. Só cria row se não existir
+ * (humano/qualificação prévia prevalece). Idempotente. Nunca lança.
+ */
+export async function markBackfillFragments(
+  pool: Pool, numberId: number, workspaceId: string, log: (m: string) => void = () => {},
+): Promise<{ marked: number }> {
+  const { rows } = await pool.query(
+    `SELECT m.identifier
+       FROM messages m
+      WHERE m.whatsapp_number_id = $1 AND m.identifier LIKE '%@lid'
+      GROUP BY m.identifier
+     HAVING COUNT(*) = 1
+        AND NOT EXISTS (SELECT 1 FROM whatsapp_thread_meta tm
+                         WHERE tm.whatsapp_number_id = $1 AND tm.identifier = m.identifier)`,
+    [numberId],
+  );
+  let marked = 0;
+  for (const r of rows) {
+    const identifier = r.identifier as string;
+    const ins = await pool.query(
+      `INSERT INTO whatsapp_thread_meta (whatsapp_number_id, identifier, is_lead, updated_by)
+       VALUES ($1, $2, FALSE, 'system:backfill')
+       ON CONFLICT (whatsapp_number_id, identifier) DO NOTHING`,
+      [numberId, identifier],
+    );
+    if ((ins.rowCount ?? 0) === 0) continue; // corrida: row surgiu entre o SELECT e o INSERT → respeita
+    await pool.query(
+      `INSERT INTO whatsapp_thread_tags (whatsapp_number_id, identifier, tag)
+       VALUES ($1, $2, 'fragmento_backfill') ON CONFLICT DO NOTHING`,
+      [numberId, identifier],
+    );
+    marked++;
+    logAccess(pool, { actor: 'system:backfill', action: 'auto_fragment', workspaceId, numberId, identifier });
+  }
+  if (marked) log(`[backfill] fragmentos marcados: ${marked}`);
+  return { marked };
 }
