@@ -85,7 +85,7 @@ export async function detectAndTagSource(
     [p.numberId, p.identifier, m.source],
   );
   // rowCount>0 = inseriu ou atualizou (setou source). Se já tinha source, o WHERE do DO UPDATE barra → rowCount 0.
-  if (!rowCount) return null;
+  if ((rowCount ?? 0) === 0) return null;
   logAccess(pool, { actor: 'system:ingest', action: 'auto_source', workspaceId: p.workspaceId, numberId: p.numberId, identifier: p.identifier, meta: { source: m.source, pattern: m.pattern } });
   return { source: m.source };
 }

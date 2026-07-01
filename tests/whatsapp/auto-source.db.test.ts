@@ -36,4 +36,8 @@ test('não sobrescreve lead_source já setado (humano prevalece)', async () => {
   assert.equal(r, null, 'não regrava quando já há source');
   const m = await metaSource('+55c');
   assert.equal(m.lead_source, 'indicacao'); assert.equal(m.updated_by, 'user:ana');
+  const { rows: logRows } = await pool.query(
+    `SELECT 1 FROM whatsapp_access_log WHERE action='auto_source' AND identifier='+55c'`
+  );
+  assert.equal(logRows.length, 0, 'auto_source NÃO deve ser logado quando source já existia');
 });
