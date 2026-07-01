@@ -15,6 +15,7 @@ import { resolveInboundAgent } from '../whatsapp/ingest-persist.js';
 import { createTask } from '../bloquim/client.js';
 import { computeScheduledAt } from '../triggers/quiet-hours.js';
 import { agentsToTrigger, quarantineUnknownInstance } from '../whatsapp/reaction.js';
+import { detectAndTagSource } from '../whatsapp/source-signals.js';
 
 export async function registerWebhookRoutes(app: FastifyInstance) {
   app.post('/webhook', async (req, reply) => {
@@ -94,7 +95,7 @@ export async function registerWebhookRoutes(app: FastifyInstance) {
       });
       if (msg.messageText && msg.identifier) {
         try {
-          await insertMessage({
+          const msgInserted = await insertMessage({
             agent,
             channel: msg.channel,
             identifier: msg.identifier,
@@ -105,6 +106,17 @@ export async function registerWebhookRoutes(app: FastifyInstance) {
             whatsapp_number_id: resolved.numberId,
             workspace_id: resolved.workspaceId,
           });  // dedup próprio por (whatsapp_number_id, evolution_event_id)
+          // S4: auto-source só em inbound novo, DM, com número resolvido.
+          if (!msgInserted.duplicate && !msg.fromMe && !msg.isGroup && resolved.workspaceId && resolved.numberId != null) {
+            try {
+              await detectAndTagSource(pool, {
+                workspaceId: resolved.workspaceId, numberId: resolved.numberId,
+                identifier: msg.identifier, text: msg.messageText,
+              });
+            } catch (err) {
+              req.log.warn({ err: (err as Error).message }, 'detectAndTagSource falhou — webhook segue');
+            }
+          }
         } catch (err) {
           req.log.warn({ err: (err as Error).message }, 'insertMessage(number-path) falhou — webhook segue');
         }
