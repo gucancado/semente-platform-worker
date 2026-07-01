@@ -2,13 +2,15 @@
  * src/whatsapp/bulk-lead.ts
  *
  * Transactional bulk set-lead-status helper.
- * Applies ALL updates in ONE transaction (all-or-nothing).
+ * Applies ALL updates in ONE transaction (all-or-nothing) — strict mode (default).
+ * In partial mode, unknown identifiers are partitioned into `skipped` instead of
+ * throwing; known identifiers are applied normally.
  * Reuses `applyLeadUpdate` from thread-meta.ts to keep single and bulk
  * write logic in one place (no copy-paste, no drift).
  *
  * Spec §4.1: each identifier must exist (in `messages` OR `whatsapp_thread_meta`)
  * for the given (numberId, workspaceId) before any upsert. If ANY identifier is
- * unknown → abort with an error that surfaces the offending identifiers.
+ * unknown in strict mode → abort with an error that surfaces the offending identifiers.
  */
 
 import type { Pool } from 'pg';
@@ -30,6 +32,7 @@ export interface BulkLeadUpdate {
 export interface BulkLeadResult {
   updated: number;
   identifiers: string[];
+  skipped: { identifier: string; reason: string }[];
 }
 
 /** Thrown when one or more identifiers don't exist in this (numberId, workspaceId) scope. */
@@ -45,9 +48,17 @@ export class BulkLeadIdentifierError extends Error {
 /**
  * Set lead status + qualification for multiple threads in a SINGLE transaction.
  *
- * 1. Validates identifier existence for ALL updates before writing anything.
- * 2. If ANY identifier is unknown → throws BulkLeadIdentifierError (all-or-nothing).
- * 3. Applies each update via the shared `applyLeadUpdate` (same logic as single lead route).
+ * strict mode (default — all-or-nothing):
+ *   1. Validates identifier existence for ALL updates before writing anything.
+ *   2. If ANY identifier is unknown → throws BulkLeadIdentifierError.
+ *   3. Applies each update via the shared `applyLeadUpdate`.
+ *   4. `skipped` is always `[]`.
+ *
+ * partial mode:
+ *   1. Reads existence for all identifiers (outside transaction — read-only).
+ *   2. Unknown identifiers are collected into `skipped` with reason `'unknown_identifier'`.
+ *   3. Only known identifiers are applied (transaction only opened when there are updates).
+ *   4. If all identifiers are unknown → returns immediately without opening a transaction.
  */
 export async function bulkSetLeadStatus(
   pool: Pool,
@@ -56,45 +67,39 @@ export async function bulkSetLeadStatus(
     workspaceId: string;
     updatedBy: string;
     updates: BulkLeadUpdate[];
+    mode?: 'strict' | 'partial';
   },
 ): Promise<BulkLeadResult> {
+  const mode = p.mode ?? 'strict';
+  const inputIdentifiers = p.updates.map((u) => u.identifier);
+
+  // Existence read (não precisa de transação — é leitura).
+  const existenceResult = await pool.query<{ identifier: string }>(
+    `SELECT identifier FROM messages
+       WHERE whatsapp_number_id = $1 AND workspace_id = $2 AND identifier = ANY($3::text[])
+     UNION
+     SELECT identifier FROM whatsapp_thread_meta
+       WHERE whatsapp_number_id = $1 AND identifier = ANY($3::text[])`,
+    [p.numberId, p.workspaceId, inputIdentifiers],
+  );
+  const existingSet = new Set(existenceResult.rows.map((r) => r.identifier));
+  const unknownIdentifiers = inputIdentifiers.filter((id) => !existingSet.has(id));
+
+  const skipped: { identifier: string; reason: string }[] = [];
+  let applyList = p.updates;
+  if (unknownIdentifiers.length > 0) {
+    if (mode === 'strict') throw new BulkLeadIdentifierError(unknownIdentifiers); // all-or-nothing (inalterado)
+    for (const id of unknownIdentifiers) skipped.push({ identifier: id, reason: 'unknown_identifier' });
+    applyList = p.updates.filter((u) => existingSet.has(u.identifier));
+  }
+
+  // Guard: nada a aplicar → sem abrir transação.
+  if (applyList.length === 0) return { updated: 0, identifiers: [], skipped };
+
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-
-    // ── Step 1: validate that every identifier exists in this (numberId, workspaceId) ──
-    // An identifier "exists" if there is at least one messages row OR an existing
-    // thread_meta row for this number+workspace.
-    const inputIdentifiers = p.updates.map((u) => u.identifier);
-
-    // Single query: UNION already dedupes, so no outer SELECT DISTINCT needed.
-    const existenceResult = await client.query<{ identifier: string }>(
-      `SELECT identifier FROM messages
-         WHERE whatsapp_number_id = $1
-           AND workspace_id = $2
-           AND identifier = ANY($3::text[])
-       UNION
-       SELECT identifier FROM whatsapp_thread_meta
-         WHERE whatsapp_number_id = $1
-           AND identifier = ANY($3::text[])`,
-      [p.numberId, p.workspaceId, inputIdentifiers],
-    );
-
-    const existingSet = new Set(existenceResult.rows.map((r) => r.identifier));
-    const unknownIdentifiers = inputIdentifiers.filter((id) => !existingSet.has(id));
-
-    if (unknownIdentifiers.length > 0) {
-      // Abort before any write. Throw the identifier error FIRST: no rows have been
-      // written, so the open transaction is rolled back implicitly by the catch's
-      // ROLLBACK (and ultimately client.release() in finally). Issuing an explicit
-      // ROLLBACK here would let a dead-connection rollback error mask the identifier
-      // error → the route's `instanceof BulkLeadIdentifierError` catch would miss it
-      // and return 500 instead of 400.
-      throw new BulkLeadIdentifierError(unknownIdentifiers);
-    }
-
-    // ── Step 2: apply all updates within the same transaction ────────────────────
-    for (const upd of p.updates) {
+    for (const upd of applyList) {
       await applyLeadUpdate(client, {
         numberId: p.numberId,
         identifier: upd.identifier,
@@ -108,20 +113,10 @@ export async function bulkSetLeadStatus(
         notes: upd.notes,
       });
     }
-
     await client.query('COMMIT');
-
-    return {
-      updated: p.updates.length,
-      identifiers: inputIdentifiers,
-    };
+    return { updated: applyList.length, identifiers: applyList.map((u) => u.identifier), skipped };
   } catch (err) {
-    // Roll back on ANY error (including BulkLeadIdentifierError, which is thrown
-    // before any write). Isolate ROLLBACK so a dead-connection rollback error can
-    // never mask the original error — the caller must still see the real cause
-    // (e.g. BulkLeadIdentifierError → 400). client.release() in finally is the
-    // ultimate safety net for the open transaction.
-    try { await client.query('ROLLBACK'); } catch { /* ignore rollback failure */ }
+    try { await client.query('ROLLBACK'); } catch { /* ignore */ }
     throw err;
   } finally {
     client.release();
