@@ -9,6 +9,7 @@ import { logAccess as defaultLogAccess, type LogAccessFn } from './access-log.js
 import { validateLeadQualifyFields, validateDisqualifyReason } from './lead-qualify.js';
 import { bulkSetLeadStatus, BulkLeadIdentifierError, BULK_LEAD_MAX } from './bulk-lead.js';
 import { upsertDisqualifyReason, deactivateDisqualifyReason } from './disqualify-reasons.js';
+import { upsertSourceSignal, deactivateSourceSignal } from './source-signals.js';
 
 /** Normalise and validate a disqualify-reason code. Returns null when valid; an error string otherwise. */
 function normaliseCode(raw: unknown): { code: string } | { error: string } {
@@ -240,6 +241,37 @@ export function registerWriteRoutes(
     if (!await gateAdmin(req, reply, workspace_id, authz)) return;
     await deactivateDisqualifyReason(deps.pool, { workspaceId: workspace_id, code });
     logAccess(deps.pool, { actor: req.actingUser, action: 'deactivate_disqualify_reason', workspaceId: workspace_id, meta: { code } });
+    return reply.send({ schema: 'whatsapp_v1', ok: true });
+  });
+
+  // ── POST /whatsapp/source-signals ────────────────────────────────────────────
+  // Creates or reactivates a source signal for the workspace. Admin gate.
+  app.post('/whatsapp/source-signals', { preHandler: auth }, async (req: any, reply) => {
+    const { workspace_id, pattern: rawPattern, source: rawSource } = req.body ?? {};
+    if (!workspace_id) return reply.code(400).send({ error: 'workspace_id required' });
+    if (!rawPattern || typeof rawPattern !== 'string' || rawPattern.trim() === '') {
+      return reply.code(400).send({ error: 'pattern required' });
+    }
+    if (!rawSource || typeof rawSource !== 'string' || rawSource.trim() === '') {
+      return reply.code(400).send({ error: 'source required' });
+    }
+    const pattern = rawPattern.trim();
+    const source = rawSource.trim();
+    if (!await gateAdmin(req, reply, workspace_id, authz)) return;
+    await upsertSourceSignal(deps.pool, { workspaceId: workspace_id, pattern, source });
+    logAccess(deps.pool, { actor: req.actingUser, action: 'upsert_source_signal', workspaceId: workspace_id, meta: { pattern, source } });
+    return reply.send({ schema: 'whatsapp_v1', ok: true });
+  });
+
+  // ── POST /whatsapp/source-signals/:pattern/deactivate ────────────────────────
+  // Soft-deactivates a source signal. Idempotent. Admin gate.
+  app.post('/whatsapp/source-signals/:pattern/deactivate', { preHandler: auth }, async (req: any, reply) => {
+    const pattern = decodeURIComponent(req.params.pattern);
+    const { workspace_id } = req.body ?? {};
+    if (!workspace_id) return reply.code(400).send({ error: 'workspace_id required' });
+    if (!await gateAdmin(req, reply, workspace_id, authz)) return;
+    await deactivateSourceSignal(deps.pool, { workspaceId: workspace_id, pattern });
+    logAccess(deps.pool, { actor: req.actingUser, action: 'deactivate_source_signal', workspaceId: workspace_id, meta: { pattern } });
     return reply.send({ schema: 'whatsapp_v1', ok: true });
   });
 }

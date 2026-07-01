@@ -2,6 +2,7 @@ import type { Pool } from 'pg';
 import { updateNumberStatus, getNumberByInstance, upsertConnectedNumber, reviveByWorkspacePhone, normalizePhone } from './numbers.js';
 import { getProvisioning, deleteProvisioning } from './provisioning.js';
 import { seedDefaultReasons } from './disqualify-reasons.js';
+import { seedDefaultSourceSignals } from './source-signals.js';
 import { config } from '../config.js';
 import { deleteInstance } from '../evolution/client.js';
 import { syncGroupSubjectsDebounced } from './group-sync.js';
@@ -63,6 +64,7 @@ export async function handleConnectionEvent(pool: Pool, payload: any): Promise<b
       }
       await deleteProvisioning(pool, instance);
       await seedDefaultReasons(pool, prov.workspaceId);
+      await seedDefaultSourceSignals(pool, prov.workspaceId);
     }
   }
 
