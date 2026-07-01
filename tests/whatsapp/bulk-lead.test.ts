@@ -421,3 +421,33 @@ test('partial: não-admin ainda 403 (payload-level)', async () => {
   assert.equal(res.statusCode, 403);
   await app.close();
 });
+
+// ── Regressão: precedência erro-de-item vs duplicata em strict ────────────────
+
+test('strict: erro-de-item tem precedência sobre duplicata (byte-idêntico ao antigo)', async () => {
+  const app = Fastify({ logger: false });
+  registerWriteRoutes(app, { pool: PANIC_POOL, panelToken: PANEL_TOKEN, authz: makeAllPass() });
+  const res = await app.inject({
+    method: 'POST', url: '/whatsapp/threads/bulk-lead', headers: ACTOR_HEADERS,
+    payload: { number_id: 1, updates: [
+      { identifier: '+a', status: 'BAD' }, { identifier: '+b', status: 'lead' }, { identifier: '+b', status: 'lead' },
+    ] },
+  });
+  assert.equal(res.statusCode, 400);
+  assert.match(res.json().error, /updates\[0\] \(\+a\): status must be/);
+  await app.close();
+});
+
+test('strict: duplicata (todos itens válidos) ainda 400 duplicate identifiers', async () => {
+  const app = Fastify({ logger: false });
+  registerWriteRoutes(app, { pool: PANIC_POOL, panelToken: PANEL_TOKEN, authz: makeAllPass() });
+  const res = await app.inject({
+    method: 'POST', url: '/whatsapp/threads/bulk-lead', headers: ACTOR_HEADERS,
+    payload: { number_id: 1, updates: [
+      { identifier: '+dup', status: 'lead' }, { identifier: '+dup', status: 'not_lead' },
+    ] },
+  });
+  assert.equal(res.statusCode, 400);
+  assert.equal(res.json().error, 'duplicate identifiers');
+  await app.close();
+});

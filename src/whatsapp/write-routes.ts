@@ -115,9 +115,6 @@ export function registerWriteRoutes(
     const counts = new Map<string, number>();
     for (const u of updates) if (u && typeof u.identifier === 'string') counts.set(u.identifier, (counts.get(u.identifier) ?? 0) + 1);
     const duplicateIds = new Set([...counts].filter(([, c]) => c > 1).map(([id]) => id));
-    if (mode === 'strict' && duplicateIds.size > 0) {
-      return reply.code(400).send({ error: 'duplicate identifiers', duplicates: [...duplicateIds] });
-    }
 
     // ── 3. Validação per-item (ITEM: strict→400, partial→skip) ──────────────
     let candidates: any[] = [];
@@ -129,11 +126,16 @@ export function registerWriteRoutes(
         skipped.push({ identifier: (upd && typeof upd.identifier === 'string') ? upd.identifier : `updates[${i}]`, reason: 'invalid_field' });
         continue;
       }
-      if (duplicateIds.has(upd.identifier)) { // só alcançável em partial (strict já 400ou)
+      if (mode === 'partial' && duplicateIds.has(upd.identifier)) {
         skipped.push({ identifier: upd.identifier, reason: 'duplicate' });
         continue;
       }
       candidates.push(upd);
+    }
+
+    // Em strict, duplicatas são rejeitadas APÓS o loop per-item (precedência de erro-de-item preservada).
+    if (mode === 'strict' && duplicateIds.size > 0) {
+      return reply.code(400).send({ error: 'duplicate identifiers', duplicates: [...duplicateIds] });
     }
 
     // ── 4. Número + admin gate (PAYLOAD → 404/403) ──────────────────────────
