@@ -371,3 +371,53 @@ test('✓ bulk-lead: number not found → 404', async () => {
 // ⚠ NEEDS POSTGRES: disqualifyReason validation runs after authz gate
 //   Setup: valid admin, number exists, update with unknown disqualifyReason.
 //   Expect 400 with appropriate error message; no rows written.
+
+// =============================================================================
+// PARTIAL MODE DB-FREE TESTS ✓
+// =============================================================================
+
+test('partial: item malformado (status) vira skip, não 400; DB não alcançado sem itens válidos', async () => {
+  const app = Fastify({ logger: false });
+  registerWriteRoutes(app, { pool: makeNumberPool('ws-1'), panelToken: PANEL_TOKEN, authz: makeAllPass() });
+  const res = await app.inject({
+    method: 'POST', url: '/whatsapp/threads/bulk-lead', headers: ACTOR_HEADERS,
+    payload: { number_id: 1, mode: 'partial', updates: [{ identifier: '+x', status: 'BAD' }] },
+  });
+  assert.equal(res.statusCode, 200);
+  const b = res.json();
+  assert.equal(b.mode, 'partial'); assert.equal(b.updated, 0);
+  assert.deepEqual(b.skipped, [{ identifier: '+x', reason: 'invalid_field' }]);
+  await app.close();
+});
+
+test('partial: duplicata pula TODAS as ocorrências', async () => {
+  const app = Fastify({ logger: false });
+  registerWriteRoutes(app, { pool: makeNumberPool('ws-1'), panelToken: PANEL_TOKEN, authz: makeAllPass() });
+  const res = await app.inject({
+    method: 'POST', url: '/whatsapp/threads/bulk-lead', headers: ACTOR_HEADERS,
+    payload: { number_id: 1, mode: 'partial', updates: [
+      { identifier: '+dup', status: 'lead' }, { identifier: '+dup', status: 'not_lead' },
+    ] },
+  });
+  assert.equal(res.statusCode, 200);
+  const dupSkips = res.json().skipped.filter((s: any) => s.reason === 'duplicate');
+  assert.equal(dupSkips.length, 2, 'ambas as ocorrências do +dup em skipped');
+  await app.close();
+});
+
+test('partial: payload-level ainda 400 (>500)', async () => {
+  const app = Fastify({ logger: false });
+  registerWriteRoutes(app, { pool: PANIC_POOL, panelToken: PANEL_TOKEN, authz: makeAllPass() });
+  const updates = Array.from({ length: 501 }, (_, i) => ({ identifier: `+${i}`, status: 'lead' }));
+  const res = await app.inject({ method: 'POST', url: '/whatsapp/threads/bulk-lead', headers: ACTOR_HEADERS, payload: { number_id: 1, mode: 'partial', updates } });
+  assert.equal(res.statusCode, 400);
+  await app.close();
+});
+
+test('partial: não-admin ainda 403 (payload-level)', async () => {
+  const app = Fastify({ logger: false });
+  registerWriteRoutes(app, { pool: makeNumberPool('ws-1'), panelToken: PANEL_TOKEN, authz: makeAdminForbidden() });
+  const res = await app.inject({ method: 'POST', url: '/whatsapp/threads/bulk-lead', headers: ACTOR_HEADERS, payload: { number_id: 1, mode: 'partial', updates: [{ identifier: '+x', status: 'lead' }] } });
+  assert.equal(res.statusCode, 403);
+  await app.close();
+});

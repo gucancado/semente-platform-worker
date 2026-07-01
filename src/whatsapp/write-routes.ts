@@ -11,6 +11,17 @@ import { bulkSetLeadStatus, BulkLeadIdentifierError, BULK_LEAD_MAX } from './bul
 import { upsertDisqualifyReason, deactivateDisqualifyReason } from './disqualify-reasons.js';
 import { upsertSourceSignal, deactivateSourceSignal } from './source-signals.js';
 
+/** Validação pura per-item do bulk. Retorna a mensagem de erro (mesma de hoje) ou null. */
+function bulkItemError(upd: any, i: number): string | null {
+  if (!upd || typeof upd !== 'object') return `updates[${i}]: must be an object`;
+  if (typeof upd.identifier !== 'string' || upd.identifier.trim() === '') return `updates[${i}]: identifier is required`;
+  if (upd.status !== 'lead' && upd.status !== 'not_lead') return `updates[${i}] (${upd.identifier}): status must be 'lead' or 'not_lead'`;
+  const q = validateLeadQualifyFields({ status: upd.status, stage: upd.stage ?? null, disqualifyReason: upd.disqualifyReason ?? null });
+  if (q) return `updates[${i}] (${upd.identifier}): ${q}`;
+  if (upd.tags !== undefined && !(Array.isArray(upd.tags) && upd.tags.every((t: unknown) => typeof t === 'string'))) return `updates[${i}] (${upd.identifier}): tags must be an array of strings`;
+  return null;
+}
+
 /** Normalise and validate a disqualify-reason code. Returns null when valid; an error string otherwise. */
 function normaliseCode(raw: unknown): { code: string } | { error: string } {
   const code = String(raw ?? '').trim().toLowerCase();
@@ -81,71 +92,57 @@ export function registerWriteRoutes(
   });
 
   // ── POST /whatsapp/threads/bulk-lead ─────────────────────────────────────────
-  // Transactional batch set-lead for many threads at once (admin, all-or-nothing).
+  // Transactional batch set-lead for many threads at once (admin).
+  // mode='strict' (default): all-or-nothing — any item error aborts with 400.
+  // mode='partial': item-level errors (invalid field, duplicate, invalid reason,
+  //   unknown identifier) are collected into `skipped`; valid items proceed.
   app.post('/whatsapp/threads/bulk-lead', { preHandler: auth }, async (req: any, reply) => {
-    const { number_id, updates } = req.body ?? {};
+    const { number_id, updates, mode: rawMode } = req.body ?? {};
+    const mode: 'strict' | 'partial' = rawMode === 'partial' ? 'partial' : 'strict';
 
-    // ── 1. Actor check (before any validation or DB) ──────────────────────────
+    // ── 1. Actor (PAYLOAD → 400 nos dois modos) ─────────────────────────────
     if (!req.actingUser) return reply.code(400).send({ error: 'x-acting-user required' });
 
-    // ── 2. Pure structural validation ─────────────────────────────────────────
-    if (number_id === undefined || number_id === null) {
-      return reply.code(400).send({ error: 'number_id obrigatório' });
-    }
-    if (Number.isNaN(Number(number_id))) {
-      return reply.code(400).send({ error: 'number_id must be numeric' });
-    }
-    if (!Array.isArray(updates) || updates.length === 0) {
-      return reply.code(400).send({ error: 'updates must be a non-empty array' });
-    }
-    if (updates.length > BULK_LEAD_MAX) {
-      return reply.code(400).send({ error: `updates must not exceed ${BULK_LEAD_MAX} items` });
+    // ── 2. Estrutura (PAYLOAD → 400) ────────────────────────────────────────
+    if (number_id === undefined || number_id === null) return reply.code(400).send({ error: 'number_id obrigatório' });
+    if (Number.isNaN(Number(number_id))) return reply.code(400).send({ error: 'number_id must be numeric' });
+    if (!Array.isArray(updates) || updates.length === 0) return reply.code(400).send({ error: 'updates must be a non-empty array' });
+    if (updates.length > BULK_LEAD_MAX) return reply.code(400).send({ error: `updates must not exceed ${BULK_LEAD_MAX} items` });
+
+    const skipped: { identifier: string; reason: string }[] = [];
+
+    // ── Pré-passe de duplicatas (conta ocorrências) ─────────────────────────
+    const counts = new Map<string, number>();
+    for (const u of updates) if (u && typeof u.identifier === 'string') counts.set(u.identifier, (counts.get(u.identifier) ?? 0) + 1);
+    const duplicateIds = new Set([...counts].filter(([, c]) => c > 1).map(([id]) => id));
+    if (mode === 'strict' && duplicateIds.size > 0) {
+      return reply.code(400).send({ error: 'duplicate identifiers', duplicates: [...duplicateIds] });
     }
 
-    // Per-update pure validation: status enum + stage whitelist/coherence + tags type.
-    // Also track identifiers to reject duplicates (silent last-write-wins + overcount).
-    const seenIdentifiers = new Set<string>();
-    const duplicateIdentifiers = new Set<string>();
+    // ── 3. Validação per-item (ITEM: strict→400, partial→skip) ──────────────
+    let candidates: any[] = [];
     for (let i = 0; i < updates.length; i++) {
       const upd = updates[i];
-      if (!upd || typeof upd !== 'object') {
-        return reply.code(400).send({ error: `updates[${i}]: must be an object` });
+      const err = bulkItemError(upd, i);
+      if (err) {
+        if (mode === 'strict') return reply.code(400).send({ error: err });
+        skipped.push({ identifier: (upd && typeof upd.identifier === 'string') ? upd.identifier : `updates[${i}]`, reason: 'invalid_field' });
+        continue;
       }
-      if (typeof upd.identifier !== 'string' || upd.identifier.trim() === '') {
-        return reply.code(400).send({ error: `updates[${i}]: identifier is required` });
+      if (duplicateIds.has(upd.identifier)) { // só alcançável em partial (strict já 400ou)
+        skipped.push({ identifier: upd.identifier, reason: 'duplicate' });
+        continue;
       }
-      if (upd.status !== 'lead' && upd.status !== 'not_lead') {
-        return reply.code(400).send({ error: `updates[${i}] (${upd.identifier}): status must be 'lead' or 'not_lead'` });
-      }
-      const qualifyErr = validateLeadQualifyFields({ status: upd.status, stage: upd.stage ?? null, disqualifyReason: upd.disqualifyReason ?? null });
-      if (qualifyErr) {
-        return reply.code(400).send({ error: `updates[${i}] (${upd.identifier}): ${qualifyErr}` });
-      }
-      if (upd.tags !== undefined && !(Array.isArray(upd.tags) && upd.tags.every((t: unknown) => typeof t === 'string'))) {
-        return reply.code(400).send({ error: `updates[${i}] (${upd.identifier}): tags must be an array of strings` });
-      }
-      if (seenIdentifiers.has(upd.identifier)) duplicateIdentifiers.add(upd.identifier);
-      seenIdentifiers.add(upd.identifier);
-    }
-    // Reject duplicate identifiers: applying them sequentially is silent last-write-wins
-    // and would overcount `updated`/`identifiers`. Pure, DB-free, before the gate.
-    if (duplicateIdentifiers.size > 0) {
-      return reply.code(400).send({ error: 'duplicate identifiers', duplicates: [...duplicateIdentifiers] });
+      candidates.push(upd);
     }
 
-    // ── 3. Number existence + admin gate ──────────────────────────────────────
+    // ── 4. Número + admin gate (PAYLOAD → 404/403) ──────────────────────────
     const num = await getNumber(deps.pool, Number(number_id));
     if (!num) return reply.code(404).send({ error: 'number not found' });
     if (!await gateAdmin(req, reply, num.workspaceId, authz)) return;
 
-    // ── 4. DB-backed disqualifyReason validation (AFTER authz, no info leak) ─
-    // Batch: collect DISTINCT non-null reasons and validate in ONE query instead of
-    // up to 500 sequential round-trips. Kept after gateAdmin (no info leak).
-    const reasons = [...new Set(
-      updates
-        .map((u: any) => u.disqualifyReason)
-        .filter((r: unknown): r is string => r != null),
-    )];
+    // ── 5. Reasons (ITEM: strict→400, partial→skip) ─────────────────────────
+    const reasons = [...new Set(candidates.map((u: any) => u.disqualifyReason).filter((r: unknown): r is string => r != null))];
     if (reasons.length > 0) {
       const { rows } = await deps.pool.query<{ code: string }>(
         `SELECT code FROM whatsapp_disqualify_reasons WHERE code = ANY($1::text[]) AND active = TRUE AND workspace_id = $2`,
@@ -154,58 +151,52 @@ export function registerWriteRoutes(
       const validReasons = new Set(rows.map((r) => r.code));
       const invalidReasons = reasons.filter((r) => !validReasons.has(r));
       if (invalidReasons.length > 0) {
-        return reply.code(400).send({ error: 'invalid disqualifyReason', invalidReasons });
+        if (mode === 'strict') return reply.code(400).send({ error: 'invalid disqualifyReason', invalidReasons });
+        const invalidSet = new Set(invalidReasons);
+        candidates = candidates.filter((u) => {
+          if (u.disqualifyReason != null && invalidSet.has(u.disqualifyReason)) { skipped.push({ identifier: u.identifier, reason: 'invalid_reason' }); return false; }
+          return true;
+        });
       }
     }
 
-    // ── 5. Transactional bulk write ───────────────────────────────────────────
-    let result: { updated: number; identifiers: string[] };
+    // ── 6. Guard de subconjunto vazio (partial) ─────────────────────────────
+    if (mode === 'partial' && candidates.length === 0) {
+      logAccess(deps.pool, { actor: req.actingUser, action: 'set_lead_bulk', workspaceId: num.workspaceId, numberId: Number(number_id), meta: { count: 0, identifiers: [], mode, skippedCount: skipped.length } });
+      return reply.send({ schema: 'whatsapp_v1', ok: true, mode: 'partial', updated: 0, identifiers: [], skipped });
+    }
+
+    // ── 7. Write transacional ───────────────────────────────────────────────
+    let result: { updated: number; identifiers: string[]; skipped: { identifier: string; reason: string }[] };
     try {
       result = await bulkSetLeadStatus(deps.pool, {
-        numberId: Number(number_id),
-        workspaceId: num.workspaceId,
-        updatedBy: req.actingUser,
-        // Pass optional qualification fields THROUGH preserving `undefined`
-        // (= "not provided"). Coercing omitted→null would make applyLeadUpdate's
-        // `p.stage !== undefined` guard fire a bogus "stage cleared" meta_log row
-        // while COALESCE actually preserves the old value. Matches single route's
-        // `?? undefined` semantics.
-        updates: updates.map((u: any) => ({
-          identifier: u.identifier,
-          status: u.status as 'lead' | 'not_lead',
-          stage: u.stage,
-          temperature: u.temperature,
-          source: u.source,
-          disqualifyReason: u.disqualifyReason,
-          tags: Array.isArray(u.tags) ? u.tags : undefined,
-          notes: u.notes,
+        numberId: Number(number_id), workspaceId: num.workspaceId, updatedBy: req.actingUser, mode,
+        updates: candidates.map((u: any) => ({
+          identifier: u.identifier, status: u.status as 'lead' | 'not_lead',
+          stage: u.stage, temperature: u.temperature, source: u.source,
+          disqualifyReason: u.disqualifyReason, tags: Array.isArray(u.tags) ? u.tags : undefined, notes: u.notes,
         })),
       });
     } catch (err) {
-      if (err instanceof BulkLeadIdentifierError) {
-        return reply.code(400).send({ error: 'identifiers not found', unknownIdentifiers: err.unknownIdentifiers });
-      }
+      if (err instanceof BulkLeadIdentifierError) return reply.code(400).send({ error: 'identifiers not found', unknownIdentifiers: err.unknownIdentifiers });
       throw err;
     }
+    skipped.push(...result.skipped); // unknown_identifier (só em partial)
 
-    // Include the touched identifiers so an LGPD audit can trace which threads a
-    // bulk call affected. Cap the list to keep the log row bounded on big batches.
     const AUDIT_IDENTIFIER_CAP = 200;
     logAccess(deps.pool, {
-      actor: req.actingUser,
-      action: 'set_lead_bulk',
-      workspaceId: num.workspaceId,
-      numberId: Number(number_id),
+      actor: req.actingUser, action: 'set_lead_bulk', workspaceId: num.workspaceId, numberId: Number(number_id),
       meta: {
         count: result.updated,
         identifiers: result.identifiers.slice(0, AUDIT_IDENTIFIER_CAP),
-        ...(result.identifiers.length > AUDIT_IDENTIFIER_CAP
-          ? { identifiersTruncated: result.identifiers.length - AUDIT_IDENTIFIER_CAP }
-          : {}),
+        ...(result.identifiers.length > AUDIT_IDENTIFIER_CAP ? { identifiersTruncated: result.identifiers.length - AUDIT_IDENTIFIER_CAP } : {}),
+        mode,
+        ...(mode === 'partial' ? { skippedCount: skipped.length } : {}),
       },
     });
 
-    return reply.send({ schema: 'whatsapp_v1', ok: true, updated: result.updated, identifiers: result.identifiers });
+    const base = { schema: 'whatsapp_v1', ok: true, updated: result.updated, identifiers: result.identifiers };
+    return reply.send(mode === 'partial' ? { ...base, mode: 'partial', skipped } : base);
   });
 
   // ── POST /whatsapp/disqualify-reasons ────────────────────────────────────────
