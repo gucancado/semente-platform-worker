@@ -17,8 +17,8 @@ async function seedNumber(ws: string, instance: string, label: string | null, ph
     `INSERT INTO whatsapp_numbers (workspace_id, evolution_instance, label, phone, status) VALUES ($1,$2,$3,$4,'connected')`,
     [ws, instance, label, phone],
   );
-  const { rows: [{ id }] } = await pool.query<{ id: number }>(`SELECT id FROM whatsapp_numbers WHERE evolution_instance = $1`, [instance]);
-  return id as number;
+  const { rows: [{ id }] } = await pool.query<{ id: string }>(`SELECT id FROM whatsapp_numbers WHERE evolution_instance = $1`, [instance]);
+  return Number(id); // whatsapp_numbers.id é bigint → pg devolve string; a resposta ecoa number (getNumber faz Number(r.id))
 }
 
 beforeEach(async () => {
