@@ -11,6 +11,7 @@ import { defaultRouteAuthz, gateMember, gateAdmin, type RouteAuthz } from './rou
 import { listAccessLog, RELEVANT_ACTIONS } from './audit-queries.js';
 import { logAccess as defaultLogAccess, type LogAccessFn } from './access-log.js';
 import { emptyToUndefined } from './query-coerce.js';
+import { tenantContext } from './tenant-context.js';
 
 export function registerReadRoutes(
   app: FastifyInstance,
@@ -30,7 +31,7 @@ export function registerReadRoutes(
     const includeRemoved = inc === 'true' || inc === '1' || inc === 'yes';
     const numbers = await listNumbers(deps.pool, ws, { includeRemoved });
     logAccess(deps.pool, { actor: req.actingUser, action: 'list_numbers', workspaceId: ws });
-    return reply.send({ schema: 'whatsapp_v1', numbers });
+    return reply.send({ schema: 'whatsapp_v1', context: tenantContext({ workspaceId: ws }), numbers });
   });
 
   // ── GET /whatsapp/threads ────────────────────────────────────────────────────
@@ -61,8 +62,11 @@ export function registerReadRoutes(
       until: emptyToUndefined(until),
       periodBasis,
     });
+    const numForCtx = await getNumber(deps.pool, Number(number_id));
+    const ctx = numForCtx && numForCtx.workspaceId === workspace_id
+      ? tenantContext(numForCtx) : tenantContext({ workspaceId: workspace_id });
     logAccess(deps.pool, { actor: req.actingUser, action: 'list_threads', workspaceId: workspace_id, numberId: Number(number_id) });
-    return reply.send({ schema: 'whatsapp_v1', ...result });
+    return reply.send({ schema: 'whatsapp_v1', context: ctx, ...result });
   });
 
   // ── GET /whatsapp/stats ──────────────────────────────────────────────────────
@@ -88,6 +92,14 @@ export function registerReadRoutes(
       periodBasis,
       kind: k,
     });
+    let ctx;
+    if (number_id !== undefined) {
+      const numForCtx = await getNumber(deps.pool, Number(number_id));
+      ctx = numForCtx && numForCtx.workspaceId === workspace_id
+        ? tenantContext(numForCtx) : tenantContext({ workspaceId: workspace_id });
+    } else {
+      ctx = tenantContext({ workspaceId: workspace_id });
+    }
     // Omit `meta` entirely: access-log serialises a truthy `{}` to the literal
     // string '{}' instead of NULL. The stats route has no meta payload, so leave
     // it undefined to store NULL like the other reads.
@@ -97,7 +109,7 @@ export function registerReadRoutes(
       workspaceId: workspace_id,
       numberId: number_id !== undefined ? Number(number_id) : null,
     });
-    return reply.send({ schema: 'whatsapp_v1', ...stats });
+    return reply.send({ schema: 'whatsapp_v1', context: ctx, ...stats });
   });
 
   // ── GET /whatsapp/threads/:identifier/messages ───────────────────────────────
@@ -114,7 +126,7 @@ export function registerReadRoutes(
     if (!await gateMember(req, reply, num.workspaceId, authz)) return;
     const result = await listThreadMessages(deps.pool, { workspaceId: num.workspaceId, numberId: Number(number_id), identifier: req.params.identifier, limit: Number(limit ?? 50), cursor });
     logAccess(deps.pool, { actor: req.actingUser, action: 'thread_messages', workspaceId: num.workspaceId, numberId: Number(number_id), identifier: req.params.identifier });
-    return reply.send({ schema: 'whatsapp_v1', ...result });
+    return reply.send({ schema: 'whatsapp_v1', context: tenantContext(num), ...result });
   });
 
   // ── GET /whatsapp/search ─────────────────────────────────────────────────────
@@ -133,8 +145,11 @@ export function registerReadRoutes(
       leadSource: emptyToUndefined(lead_source),
       tag: emptyToUndefined(tag),
     });
+    const numForCtx = await getNumber(deps.pool, Number(number_id));
+    const ctx = numForCtx && numForCtx.workspaceId === workspace_id
+      ? tenantContext(numForCtx) : tenantContext({ workspaceId: workspace_id });
     logAccess(deps.pool, { actor: req.actingUser, action: 'search', workspaceId: workspace_id, numberId: Number(number_id), meta: { query, count: result.results.length } });
-    return reply.send({ schema: 'whatsapp_v1', ...result });
+    return reply.send({ schema: 'whatsapp_v1', context: ctx, ...result });
   });
 
   // ── GET /whatsapp/disqualify-reasons ─────────────────────────────────────────
@@ -147,7 +162,7 @@ export function registerReadRoutes(
     const includeInactive = inc === 'true' || inc === '1' || inc === 'yes';
     const reasons = await listDisqualifyReasons(deps.pool, { workspaceId: workspace_id, includeInactive });
     logAccess(deps.pool, { actor: req.actingUser, action: 'list_disqualify_reasons', workspaceId: workspace_id });
-    return reply.send({ schema: 'whatsapp_v1', reasons });
+    return reply.send({ schema: 'whatsapp_v1', context: tenantContext({ workspaceId: workspace_id }), reasons });
   });
 
   // ── GET /whatsapp/source-signals ─────────────────────────────────────────────
@@ -159,7 +174,7 @@ export function registerReadRoutes(
     const inc = typeof include_inactive === 'string' ? ['true', '1', 'yes'].includes(include_inactive.toLowerCase()) : false;
     const signals = await listSourceSignals(deps.pool, { workspaceId: workspace_id, includeInactive: inc });
     logAccess(deps.pool, { actor: req.actingUser, action: 'list_source_signals', workspaceId: workspace_id });
-    return reply.send({ schema: 'whatsapp_v1', signals });
+    return reply.send({ schema: 'whatsapp_v1', context: tenantContext({ workspaceId: workspace_id }), signals });
   });
 
   // ── GET /whatsapp/threads/:identifier/export ─────────────────────────────────
@@ -178,7 +193,7 @@ export function registerReadRoutes(
     if (!await gateMember(req, reply, num.workspaceId, authz)) return;
     const out = await exportConversation(deps.pool, { workspaceId: num.workspaceId, numberId: Number(number_id), identifier: req.params.identifier, since, until, maxMessages: max_messages ? Number(max_messages) : undefined });
     logAccess(deps.pool, { actor: req.actingUser, action: 'export', workspaceId: num.workspaceId, numberId: Number(number_id), identifier: req.params.identifier, meta: { messageCount: out.messageCount } });
-    return reply.send({ schema: 'whatsapp_v1', ...out });
+    return reply.send({ schema: 'whatsapp_v1', context: tenantContext(num), ...out });
   });
 
   // ── GET /whatsapp/audit ───────────────────────────────────────────────────────
@@ -205,6 +220,6 @@ export function registerReadRoutes(
       cursor: emptyToUndefined(cursor),
     });
     logAccess(deps.pool, { actor: req.actingUser, action: 'list_audit', workspaceId: workspace_id, numberId: number_id !== undefined ? Number(number_id) : null });
-    return reply.send({ schema: 'whatsapp_v1', ...result });
+    return reply.send({ schema: 'whatsapp_v1', context: tenantContext({ workspaceId: workspace_id }), ...result });
   });
 }
