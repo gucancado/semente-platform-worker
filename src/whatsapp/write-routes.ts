@@ -10,6 +10,7 @@ import { validateLeadQualifyFields, validateDisqualifyReason } from './lead-qual
 import { bulkSetLeadStatus, BulkLeadIdentifierError, BULK_LEAD_MAX } from './bulk-lead.js';
 import { upsertDisqualifyReason, deactivateDisqualifyReason } from './disqualify-reasons.js';
 import { upsertSourceSignal, deactivateSourceSignal } from './source-signals.js';
+import { tenantContext } from './tenant-context.js';
 
 /** Validação pura per-item do bulk. Retorna a mensagem de erro (mesma de hoje) ou null. */
 function bulkItemError(upd: any, i: number): string | null {
@@ -88,7 +89,7 @@ export function registerWriteRoutes(
     // Auditoria, se um "não persistiu" futuro foi o cliente NÃO enviar o campo vs falha
     // de gravação. `notes` fica de fora de propósito (texto livre/PII — minimização LGPD).
     logAccess(deps.pool, { actor: req.actingUser, action: 'set_lead', workspaceId: num.workspaceId, numberId: Number(number_id), identifier: req.params.identifier, meta: { status, stage, source, temperature, disqualifyReason, tags } });
-    return reply.send({ schema: 'whatsapp_v1', ok: true, identifier: req.params.identifier, leadStatus: status });
+    return reply.send({ schema: 'whatsapp_v1', context: tenantContext(num), ok: true, identifier: req.params.identifier, leadStatus: status });
   });
 
   // ── POST /whatsapp/threads/bulk-lead ─────────────────────────────────────────
@@ -165,7 +166,7 @@ export function registerWriteRoutes(
     // ── 6. Guard de subconjunto vazio (partial) ─────────────────────────────
     if (mode === 'partial' && candidates.length === 0) {
       logAccess(deps.pool, { actor: req.actingUser, action: 'set_lead_bulk', workspaceId: num.workspaceId, numberId: Number(number_id), meta: { count: 0, identifiers: [], mode, skippedCount: skipped.length } });
-      return reply.send({ schema: 'whatsapp_v1', ok: true, mode: 'partial', updated: 0, identifiers: [], skipped });
+      return reply.send({ schema: 'whatsapp_v1', context: tenantContext(num), ok: true, mode: 'partial', updated: 0, identifiers: [], skipped });
     }
 
     // ── 7. Write transacional ───────────────────────────────────────────────
@@ -197,7 +198,7 @@ export function registerWriteRoutes(
       },
     });
 
-    const base = { schema: 'whatsapp_v1', ok: true, updated: result.updated, identifiers: result.identifiers };
+    const base = { schema: 'whatsapp_v1', context: tenantContext(num), ok: true, updated: result.updated, identifiers: result.identifiers };
     return reply.send(mode === 'partial' ? { ...base, mode: 'partial', skipped } : base);
   });
 
@@ -220,7 +221,7 @@ export function registerWriteRoutes(
       createdBy: req.actingUser,
     });
     logAccess(deps.pool, { actor: req.actingUser, action: 'upsert_disqualify_reason', workspaceId: workspace_id, meta: { code, reactivated } });
-    return reply.send({ schema: 'whatsapp_v1', ok: true, reactivated });
+    return reply.send({ schema: 'whatsapp_v1', context: tenantContext({ workspaceId: workspace_id }), ok: true, reactivated });
   });
 
   // ── POST /whatsapp/disqualify-reasons/:code/deactivate ───────────────────────
@@ -234,7 +235,7 @@ export function registerWriteRoutes(
     if (!await gateAdmin(req, reply, workspace_id, authz)) return;
     await deactivateDisqualifyReason(deps.pool, { workspaceId: workspace_id, code });
     logAccess(deps.pool, { actor: req.actingUser, action: 'deactivate_disqualify_reason', workspaceId: workspace_id, meta: { code } });
-    return reply.send({ schema: 'whatsapp_v1', ok: true });
+    return reply.send({ schema: 'whatsapp_v1', context: tenantContext({ workspaceId: workspace_id }), ok: true });
   });
 
   // ── POST /whatsapp/source-signals ────────────────────────────────────────────
@@ -253,7 +254,7 @@ export function registerWriteRoutes(
     if (!await gateAdmin(req, reply, workspace_id, authz)) return;
     await upsertSourceSignal(deps.pool, { workspaceId: workspace_id, pattern, source });
     logAccess(deps.pool, { actor: req.actingUser, action: 'upsert_source_signal', workspaceId: workspace_id, meta: { pattern, source } });
-    return reply.send({ schema: 'whatsapp_v1', ok: true });
+    return reply.send({ schema: 'whatsapp_v1', context: tenantContext({ workspaceId: workspace_id }), ok: true });
   });
 
   // ── POST /whatsapp/source-signals/:pattern/deactivate ────────────────────────
@@ -265,6 +266,6 @@ export function registerWriteRoutes(
     if (!await gateAdmin(req, reply, workspace_id, authz)) return;
     await deactivateSourceSignal(deps.pool, { workspaceId: workspace_id, pattern });
     logAccess(deps.pool, { actor: req.actingUser, action: 'deactivate_source_signal', workspaceId: workspace_id, meta: { pattern } });
-    return reply.send({ schema: 'whatsapp_v1', ok: true });
+    return reply.send({ schema: 'whatsapp_v1', context: tenantContext({ workspaceId: workspace_id }), ok: true });
   });
 }

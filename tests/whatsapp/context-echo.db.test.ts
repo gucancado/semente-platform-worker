@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import Fastify from 'fastify';
 import { pool } from '../../src/db.js';
 import { registerReadRoutes } from '../../src/whatsapp/read-routes.js';
+import { registerWriteRoutes } from '../../src/whatsapp/write-routes.js';
+import { registerProvisionRoutes } from '../../src/whatsapp/provision-routes.js';
 
 const passAuthz = { assertMember: async () => {}, assertAdmin: async () => {} };
 function buildApp() {
@@ -93,4 +95,62 @@ test('/whatsapp/disqualify-reasons e /source-signals ecoam context workspace-onl
   assert.deepEqual(dr.json().context, { workspaceId: 'ws-1', number: null });
   const ss = await buildApp().inject({ method: 'GET', url: '/whatsapp/source-signals?workspace_id=ws-1', headers: H });
   assert.deepEqual(ss.json().context, { workspaceId: 'ws-1', number: null });
+});
+
+function buildWriteApp() {
+  const app = Fastify();
+  registerWriteRoutes(app, { pool, panelToken: 'test-panel', authz: passAuthz });
+  return app;
+}
+
+test('POST /whatsapp/threads/:id/lead ecoa context derivado do number', async () => {
+  const id = await seedNumber('ws-1', 'i1', 'Com', '+5511900000001');
+  await pool.query(
+    `INSERT INTO messages (whatsapp_number_id, workspace_id, channel, identifier, direction, text, created_at)
+     VALUES ($1,'ws-1','whatsapp','+5511988887777','inbound','oi', NOW())`, [id]);
+  const res = await buildWriteApp().inject({
+    method: 'POST', url: `/whatsapp/threads/${encodeURIComponent('+5511988887777')}/lead`,
+    headers: { ...H, 'content-type': 'application/json' },
+    payload: { number_id: id, status: 'lead' },
+  });
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(res.json().context, { workspaceId: 'ws-1', number: { id, label: 'Com', phone: '+5511900000001' } });
+  assert.equal(res.json().ok, true);
+});
+
+test('POST /whatsapp/threads/bulk-lead ecoa context derivado do number', async () => {
+  const id = await seedNumber('ws-1', 'i1', 'Com', '+5511900000001');
+  await pool.query(
+    `INSERT INTO messages (whatsapp_number_id, workspace_id, channel, identifier, direction, text, created_at)
+     VALUES ($1,'ws-1','whatsapp','+5511988887777','inbound','oi', NOW())`, [id]);
+  const res = await buildWriteApp().inject({
+    method: 'POST', url: '/whatsapp/threads/bulk-lead',
+    headers: { ...H, 'content-type': 'application/json' },
+    payload: { number_id: id, updates: [{ identifier: '+5511988887777', status: 'lead' }] },
+  });
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(res.json().context, { workspaceId: 'ws-1', number: { id, label: 'Com', phone: '+5511900000001' } });
+});
+
+function buildProvisionApp() {
+  const app = Fastify();
+  registerProvisionRoutes(app, {
+    pool,
+    evolution: {} as any,           // group-exposure não usa evolution
+    panelToken: 'test-panel',
+    webhook: { url: 'http://x', secret: 's' },
+  });
+  return app;
+}
+
+test('POST /admin/whatsapp/numbers/:id/group-exposure ecoa context', async () => {
+  const id = await seedNumber('ws-1', 'i1', 'Com', '+5511900000001');
+  const res = await buildProvisionApp().inject({
+    method: 'POST', url: `/admin/whatsapp/numbers/${id}/group-exposure`,
+    headers: { 'x-panel-token': 'test-panel', 'content-type': 'application/json' },
+    payload: { expose: true },
+  });
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(res.json().context, { workspaceId: 'ws-1', number: { id, label: 'Com', phone: '+5511900000001' } });
+  assert.equal(res.json().expose_groups_in_mcp, true);
 });

@@ -1,96 +1,58 @@
-# Task 3 Report — Módulo `disqualify-reasons.ts` (queries puras)
+# Task 3 Report — Echo de `context` nas rotas de escrita e provisionamento (worker)
 
 ## Status
-DONE — typecheck EXIT 0, módulo implementado, testes escritos.
+DONE (implementação + typecheck). DB tests NOT run — no Postgres in this environment.
 
-## Arquivos criados
-- `src/whatsapp/disqualify-reasons.ts` — módulo de queries puras (4 funções)
-- `tests/whatsapp/disqualify-reasons.test.ts` — suite de testes (server-gated)
+## Arquivos tocados
+- `src/whatsapp/write-routes.ts`
+- `src/whatsapp/provision-routes.ts`
+- `tests/whatsapp/context-echo.db.test.ts` (append)
 
-## Funções implementadas
+## Implementação — write-routes.ts
+- Import: `import { tenantContext } from './tenant-context.js';`
+- `POST /whatsapp/threads/:identifier/lead` — send final: `context: tenantContext(num)` (reusa `num` já buscado via `getNumber`).
+- `POST /whatsapp/threads/bulk-lead` — dois `reply.send` de sucesso ecoam `context: tenantContext(num)`:
+  - early-return do subconjunto vazio (`mode === 'partial' && candidates.length === 0`)
+  - `base` usado no send final (cobre tanto `mode: 'strict'` quanto `'partial'`, já que `base` é espalhado em ambos)
+- `POST /whatsapp/disqualify-reasons` — `context: tenantContext({ workspaceId: workspace_id })` (workspace-only, sem number).
+- `POST /whatsapp/disqualify-reasons/:code/deactivate` — idem.
+- `POST /whatsapp/source-signals` — idem.
+- `POST /whatsapp/source-signals/:pattern/deactivate` — idem.
 
-### `listDisqualifyReasons(pool, { workspaceId, includeInactive })`
-LEFT JOIN com `whatsapp_disqualify_reason_defaults` para obter `sort_order`;
-`COALESCE(d.sort_order, 999)` faz códigos customizados ordenarem por último, depois por `r.code`.
-Filtro `AND r.active = TRUE` omitido quando `includeInactive=true`.
-Mapeamento: `active === true` (boolean estrito), `sortOrder` via `Number()`.
+## Implementação — provision-routes.ts
+- Import: `import { tenantContext } from './tenant-context.js';`
+- `POST /admin/whatsapp/numbers/:id/sync-groups` — `context: tenantContext(n)` prefixado antes de `...out`, preservando todos os campos originais.
+- `POST /admin/whatsapp/numbers/:id/backfill` — `context: tenantContext(n)` prefixado, campos `started/numberId/days/maxPages/sinceTs` preservados intactos.
+- `POST /admin/whatsapp/numbers/:id/group-exposure` — `context: tenantContext(n)` prefixado, `id`/`expose_groups_in_mcp` preservados.
+- Nenhuma rota 4xx/5xx (`not found`, `deprecated`, etc.) foi tocada — `context` só em sucesso 2xx, como exigido.
 
-### `upsertDisqualifyReason(pool, { workspaceId, code, label, createdBy })`
-CTE `prev` captura `active` antes do upsert. `RETURNING (SELECT prev_active FROM prev)`:
-- `NULL` → linha nova → `reactivated: false`
-- `true` → já estava ativa → `reactivated: false`
-- `false` → estava inativa → `reactivated: true`
+## Testes (append em context-echo.db.test.ts)
+Adicionados exatamente conforme o brief:
+- imports de `registerWriteRoutes`/`registerProvisionRoutes`
+- helper `buildWriteApp()` (reusa `pool`/`passAuthz` já existentes no arquivo)
+- teste `POST /whatsapp/threads/:id/lead ecoa context derivado do number`
+- teste `POST /whatsapp/threads/bulk-lead ecoa context derivado do number`
+- helper `buildProvisionApp()` (evolution dummy `{} as any`, webhook dummy)
+- teste `POST /admin/whatsapp/numbers/:id/group-exposure ecoa context`
 
-Não usa `xmax<>0` (inseguro: detecta UPDATE vs INSERT, não reativação).
-`created_by` só é escrito no INSERT; DO UPDATE não toca o campo (preserva criador original).
+### Desvio do brief (corrigido, não verbatim)
+O teste de `group-exposure` no brief tinha `headers: { 'content-type': 'application/json' }` — **sem** `x-panel-token`. `registerProvisionRoutes` registra um hook `preHandler` que exige `x-panel-token` para qualquer rota sob `/admin/whatsapp/` (confirmado contra todos os testes existentes em `provision-routes.test.ts`, que sempre enviam esse header). Sem ele, a request cairia em 401 antes mesmo de chegar na rota — um bug de auth no teste, não relacionado ao echo de `context`. Corrigido para `headers: { 'x-panel-token': 'test-panel', 'content-type': 'application/json' }`. Sinalizando explicitamente essa mudança em relação ao texto literal do brief.
 
-### `deactivateDisqualifyReason(pool, { workspaceId, code })`
-UPDATE simples. Idempotente: zero linhas afetadas não lança erro.
+Não foram testados por inject: `backfill` e `sync-groups` (disparam chamadas reais/pendentes ao Evolution) — conforme instrução do brief, validados só por typecheck + revisão manual do diff (ver acima, campos preservados).
 
-### `seedDefaultReasons(pool, workspaceId)`
-`INSERT INTO ... SELECT FROM whatsapp_disqualify_reason_defaults ... ON CONFLICT DO NOTHING`.
-Idempotente por design — segunda chamada não duplica nenhum row.
+## Typecheck
+`npm run typecheck` (tsc --noEmit) → saída vazia, exit 0, sem erros novos.
 
-## Testes (RED/GREEN)
+## DB tests — NÃO EXECUTADOS
+Ambiente sem Postgres disponível. Os testes em `tests/whatsapp/context-echo.db.test.ts` (incluindo os 3 novos) requerem banco real (TRUNCATE, INSERT, embedded-postgres) e não puderam ser rodados aqui. Ficam pendentes de execução pelo controller (ex.: harness `scratchpad/pgtest/run2.mjs` documentado na memória do projeto, ou suíte no servidor).
 
-### RED
-Antes de criar o módulo: `import ... from '../../src/whatsapp/disqualify-reasons.js'`
-falha com `ERR_MODULE_NOT_FOUND` (runtime) e `tsc` reporta erro de tipo (compile-time).
+## Self-review
+- Todos os 8 pontos de edição do brief foram aplicados palavra-por-palavra (exceto o fix de header no teste de group-exposure, documentado acima).
+- Confirmado por `git diff` que nenhum `reply.code(4xx/5xx).send()` foi tocado.
+- `bulk-lead`: os DOIS sends de sucesso (early-return vazio + `base`) usam `tenantContext(num)` — o `num` é o mesmo objeto buscado uma única vez via `getNumber`, então ambos os pontos refletem o mesmo tenant.
+- `backfill`/`sync-groups`: todos os campos pré-existentes no `reply.send` foram preservados; só `context` foi prefixado logo após `schema`.
+- Nenhuma rota nova de importação de `tenant-context.js` conflita com imports já existentes.
 
-### GREEN (requer Postgres no servidor)
-- `listDisqualifyReasons`: retorna só ativos por default; `includeInactive=true` retorna todos;
-  `interno_equipe` (sort_order=1) vem primeiro, código custom (sem default) vem por último com sortOrder=999.
-- `upsertDisqualifyReason`: novo → `reactivated:false`; deactivate+upsert → `reactivated:true`;
-  relabel de ativo → `reactivated:false` e label atualizado.
-- `deactivateDisqualifyReason`: não lança para código ausente nem para já inativo.
-- `seedDefaultReasons`: duas chamadas consecutivas → count=11 (sem duplicatas); todos ativos.
-
-### Verificação local
-`pnpm typecheck` (tsc --noEmit) → EXIT 0, zero erros. Suite completa roda no servidor via DATABASE_URL.
-
-## Preocupações / observações
-- Nenhuma preocupação. Implementação direta, reactivation semantics corretas nos 3 casos.
-- `whatsapp_disqualify_reason_defaults` não é truncada nos testes (migration 037 já popula
-  no servidor com 11 rows estáveis); testes limpam só `whatsapp_disqualify_reasons` por workspace de teste.
-
----
-
-## Fix 1 — Qualidade pós-entrega (2026-06-25)
-
-### O que mudou
-
-**`src/whatsapp/disqualify-reasons.ts` — `upsertDisqualifyReason`**
-- Substituído `rows[0]?.prev_active` (optional chaining silencioso) por:
-  ```ts
-  const row = rows[0];
-  if (!row) throw new Error('upsertDisqualifyReason: no row returned');
-  return { reactivated: row.prev_active === false };
-  ```
-- `INSERT ... ON CONFLICT DO UPDATE ... RETURNING` sempre retorna exatamente uma linha;
-  o optional chaining mascarava um estado impossível como "linha nova". Agora a invariante é
-  expressa explicitamente: se o DB violar a promessa, o erro é óbvio em vez de silencioso.
-  Comportamento nos 3 casos reais (NULL/true/false) é idêntico.
-
-**`tests/whatsapp/disqualify-reasons.test.ts` — teste de `deactivateDisqualifyReason`**
-- Adicionado novo teste `'deactivateDisqualifyReason: marca active=FALSE no DB'` antes do
-  teste de idempotência existente.
-- O novo teste: insere linha ativa, chama `deactivateDisqualifyReason`, consulta o DB
-  diretamente e asserta `active === false`; depois chama uma segunda vez e confirma que
-  `active` continua `false` e não lança.
-- Teste anterior (`'idempotente (já inativo ou ausente não falha)'`) mantido intacto.
-
-### Por que o teste fortalecido prova comportamento real
-
-O novo teste executa contra Postgres real (via `DATABASE_URL` no servidor):
-- `pool.query` real faz um UPDATE concreto — não há mock de retorno.
-- A consulta de verificação `SELECT active FROM ...` após o UPDATE lê o estado persistido
-  no banco, não um valor em memória, provando que o UPDATE efetivamente escreveu `FALSE`
-  na coluna.
-- A segunda chamada com verificação posterior prova idempotência observável no DB, não
-  apenas ausência de exceção.
-
-### Typecheck
-`pnpm typecheck` (tsc --noEmit) → EXIT 0, zero erros.
-
-### Arquivo de teste
-`tests/whatsapp/disqualify-reasons.test.ts`
+## Concerns
+- DB tests não executados (sem Postgres) — pendente de validação pelo controller antes de considerar a task fechada com PASS real.
+- Um desvio do texto literal do brief foi necessário (header `x-panel-token` faltando no teste de group-exposure); ver seção "Desvio do brief" acima para justificativa.

@@ -7,6 +7,7 @@ import { createEvolutionInstance, ensureEvolutionInstance, getQrCode, logoutInst
 import { syncGroupSubjects } from './group-sync.js';
 import { backfillNumber } from './backfill.js';
 import { setGroupExposure } from './thread-meta.js';
+import { tenantContext } from './tenant-context.js';
 
 const PROVISION_TTL_SECONDS = 90;
 
@@ -126,7 +127,7 @@ export function registerProvisionRoutes(app: FastifyInstance, deps: { pool: Pool
     const n = await getNumber(deps.pool, Number(req.params.id));
     if (!n) return reply.code(404).send({ error: 'not found' });
     const out = await syncGroupSubjects(deps.pool, deps.evolution, n.id);
-    return reply.send({ schema: 'whatsapp_v1', ...out });
+    return reply.send({ schema: 'whatsapp_v1', context: tenantContext(n), ...out });
   });
 
   app.post('/admin/whatsapp/numbers/:id/backfill', async (req: any, reply) => {
@@ -138,7 +139,7 @@ export function registerProvisionRoutes(app: FastifyInstance, deps: { pool: Pool
     // Background fire-and-forget — pode demorar (muitas páginas). Idempotente (dedup), pode re-disparar.
     backfillNumber(deps.pool, deps.evolution, n.id, { sinceTs, maxPages, log: (m) => req.log.info(m) })
       .catch((err) => req.log.error({ err: (err as Error).message }, '[backfill] falhou'));
-    return reply.send({ schema: 'whatsapp_v1', started: true, numberId: n.id, days, maxPages, sinceTs });
+    return reply.send({ schema: 'whatsapp_v1', context: tenantContext(n), started: true, numberId: n.id, days, maxPages, sinceTs });
   });
 
   app.post('/admin/whatsapp/numbers/:id/group-exposure', async (req: any, reply) => {
@@ -146,6 +147,6 @@ export function registerProvisionRoutes(app: FastifyInstance, deps: { pool: Pool
     if (!n) return reply.code(404).send({ error: 'not found' });
     const expose = req.body?.expose === true;
     await setGroupExposure(deps.pool, { numberId: n.id, expose });
-    return reply.send({ schema: 'whatsapp_v1', id: n.id, expose_groups_in_mcp: expose });
+    return reply.send({ schema: 'whatsapp_v1', context: tenantContext(n), id: n.id, expose_groups_in_mcp: expose });
   });
 }
