@@ -138,9 +138,16 @@ Cada `reply.send({ schema: 'whatsapp_v1', ... })` das rotas WhatsApp passa a inc
   indexada, barata. As demais reusam objeto já carregado ou não têm número.
 - **Ordem vs. authz:** onde a rota é workspace-scoped (`/threads`, `/search`, `/stats`), o
   `getNumber` para o context roda **após** o `gateMember` (não antes) — não introduzir lookup de
-  número antes do gate de autorização. O `number_id` já é validado (numérico) e filtrado no SQL
-  por `workspace_id`; se `getNumber` retornar `null` (número inexistente/de outro workspace), o
-  `context.number` vira `null` e a query segue devolvendo vazio como hoje (sem vazar existência).
+  número antes do gate de autorização.
+- **Guard anti-leak nas rotas workspace-scoped (importante):** nessas rotas o `context.number` só é
+  preenchido se `getNumber(number_id).workspaceId === workspace_id` **validado**. Se o número não
+  existir OU pertencer a outro workspace, `context.number = null`. Sem esse guard, um membro de A
+  passando um `number_id` de B (o `gateMember(A)` passa; o SQL filtra vazio, sem vazar dados) ainda
+  veria **label/phone do número de B** no context — pequeno vazamento cross-workspace. O guard
+  fecha isso e é consistente com "workspaceId = o validado" nessas rotas. (Nas rotas
+  number-derived — `/messages`, `/export`, `/lead`, `/bulk-lead`, `/group-exposure`, `/backfill` —
+  não há mismatch possível: o workspace É derivado do próprio número, então `tenantContext(num)`
+  direto.)
 
 ### 4.3 MCP (bloquim-mcp)
 
