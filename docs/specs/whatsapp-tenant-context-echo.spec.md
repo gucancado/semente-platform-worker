@@ -33,10 +33,10 @@ O que falta é a âncora de tenant **no dado**.
 ## 2. Escopo
 
 - **Worker:** injetar um bloco `context` em **todo** envelope `whatsapp_v1` das rotas WhatsApp
-  (leitura + escrita + `group-exposure`), via helper único.
-- **MCP:** **zero mudança de comportamento de runtime** — as tools já fazem `textResult(data)` e
-  passam a ecoar `context` automaticamente. (Ajuste opcional só em descrições de tool e 1 teste
-  de passthrough.)
+  (leitura + escrita + `group-exposure` + `backfill`), via helper único.
+- **MCP:** 11 das 12 tools herdam `context` por passthrough (`textResult(data)`) — **sem mudança**.
+  A exceção é o short-circuit local `groups_not_exposed` (`export`/`thread_messages`), que **exige**
+  injeção manual do `context` (mudança pequena: estender `resolveNumber` + helper). Ver 4.3.
 - **Testes:** asserções de `context` na suíte com Postgres efêmero do worker
   (`tests/whatsapp/*.db.test.ts`).
 
@@ -63,14 +63,27 @@ O que falta é a âncora de tenant **no dado**.
   ```
 - **`context` é O(1) por resposta** (uma vez por envelope, nunca por item). Custo de tokens
   irrisório mesmo em respostas paginadas grandes → **não suprimir em resposta nenhuma**.
-- **Campos do `number`: `id` + `label` + `phone`** (owner escolheu os 3). `phone` é o número do
-  **próprio workspace** (não do lead/cliente) e já é exposto por `list_numbers`. `label` pode ser
-  `null` (número sem rótulo) — nesse caso vem `null`, sem fallback.
+- **`context` só em respostas de sucesso (2xx).** Respostas de erro (400/404/500 — `workspace_id`
+  ausente, `number_id` não-numérico, actor ausente, número inexistente, gate negado) **não**
+  carregam `context`: o workspace pode nem ser válido, e o agente já sabe o que chamou. Os
+  critérios de aceite e testes valem para o caminho 2xx. (Refino Codex.)
+- **Campos do `number`: `id` + `label` + `phone`** (owner escolheu os 3, mantido após revisão).
+  `phone` é o número do **próprio workspace** (não do lead/cliente) e já é exposto por
+  `list_numbers`. `label` pode ser `null` (número sem rótulo) — nesse caso vem `null`, sem
+  fallback.
+  > **Dissídio do reviewer (Codex):** recomendou cortar `phone`, argumentando que o `context` vai
+  > no corpo de toda resposta HTTP (logável em Coolify/proxies em cada chamada) e que `number.id`
+  > já basta como âncora técnica + `label` como rótulo humano. **Decisão do owner: manter `phone`**
+  > — é o número da própria empresa (não de terceiro), já exposto em `list_numbers`, e o rótulo
+  > mais citável pelo agente. Reversível trivialmente (dropar 1 campo) se mudar de ideia.
 - **`number: null`** nas rotas sem número específico: `/stats` sem `number_id`, `/numbers`,
-  `/disqualify-reasons`, `/source-signals`. Nessas, `workspaceId` presente e `number` nulo (o
-  array `numbers` já traz os detalhes por número em `list_numbers`).
+  `/disqualify-reasons`, `/source-signals`, `/audit`. Nessas, `workspaceId` presente e `number`
+  nulo (o array `numbers` já traz os detalhes por número em `list_numbers`).
+- **`/audit` sempre `number: null`, mesmo com `number_id` de filtro.** A rota aceita `number_id`
+  opcional como filtro, mas o `context.number` fica `null` de propósito (simplificação): o número
+  efetivamente filtrado aparece em cada `entries[].numberId` do payload. (Refino Codex.)
 - **Autoridade do `workspaceId`:** onde a rota **deriva** o workspace do `number_id` (`/messages`,
-  `/export`, `/lead`, `/bulk-lead`, `/group-exposure`), o `context.workspaceId` vem do
+  `/export`, `/lead`, `/bulk-lead`, `/group-exposure`, `/backfill`), o `context.workspaceId` vem do
   `num.workspaceId` derivado (autoritativo), **não** do `workspace_id` do query/body. Onde a rota
   é workspace-scoped por query (`/threads`, `/stats`, `/search`, `/numbers`, reasons, signals), vem
   do `workspace_id` já validado pelo `gateMember`/`gateAdmin`.
@@ -110,11 +123,16 @@ Cada `reply.send({ schema: 'whatsapp_v1', ... })` das rotas WhatsApp passa a inc
 | `GET /whatsapp/numbers` | n/a | `tenantContext({ workspaceId })` (`number: null`) |
 | `GET /whatsapp/disqualify-reasons` | n/a | `tenantContext({ workspaceId })` |
 | `GET /whatsapp/source-signals` | n/a | `tenantContext({ workspaceId })` |
-| `GET /whatsapp/audit` | não | `tenantContext({ workspaceId })` (número opcional; manter simples: `number: null`) |
+| `GET /whatsapp/audit` | não | `tenantContext({ workspaceId })` (número opcional; sempre `number: null`) |
 | `POST /whatsapp/threads/:id/lead` | **sim** (`num`) | reuso → `tenantContext(num)` |
 | `POST /whatsapp/threads/bulk-lead` | **sim** (`num`) | reuso → `tenantContext(num)` |
 | `POST /admin/whatsapp/numbers/:id/group-exposure` | **sim** (`n`) | reuso → `tenantContext(n)` |
+| `POST /admin/whatsapp/numbers/:id/backfill` (`provision-routes.ts:133`) | **sim** (`n`) | reuso → `tenantContext(n)` |
 | reasons/signals `POST` (upsert/deactivate) | n/a | `tenantContext({ workspaceId })` |
+
+> **Rota `backfill`** (`provision-routes.ts:133`) também retorna `schema: 'whatsapp_v1'` e tem `n`
+> carregado; incluída para consistência do contrato (não tem tool MCP exposta — é admin-only, mas
+> o envelope REST fica uniforme). (Refino Codex.)
 
 - **Custo:** `getNumber` extra só em `threads`/`search`/`stats(com número)` — query por PK
   indexada, barata. As demais reusam objeto já carregado ou não têm número.
@@ -126,11 +144,25 @@ Cada `reply.send({ schema: 'whatsapp_v1', ... })` das rotas WhatsApp passa a inc
 
 ### 4.3 MCP (bloquim-mcp)
 
-Nenhuma mudança de runtime necessária: `whatsapp_list_threads`/`search` fazem
-`textResult({ ...data, groupsHidden })` e as demais `textResult(data)` — o `context` do worker é
-repassado automaticamente. Opcional (nice-to-have, não bloqueante):
-- Mencionar nas descrições das tools que a resposta inclui `context` identificando
-  workspace/número (ajuda o LLM a usar o campo ao resumir).
+**Caminho feliz (11 das 12 tools): passthrough sem mudança de código.** `whatsapp_list_threads`/
+`search` fazem `textResult({ ...data, groupsHidden })` e as demais `textResult(data)` — o
+`context` do worker é repassado automaticamente.
+
+**Exceção que EXIGE mudança no MCP — short-circuit local `groups_not_exposed`.** Em
+`whatsapp_export_conversation.ts:17-19` e `whatsapp_thread_messages.ts:22-24`, quando o
+identifier é de grupo e o número não expõe grupos, o MCP retorna
+`textResult({ error: "groups_not_exposed" })` **sem chamar o worker** — então o `context` sumiria,
+violando a promessa de auto-descrição. Correção:
+- Estender `resolveNumber` (`_whatsapp_shared.ts`) para também retornar `label` e `phone` (já vêm
+  no `/whatsapp/numbers` que ele busca) e o `workspaceId`.
+- Adicionar um helper `tenantContext(workspaceId, num)` em `_whatsapp_shared.ts` (espelho do do
+  worker) e injetá-lo nesses dois retornos: `textResult({ schema: 'whatsapp_v1', context, error: 'groups_not_exposed' })`.
+- Assim o MCP vira uma mudança **pequena e real** (não "zero"), corrigindo a afirmação otimista
+  anterior. (Refino Codex.)
+
+**Descrições das tools (opcional, PR separado):** mencionar nas descrições que a resposta inclui
+`context` identificando workspace/número ajuda o LLM a citar corretamente ao resumir. Fica fora do
+critério de aceite deste ticket (implica re-deploy do MCP por outro motivo).
 
 ## 5. Testes
 
@@ -142,8 +174,14 @@ repassado automaticamente. Opcional (nice-to-have, não bloqueante):
   - `messages`/`export`/`lead`/`bulk-lead`: `workspaceId` = derivado do `number_id`
     (autoritativo), não o eventual `workspace_id` do query.
   - número sem `label` → `label: null` no context.
-- **MCP:** 1 teste leve de passthrough (código puro, `node --test --import tsx`) garantindo que
-  o wrapper não descarta `context` — ou, se custoso, cobrir só via inspeção do `textResult`.
+  - **erro 2xx-only:** um caso de erro (ex.: `number_id` não-numérico → 400) confirma que a
+    resposta de erro **não** tem `context` (evita regressão da cláusula 2xx-only).
+- **Atualizar asserções de envelope existentes:** varrer `tests/whatsapp/*.db.test.ts` por
+  matches estritos de envelope (`deepEqual`/`toStrictEqual`/`assert.deepStrictEqual` do body
+  inteiro) que quebrariam com o campo novo `context` e ajustá-los. (Refino Codex.)
+- **MCP (`bloquim-mcp`, `node --test --import tsx`):** teste do short-circuit `groups_not_exposed`
+  garantindo que o retorno agora inclui `context` (workspaceId + number). O passthrough do caminho
+  feliz é coberto pelos testes do worker (não duplicar no MCP).
 
 ## 6. Riscos e mitigação
 
@@ -156,10 +194,12 @@ repassado automaticamente. Opcional (nice-to-have, não bloqueante):
 
 ## 7. Critérios de aceite
 
-1. Toda rota `whatsapp_*` do worker retorna `context` no envelope, com `workspaceId` autoritativo
-   e `number` = `{ id, label, phone }` (ou `null` onde não há número).
-2. As 12 tools `whatsapp_*` do bloquim-mcp ecoam `context` (verificado por chamada real ou teste
-   de passthrough), sem regressão nas flags existentes (`groupsHidden`).
-3. Suíte WhatsApp do worker verde no Postgres efêmero, incluindo as novas asserções de `context`.
-4. `typecheck`/`build` verdes nos dois repos.
-5. Deploy do worker (e do MCP, se descrições mudarem) em prod via Coolify.
+1. Toda **resposta de sucesso (2xx)** das rotas `whatsapp_*` do worker retorna `context` no
+   envelope, com `workspaceId` autoritativo e `number` = `{ id, label, phone }` (ou `null` onde não
+   há número). Respostas de erro (4xx/5xx) **não** carregam `context`.
+2. As 12 tools `whatsapp_*` do bloquim-mcp ecoam `context` — 11 por passthrough e o short-circuit
+   `groups_not_exposed` por injeção — sem regressão nas flags existentes (`groupsHidden`).
+3. Suíte WhatsApp do worker verde no Postgres efêmero, incluindo as novas asserções de `context` e
+   as asserções de envelope existentes ajustadas.
+4. `typecheck`/`build` verdes nos dois repos; testes do MCP (`node --test`) verdes.
+5. Deploy do worker **e** do MCP (mudou por causa do short-circuit) em prod via Coolify.
