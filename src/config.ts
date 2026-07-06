@@ -160,6 +160,14 @@ const EnvSchema = z.object({
   R2_ACCESS_KEY_ID: z.string().optional(),
   R2_SECRET_ACCESS_KEY: z.string().optional(),
   R2_BUCKET_EPISODES: z.string().optional(),
+  // ── Transcrição de áudio do WhatsApp (serviço pontual) ──
+  TRANSCRIBE_MODE: z.enum(['off', 'manual', 'auto']).default('off'),
+  TRANSCRIBE_MODEL: z.string().default('gpt-4o-mini-transcribe'),
+  TRANSCRIBE_POLLER_INTERVAL_MS: z.coerce.number().int().positive().default(5_000),
+  TRANSCRIBE_POLLER_BATCH_SIZE: z.coerce.number().int().positive().default(20),
+  TRANSCRIBE_MAX_ATTEMPTS: z.coerce.number().int().positive().default(4),
+  TRANSCRIBE_MAX_DURATION_S: z.coerce.number().int().positive().default(600),
+  R2_BUCKET_WHATSAPP_MEDIA: z.string().optional(),
   INTERNAL_WORKSPACE_ID: z.string().optional(),
   INTERNAL_DOMAINS: z.string().default('beeads.com.br').transform((s) => s.split(',').map((d) => d.trim()).filter(Boolean)),
   FREEMAIL_DOMAINS_EXTRA: z.string().optional().transform((s) => (s ? s.split(',').map((d) => d.trim()).filter(Boolean) : [])),
@@ -168,6 +176,20 @@ const EnvSchema = z.object({
 export const config = EnvSchema.parse(process.env);
 
 export type AgentConfig = z.infer<typeof AgentTokensSchema>[string];
+
+/**
+ * Fail-fast de pré-requisitos da transcrição. `TRANSCRIBE_MODE≠'off'` exige
+ * OPENAI_API_KEY e R2 configurado — senão todo job queimaria attempts e gravaria
+ * placeholder 'failed' permanente por erro de env. Chamado no startup (index.ts).
+ */
+export function assertTranscribeConfig(
+  cfg: Pick<typeof config, 'TRANSCRIBE_MODE' | 'OPENAI_API_KEY'>,
+  r2ok: boolean
+): void {
+  if (cfg.TRANSCRIBE_MODE === 'off') return;
+  if (!cfg.OPENAI_API_KEY) throw new Error(`TRANSCRIBE_MODE=${cfg.TRANSCRIBE_MODE} exige OPENAI_API_KEY`);
+  if (!r2ok) throw new Error(`TRANSCRIBE_MODE=${cfg.TRANSCRIBE_MODE} exige R2 configurado (R2_* ausentes)`);
+}
 
 /**
  * Resolve qual agente um token X-Agent-Token pertence.
