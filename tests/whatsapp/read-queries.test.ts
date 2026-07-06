@@ -38,3 +38,17 @@ test('keyset não pula threads com last_at idêntico (desempate por identifier)'
   }
   assert.deepEqual(seen.sort(), ['+a', '+b', '+c']);
 });
+
+test('nome da DM vem do push_name inbound — fromMe (outbound) não sobrescreve com o nome do dono', async () => {
+  await pool.query(`INSERT INTO whatsapp_numbers (id, workspace_id, evolution_instance) VALUES (72,'ws-1','i')`);
+  await pool.query(`INSERT INTO messages (whatsapp_number_id, workspace_id, channel, identifier, direction, text, evolution_event_id, created_at)
+    VALUES (72,'ws-1','whatsapp','+c1','inbound','oi','ev-in', NOW() - INTERVAL '2 min'),
+           (72,'ws-1','whatsapp','+c1','outbound','respondi','ev-out', NOW() - INTERVAL '1 min')`);
+  // Evolution manda push_name também no eco fromMe — é o nome do DONO do número, não do contato.
+  await pool.query(`INSERT INTO webhook_logs (agent, channel, identifier, evolution_event_id, payload_summary, fallback_used, push_name, workspace_id, whatsapp_number_id, created_at)
+    VALUES ('a','whatsapp','+c1','ev-in','oi',false,'Contato Certo','ws-1',72, NOW() - INTERVAL '2 min'),
+           ('a','whatsapp','+c1','ev-out','respondi',false,'Dono do Número','ws-1',72, NOW() - INTERVAL '1 min')`);
+  const { threads } = await listThreads(pool, { workspaceId: 'ws-1', numberId: 72, limit: 10 });
+  assert.equal(threads.length, 1);
+  assert.equal(threads[0].name, 'Contato Certo');
+});

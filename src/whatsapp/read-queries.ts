@@ -104,9 +104,13 @@ export async function listThreads(pool: Pool, p: {
             (tm.is_lead = FALSE) AS not_lead,
             tm.lead_stage, tm.lead_temperature, tm.lead_source, tm.disqualify_reason,
             CASE WHEN (a.has_author OR g.jid IS NOT NULL) THEN g.subject
+                 -- push_name de evento fromMe é o dono do número, não o contato —
+                 -- só vale o push_name de eventos com mensagem inbound correspondente.
                  ELSE (SELECT w.push_name FROM webhook_logs w
+                        JOIN messages mi ON mi.evolution_event_id = w.evolution_event_id
+                                        AND mi.whatsapp_number_id = w.whatsapp_number_id
                         WHERE w.whatsapp_number_id = $1 AND w.identifier = a.identifier
-                          AND w.push_name IS NOT NULL
+                          AND w.push_name IS NOT NULL AND mi.direction = 'inbound'
                         ORDER BY w.created_at DESC LIMIT 1)
             END AS name,
             COALESCE(
@@ -261,7 +265,10 @@ export async function searchThreads(pool: Pool, p: {
             tm.lead_stage, tm.lead_temperature, tm.lead_source, tm.disqualify_reason,
             CASE WHEN (h.has_author OR g.jid IS NOT NULL) THEN g.subject
                  ELSE (SELECT w.push_name FROM webhook_logs w
-                        WHERE w.whatsapp_number_id = $1 AND w.identifier = h.identifier AND w.push_name IS NOT NULL
+                        JOIN messages mi ON mi.evolution_event_id = w.evolution_event_id
+                                        AND mi.whatsapp_number_id = w.whatsapp_number_id
+                        WHERE w.whatsapp_number_id = $1 AND w.identifier = h.identifier
+                          AND w.push_name IS NOT NULL AND mi.direction = 'inbound'
                         ORDER BY w.created_at DESC LIMIT 1) END AS name,
             COALESCE(
               (SELECT ARRAY_AGG(t.tag ORDER BY t.tag)
