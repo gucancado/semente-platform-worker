@@ -81,26 +81,58 @@ export async function setNumberLifecycle(pool: Pool, id: number, p: { status: Wh
   );
 }
 
-export async function reviveByWorkspacePhone(
+export type ClaimResult =
+  | { kind: 'insert' }
+  | { kind: 'blocked'; currentWorkspaceId: string }
+  | { kind: 'moved'; number: WhatsappNumber; oldInstance: string };
+
+// Tabelas com (referência ao número + workspace_id) que precisam re-carimbo na move.
+// Confirmado por varredura das migrations. whatsapp_access_log usa 'number_id'.
+const RESTAMP: ReadonlyArray<readonly [string, string]> = [
+  ['messages', 'whatsapp_number_id'],
+  ['webhook_logs', 'whatsapp_number_id'],
+  ['transcription_jobs', 'whatsapp_number_id'],
+  ['whatsapp_groups', 'whatsapp_number_id'],
+  ['whatsapp_access_log', 'number_id'],
+];
+
+export async function claimNumberByPhone(
   pool: Pool,
-  p: { workspaceId: string; phone: string; evolutionInstance: string },
-): Promise<{ number: WhatsappNumber; oldInstance: string } | null> {
-  const { rows } = await pool.query(
-    `WITH old AS (
-       SELECT id, evolution_instance FROM whatsapp_numbers
-        WHERE workspace_id = $1 AND phone = $2 AND (removed_at IS NOT NULL OR status <> 'connected')
-        ORDER BY removed_at DESC NULLS LAST, updated_at DESC
-        LIMIT 1
-     )
-     UPDATE whatsapp_numbers n
-        SET status = 'connected', evolution_instance = $3, phone = $2, removed_at = NULL, updated_at = NOW()
-       FROM old WHERE n.id = old.id
-     RETURNING n.id, n.workspace_id, n.phone, n.evolution_instance, n.label, n.status, n.mode,
-               n.expose_groups_in_mcp, n.created_by, n.created_at, n.updated_at, n.removed_at,
-               old.evolution_instance AS old_instance`,
-    [p.workspaceId, p.phone, p.evolutionInstance],
-  );
-  if (!rows[0]) return null;
-  const oldInstance = rows[0].old_instance as string;
-  return { number: map(rows[0]), oldInstance };
+  p: { phone: string; newWorkspaceId: string; evolutionInstance: string },
+): Promise<ClaimResult> {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const sel = await client.query(
+      `SELECT id, workspace_id, status, removed_at, evolution_instance
+         FROM whatsapp_numbers WHERE phone = $1 FOR UPDATE`,
+      [p.phone],
+    );
+    if (!sel.rows[0]) { await client.query('COMMIT'); return { kind: 'insert' }; }
+    const row = sel.rows[0];
+    const active = row.status === 'connected' && row.removed_at == null;
+    if (active && row.workspace_id !== p.newWorkspaceId) {
+      await client.query('COMMIT');
+      return { kind: 'blocked', currentWorkspaceId: row.workspace_id };
+    }
+    const id = Number(row.id);
+    for (const [table, col] of RESTAMP) {
+      await client.query(`UPDATE ${table} SET workspace_id = $1 WHERE ${col} = $2`, [p.newWorkspaceId, id]);
+    }
+    const upd = await client.query(
+      `UPDATE whatsapp_numbers
+          SET workspace_id = $1, status = 'connected', evolution_instance = $2, phone = $3, removed_at = NULL, updated_at = NOW()
+        WHERE id = $4
+        RETURNING id, workspace_id, phone, evolution_instance, label, status, mode,
+                  expose_groups_in_mcp, created_by, created_at, updated_at, removed_at`,
+      [p.newWorkspaceId, p.evolutionInstance, p.phone, id],
+    );
+    await client.query('COMMIT');
+    return { kind: 'moved', number: map(upd.rows[0]), oldInstance: row.evolution_instance };
+  } catch (e) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw e;
+  } finally {
+    client.release();
+  }
 }

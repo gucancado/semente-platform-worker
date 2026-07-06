@@ -2,7 +2,8 @@ import { test, beforeEach, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { pool } from '../../src/db.js';
 import { createNumber, getNumberByInstance, updateNumberStatus, listNumbers, upsertConnectedNumber, renameNumberLabel } from '../../src/whatsapp/numbers.js';
-import { setNumberLifecycle, reviveByWorkspacePhone, normalizePhone } from '../../src/whatsapp/numbers.js';
+import { setNumberLifecycle, normalizePhone } from '../../src/whatsapp/numbers.js';
+import { claimNumberByPhone } from '../../src/whatsapp/numbers.js';
 
 beforeEach(async () => {
   await pool.query('TRUNCATE whatsapp_numbers RESTART IDENTITY CASCADE');
@@ -74,27 +75,50 @@ test('setNumberLifecycle remove seta removed_at; disconnect não', async () => {
   assert.ok(r.rows[0].removed_at);
 });
 
-test('reviveByWorkspacePhone revive ficha removida (mesmo number_id, removed_at=null, nova instância)', async () => {
-  const n = await upsertConnectedNumber(pool, { workspaceId: 'ws-1', evolutionInstance: 'old-inst', phone: '+5531888', createdBy: null });
+test('claim: telefone novo → insert', async () => {
+  const r = await claimNumberByPhone(pool, { phone: '+5531000', newWorkspaceId: 'ws-1', evolutionInstance: 'i1' });
+  assert.equal(r.kind, 'insert');
+});
+
+test('claim: ficha inativa em outro ws → moved (move workspace, re-carimba mensagens, mantém number_id)', async () => {
+  const n = await upsertConnectedNumber(pool, { workspaceId: 'ws-A', evolutionInstance: 'old', phone: '+5531777', createdBy: null });
+  await pool.query(`INSERT INTO messages (whatsapp_number_id, workspace_id, channel, identifier, direction, text) VALUES ($1,'ws-A','whatsapp','+55x','inbound','oi')`, [n.id]);
+  await pool.query(`INSERT INTO webhook_logs (whatsapp_number_id, workspace_id, channel, agent, identifier) VALUES ($1,'ws-A','whatsapp','x','+55x')`, [n.id]);
   await setNumberLifecycle(pool, n.id, { status: 'disconnected', removed: true });
-  const out = await reviveByWorkspacePhone(pool, { workspaceId: 'ws-1', phone: '+5531888', evolutionInstance: 'new-inst' });
-  assert.ok(out);
-  assert.equal(out!.number.id, n.id);
-  assert.equal(out!.number.status, 'connected');
-  assert.equal(out!.number.removedAt, null);
-  assert.equal(out!.number.evolutionInstance, 'new-inst');
-  assert.equal(out!.oldInstance, 'old-inst');
+  const r = await claimNumberByPhone(pool, { phone: '+5531777', newWorkspaceId: 'ws-B', evolutionInstance: 'new' });
+  assert.equal(r.kind, 'moved');
+  if (r.kind === 'moved') {
+    assert.equal(r.number.id, n.id);
+    assert.equal(r.number.workspaceId, 'ws-B');
+    assert.equal(r.number.status, 'connected');
+    assert.equal(r.number.removedAt, null);
+    assert.equal(r.oldInstance, 'old');
+  }
+  const m = await pool.query(`SELECT workspace_id FROM messages WHERE whatsapp_number_id=$1`, [n.id]);
+  assert.equal(m.rows[0].workspace_id, 'ws-B');
+  const w = await pool.query(`SELECT workspace_id FROM webhook_logs WHERE whatsapp_number_id=$1`, [n.id]);
+  assert.equal(w.rows[0].workspace_id, 'ws-B');
 });
 
-test('reviveByWorkspacePhone não revive ficha já connected; retorna null', async () => {
-  await upsertConnectedNumber(pool, { workspaceId: 'ws-1', evolutionInstance: 'live', phone: '+5531777', createdBy: null });
-  const out = await reviveByWorkspacePhone(pool, { workspaceId: 'ws-1', phone: '+5531777', evolutionInstance: 'other' });
-  assert.equal(out, null);
+test('claim: ficha ATIVA em outro ws → blocked (não move)', async () => {
+  const n = await upsertConnectedNumber(pool, { workspaceId: 'ws-A', evolutionInstance: 'live', phone: '+5531888', createdBy: null });
+  const r = await claimNumberByPhone(pool, { phone: '+5531888', newWorkspaceId: 'ws-B', evolutionInstance: 'new2' });
+  assert.equal(r.kind, 'blocked');
+  if (r.kind === 'blocked') assert.equal(r.currentWorkspaceId, 'ws-A');
+  const row = await pool.query(`SELECT workspace_id, evolution_instance FROM whatsapp_numbers WHERE id=$1`, [n.id]);
+  assert.equal(row.rows[0].workspace_id, 'ws-A');       // intacta
+  assert.equal(row.rows[0].evolution_instance, 'live'); // não moveu
 });
 
-test('reviveByWorkspacePhone é escopada ao workspace (não cruza)', async () => {
-  const a = await upsertConnectedNumber(pool, { workspaceId: 'ws-A', evolutionInstance: 'a-inst', phone: '+5531666', createdBy: null });
-  await setNumberLifecycle(pool, a.id, { status: 'disconnected', removed: true });
-  const out = await reviveByWorkspacePhone(pool, { workspaceId: 'ws-B', phone: '+5531666', evolutionInstance: 'b-inst' });
-  assert.equal(out, null);
+test('claim: ficha inativa no MESMO ws → moved (reconexão via onboarding)', async () => {
+  const n = await upsertConnectedNumber(pool, { workspaceId: 'ws-1', evolutionInstance: 'o', phone: '+5531999', createdBy: null });
+  await setNumberLifecycle(pool, n.id, { status: 'disconnected', removed: false });
+  const r = await claimNumberByPhone(pool, { phone: '+5531999', newWorkspaceId: 'ws-1', evolutionInstance: 'o2' });
+  assert.equal(r.kind, 'moved');
+  if (r.kind === 'moved') assert.equal(r.number.id, n.id);
+});
+
+test('unique global: 2ª ficha com mesmo phone viola', async () => {
+  await upsertConnectedNumber(pool, { workspaceId: 'ws-1', evolutionInstance: 'a', phone: '+5531222', createdBy: null });
+  await assert.rejects(() => pool.query(`INSERT INTO whatsapp_numbers (workspace_id, evolution_instance, phone, status) VALUES ('ws-2','b','+5531222','connected')`));
 });
