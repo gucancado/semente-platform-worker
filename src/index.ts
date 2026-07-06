@@ -1,5 +1,5 @@
 import Fastify from 'fastify';
-import { config } from './config.js';
+import { config, assertTranscribeConfig } from './config.js';
 import { registerAdminRoutes } from './admin/routes.js';
 import { registerContactsRoutes } from './contacts/routes.js';
 import { registerWebhookRoutes } from './webhook/routes.js';
@@ -22,6 +22,8 @@ import { startReconcileCron } from './goals/scheduling/reconcile-trigger.js';
 import { startOutboxDispatcher } from './events/dispatcher.js';
 import { startLuaScheduler } from './lua/scheduler.js';
 import { startProvisioningReaperCron } from './whatsapp/provisioning-reaper.js';
+import { startTranscriptionPoller } from './transcription/poller.js';
+import { r2Configured } from './integrations/r2.js';
 
 async function main() {
   const app = Fastify({
@@ -165,6 +167,14 @@ async function main() {
     pool,
     evolution: { baseUrl: config.EVOLUTION_API_URL, apiKey: config.EVOLUTION_API_KEY },
   });
+
+  // Serviço de transcrição de áudio (isolado). Fail-fast se ligado sem pré-requisitos.
+  assertTranscribeConfig(config, r2Configured());
+  if (config.TRANSCRIBE_MODE === 'auto') {
+    startTranscriptionPoller(app.log);
+  } else {
+    app.log.info({ mode: config.TRANSCRIBE_MODE }, 'transcrição: poller NÃO iniciado (modo != auto)');
+  }
 }
 
 main().catch((err) => {
