@@ -25,6 +25,8 @@ export const EvolutionMessageSchema = z.object({
 });
 export type EvolutionMessage = z.infer<typeof EvolutionMessageSchema>;
 
+export type ParsedMedia = { kind: 'audio'; mime: string | null; durationS: number | null };
+
 export type ParsedMessage = {
   agent: string;             // nome técnico do agente (mercurio)
   project: string | null;    // slug do projeto (sufixo da instance após o primeiro '-'); null se instance não tiver hífen
@@ -36,6 +38,7 @@ export type ParsedMessage = {
   fromMe: boolean;
   pushName: string | null;
   messageText: string | null;
+  media: ParsedMedia | null;
   rawEventId: string;
 };
 
@@ -67,6 +70,9 @@ export function parseEvolutionPayload(raw: unknown): ParsedMessage | null {
   // webhook handler.
   const messageText = extractMessageText(ev.data.message);
 
+  // Extrai metadados de mídia (áudio).
+  const media = extractMedia(ev.data.message);
+
   // Convenção: instância Evolution = `<agente>-<projeto>` (ex: mercurio-metido-a-gente).
   // `agent` = prefixo até o primeiro hífen; `project` = sufixo após o primeiro hífen.
   // Sem hífen: agent = instância inteira, project = null (compat com nomes legados).
@@ -85,6 +91,7 @@ export function parseEvolutionPayload(raw: unknown): ParsedMessage | null {
     fromMe: ev.data.key.fromMe,
     pushName: ev.data.pushName ?? null,
     messageText,
+    media,
     rawEventId: ev.data.key.id,
   };
 }
@@ -127,6 +134,30 @@ export function extractMessageText(msg: unknown): string | null {
   if (typeof m.templateButtonReplyMessage?.selectedDisplayText === 'string')
     return m.templateButtonReplyMessage.selectedDisplayText;
 
+  return null;
+}
+
+/**
+ * Extrai metadados de áudio da mensagem (audioMessage, pttMessage). Desempacota
+ * containers (ephemeral, viewOnce, etc.) assim como extractMessageText, retornando
+ * o tipo de mídia, MIME e duração quando presentes.
+ */
+export function extractMedia(msg: unknown): ParsedMedia | null {
+  if (!msg || typeof msg !== 'object') return null;
+  const m = msg as Record<string, any>;
+  // containers — desempacota e tenta de novo
+  const inner = m.ephemeralMessage?.message ?? m.viewOnceMessage?.message
+    ?? m.viewOnceMessageV2?.message ?? m.viewOnceMessageV2Extension?.message
+    ?? m.editedMessage?.message ?? m.documentWithCaptionMessage?.message;
+  if (inner) return extractMedia(inner);
+  const audio = m.audioMessage ?? m.pttMessage;
+  if (audio && typeof audio === 'object') {
+    return {
+      kind: 'audio',
+      mime: typeof audio.mimetype === 'string' ? audio.mimetype : null,
+      durationS: typeof audio.seconds === 'number' ? audio.seconds : null,
+    };
+  }
   return null;
 }
 

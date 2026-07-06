@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseEvolutionPayload, shouldIngest } from '../../src/webhook/evolution.js';
+import { extractMedia, parseEvolutionPayload, shouldIngest } from '../../src/webhook/evolution.js';
 
 const baseEv = {
   event: 'messages.upsert',
@@ -138,4 +138,29 @@ test('número real (@s.whatsapp.net) não é alterado', () => {
   const p = parseEvolutionPayload(baseEv); // remoteJid 5531999998888@s.whatsapp.net
   assert.ok(p);
   assert.equal(p!.identifier, '+5531999998888');
+});
+
+// ── Áudio (audioMessage / pttMessage) ────────────────────────────────────────
+test('extractMedia detecta audioMessage com mime e duração', () => {
+  const m = extractMedia({ audioMessage: { mimetype: 'audio/ogg; codecs=opus', seconds: 7 } });
+  assert.deepEqual(m, { kind: 'audio', mime: 'audio/ogg; codecs=opus', durationS: 7 });
+});
+test('extractMedia detecta pttMessage', () => {
+  const m = extractMedia({ pttMessage: { mimetype: 'audio/ogg', seconds: 3 } });
+  assert.deepEqual(m, { kind: 'audio', mime: 'audio/ogg', durationS: 3 });
+});
+test('extractMedia desempacota ephemeral/viewOnce', () => {
+  assert.equal(extractMedia({ ephemeralMessage: { message: { audioMessage: { mimetype: 'audio/ogg', seconds: 2 } } } })?.kind, 'audio');
+  assert.equal(extractMedia({ viewOnceMessageV2: { message: { audioMessage: { seconds: 1 } } } })?.kind, 'audio');
+});
+test('extractMedia em texto puro é null', () => {
+  assert.equal(extractMedia({ conversation: 'oi' }), null);
+});
+test('parseEvolutionPayload popula media em áudio e messageText null', () => {
+  const p = parseEvolutionPayload({
+    event: 'messages.upsert', instance: 'inst-x',
+    data: { key: { remoteJid: '5531999998888@s.whatsapp.net', fromMe: false, id: 'E1' }, message: { audioMessage: { mimetype: 'audio/ogg', seconds: 5 } } },
+  });
+  assert.equal(p?.messageText, null);
+  assert.deepEqual(p?.media, { kind: 'audio', mime: 'audio/ogg', durationS: 5 });
 });

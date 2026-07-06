@@ -100,6 +100,19 @@ export async function fetchMessages(
 }
 
 /**
+ * Baixa + descriptografa a mídia de uma mensagem sob demanda (webhook usa
+ * base64:false → bytes não vêm no payload). `rawMessage` = objeto `data` do
+ * webhook (tem `key`+`message`). Pode responder base64 vazio se a mídia ainda
+ * não foi descriptografada — o caller (service) trata vazio como retryable.
+ */
+export async function getBase64FromMediaMessage(
+  deps: EvolutionDeps, instance: string, rawMessage: unknown
+): Promise<{ base64: string; mimetype: string | null }> {
+  const r = await call(deps, 'POST', `/chat/getBase64FromMediaMessage/${instance}`, { message: rawMessage });
+  return { base64: typeof r?.base64 === 'string' ? r.base64 : '', mimetype: r?.mimetype ?? null };
+}
+
+/**
  * Lista os grupos da instância. Shape do retorno da Evolution varia por versão —
  * cobrimos array direto e {groups:[...]}; cada item tem id ('<id>@g.us') + subject.
  */

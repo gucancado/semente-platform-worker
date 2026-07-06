@@ -1,5 +1,5 @@
 import Fastify from 'fastify';
-import { config } from './config.js';
+import { config, assertTranscribeConfig } from './config.js';
 import { registerAdminRoutes } from './admin/routes.js';
 import { registerContactsRoutes } from './contacts/routes.js';
 import { registerWebhookRoutes } from './webhook/routes.js';
@@ -22,6 +22,8 @@ import { startReconcileCron } from './goals/scheduling/reconcile-trigger.js';
 import { startOutboxDispatcher } from './events/dispatcher.js';
 import { startLuaScheduler } from './lua/scheduler.js';
 import { startProvisioningReaperCron } from './whatsapp/provisioning-reaper.js';
+import { startTranscriptionPoller } from './transcription/poller.js';
+import { r2Configured } from './integrations/r2.js';
 
 async function main() {
   const app = Fastify({
@@ -133,6 +135,10 @@ async function main() {
     registerWriteRoutes(scope, { pool, panelToken: config.PANEL_TOKEN });
   });
 
+  // Fail-fast ANTES de bindar/subir pollers: TRANSCRIBE_MODE≠off exige OPENAI + R2.
+  // Se inválido, o processo sai limpo aqui (sem servidor no ar nem crons rodando).
+  assertTranscribeConfig(config, r2Configured());
+
   await app.listen({ host: '0.0.0.0', port: config.PORT });
   app.log.info({ port: config.PORT }, 'semente-platform-worker up');
 
@@ -165,6 +171,13 @@ async function main() {
     pool,
     evolution: { baseUrl: config.EVOLUTION_API_URL, apiKey: config.EVOLUTION_API_KEY },
   });
+
+  // Serviço de transcrição de áudio (isolado). Pré-requisitos já validados acima.
+  if (config.TRANSCRIBE_MODE === 'auto') {
+    startTranscriptionPoller(app.log);
+  } else {
+    app.log.info({ mode: config.TRANSCRIBE_MODE }, 'transcrição: poller NÃO iniciado (modo != auto)');
+  }
 }
 
 main().catch((err) => {
