@@ -24,7 +24,7 @@ function deps(over: any = {}) {
 }
 
 test('feliz: grava transcrição, done, media_key, llm_metrics; auto+inbound → trigger', async () => {
-  await pool.query(`INSERT INTO workspace_agents (workspace_id, whatsapp_number_id, agent, reaction_mode) VALUES ('ws-1',1,'mercurio','reactive')`);
+  await pool.query(`INSERT INTO workspace_agents (workspace_id, agent, enabled, config) VALUES ('ws-1','mercurio',TRUE,'{"operates_numbers":[1],"reaction_mode":"reactive"}'::jsonb)`);
   const job = await seedJob('inbound');
   await processJob(deps(), job);
   const { rows: msg } = await pool.query(`SELECT text, transcription_status, media_key FROM messages WHERE id=$1`, [job.message_id]);
@@ -85,7 +85,7 @@ test('cap de duração: não chama ASR, sobe ogg, failed com placeholder de long
 });
 
 test('mode=manual não dispara trigger mesmo inbound', async () => {
-  await pool.query(`INSERT INTO workspace_agents (workspace_id, whatsapp_number_id, agent, reaction_mode) VALUES ('ws-1',1,'mercurio','reactive')`);
+  await pool.query(`INSERT INTO workspace_agents (workspace_id, agent, enabled, config) VALUES ('ws-1','mercurio',TRUE,'{"operates_numbers":[1],"reaction_mode":"reactive"}'::jsonb)`);
   const job = await seedJob('inbound');
   await processJob(deps({ mode: 'manual' }), job);
   const { rows } = await pool.query(`SELECT count(*)::int c FROM pending_triggers`);
