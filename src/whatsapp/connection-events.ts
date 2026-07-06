@@ -1,11 +1,25 @@
 import type { Pool } from 'pg';
-import { updateNumberStatus, getNumberByInstance, upsertConnectedNumber, reviveByWorkspacePhone, normalizePhone } from './numbers.js';
-import { getProvisioning, deleteProvisioning } from './provisioning.js';
+import { updateNumberStatus, getNumberByInstance, upsertConnectedNumber, claimNumberByPhone, normalizePhone } from './numbers.js';
+import { getProvisioning, deleteProvisioning, markProvisioningBlocked } from './provisioning.js';
 import { seedDefaultReasons } from './disqualify-reasons.js';
 import { seedDefaultSourceSignals } from './source-signals.js';
 import { config } from '../config.js';
 import { deleteInstance } from '../evolution/client.js';
 import { syncGroupSubjectsDebounced } from './group-sync.js';
+
+async function insertFirstTime(
+  pool: Pool, evoDeps: { baseUrl: string; apiKey: string },
+  prov: { workspaceId: string; createdBy: string | null }, instance: string, phone: string | undefined,
+): Promise<number | null> {
+  try {
+    const num = await upsertConnectedNumber(pool, { workspaceId: prov.workspaceId, evolutionInstance: instance, phone, createdBy: prov.createdBy });
+    return num.id;
+  } catch (e) {
+    // corrida no unique global (23505): a instância nova é descartável; não duplica.
+    if ((e as any)?.code === '23505') { deleteInstance(evoDeps, instance).catch(() => {}); return null; }
+    throw e;
+  }
+}
 
 const STATE_MAP: Record<string, 'connected' | 'connecting' | 'disconnected'> = {
   open: 'connected', connecting: 'connecting', close: 'disconnected',
@@ -39,28 +53,25 @@ export async function handleConnectionEvent(pool: Pool, payload: any): Promise<b
     if (prov) {
       const phone = extractPhone(payload.data);
       const evoDeps = { baseUrl: config.EVOLUTION_API_URL, apiKey: config.EVOLUTION_API_KEY };
-      // Continuidade de histórico: revive ficha existente do MESMO telefone NESSE workspace.
-      const revived = phone
-        ? await reviveByWorkspacePhone(pool, { workspaceId: prov.workspaceId, phone, evolutionInstance: instance })
-        : null;
-      if (revived) {
-        numberId = revived.number.id;
-        if (revived.oldInstance && revived.oldInstance !== instance) {
-          deleteInstance(evoDeps, revived.oldInstance).catch(() => { /* instância antiga órfã — best-effort */ });
+      if (phone) {
+        const claim = await claimNumberByPhone(pool, { phone, newWorkspaceId: prov.workspaceId, evolutionInstance: instance });
+        if (claim.kind === 'blocked') {
+          // Número já ATIVO em outro workspace: desfaz a instância nova (device recém-linkado),
+          // marca o staging pra o painel avisar. NÃO move, NÃO apaga o staging, NÃO faz seed.
+          deleteInstance(evoDeps, instance).catch(() => {});
+          await markProvisioningBlocked(pool, instance, claim.currentWorkspaceId);
+          return true;
+        }
+        if (claim.kind === 'moved') {
+          numberId = claim.number.id;
+          if (claim.oldInstance && claim.oldInstance !== instance) {
+            deleteInstance(evoDeps, claim.oldInstance).catch(() => {});
+          }
+        } else {
+          numberId = await insertFirstTime(pool, evoDeps, prov, instance, phone);
         }
       } else {
-        try {
-          const num = await upsertConnectedNumber(pool, {
-            workspaceId: prov.workspaceId, evolutionInstance: instance, phone, createdBy: prov.createdBy,
-          });
-          numberId = num.id;
-        } catch (e) {
-          // Telefone já ativo no ws via outra instância (partial unique). A instância nova é
-          // descartável; a ficha ativa permanece. Não materializa duplicata.
-          if ((e as any)?.code === '23505') {
-            deleteInstance(evoDeps, instance).catch(() => {});
-          } else { throw e; }
-        }
+        numberId = await insertFirstTime(pool, evoDeps, prov, instance, undefined);
       }
       await deleteProvisioning(pool, instance);
       await seedDefaultReasons(pool, prov.workspaceId);
