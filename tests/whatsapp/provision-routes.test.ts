@@ -4,7 +4,7 @@ import Fastify from 'fastify';
 import { pool } from '../../src/db.js';
 import { registerProvisionRoutes } from '../../src/whatsapp/provision-routes.js';
 import type { EvolutionDeps } from '../../src/evolution/client.js';
-import { createProvisioning } from '../../src/whatsapp/provisioning.js';
+import { createProvisioning, markProvisioningBlocked } from '../../src/whatsapp/provisioning.js';
 import { upsertConnectedNumber, setNumberLifecycle } from '../../src/whatsapp/numbers.js';
 
 function buildApp(evolutionCalls: string[]) {
@@ -62,6 +62,17 @@ test('GET /provision/:instance = awaiting_scan com qr enquanto staging válido',
     headers: { 'x-panel-token': 'test-panel' } });
   assert.equal(res.statusCode, 200);
   assert.equal(res.json().state, 'awaiting_scan');
+});
+
+test('GET /provision/:instance = blocked quando staging tem blocked_workspace_id', async () => {
+  const app = buildApp([]);
+  await createProvisioning(pool, { evolutionInstance: 'blk-i', workspaceId: 'ws-B', createdBy: null, ttlSeconds: 90 });
+  await markProvisioningBlocked(pool, 'blk-i', 'ws-A');
+  const res = await app.inject({ method: 'GET', url: '/admin/whatsapp/provision/blk-i?workspace_id=ws-B',
+    headers: { 'x-panel-token': 'test-panel' } });
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.json().state, 'blocked');
+  assert.equal(res.json().blockedWorkspaceId, 'ws-A');
 });
 
 test('GET /provision/:instance = connected após commit', async () => {

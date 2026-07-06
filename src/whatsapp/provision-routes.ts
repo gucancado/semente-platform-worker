@@ -56,6 +56,7 @@ export function registerProvisionRoutes(app: FastifyInstance, deps: { pool: Pool
     const prov = await getProvisioning(deps.pool, instance);
     if (prov) {
       if (prov.workspaceId !== ws) return reply.code(404).send({ error: 'not found' });
+      if (prov.blockedWorkspaceId) return reply.send({ state: 'blocked', blockedWorkspaceId: prov.blockedWorkspaceId });
       if (new Date(prov.expiresAt).getTime() < Date.now()) return reply.send({ state: 'expired' });
       const qr = await getQrCode(deps.evolution, instance);
       return reply.send({ state: 'awaiting_scan', qr: qr.base64, pairingCode: qr.pairingCode });
