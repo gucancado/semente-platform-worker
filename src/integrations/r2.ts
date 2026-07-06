@@ -16,20 +16,31 @@ function client(): S3Client {
   return _client;
 }
 
+export function whatsappMediaBucket(): string | undefined {
+  return config.R2_BUCKET_WHATSAPP_MEDIA ?? config.R2_BUCKET_EPISODES;
+}
+
 /** Upload com key determinística + verificação por HEAD (content-length). Retry sobrescreve o mesmo objeto. */
-export async function putAndVerify(key: string, body: Buffer | string, contentType: string): Promise<void> {
+export async function putAndVerify(key: string, body: Buffer | string, contentType: string, bucket = config.R2_BUCKET_EPISODES!): Promise<void> {
   const c = client();
   const buf = typeof body === 'string' ? Buffer.from(body) : body;
-  await c.send(new PutObjectCommand({ Bucket: config.R2_BUCKET_EPISODES!, Key: key, Body: buf, ContentType: contentType }));
-  const head = await c.send(new HeadObjectCommand({ Bucket: config.R2_BUCKET_EPISODES!, Key: key }));
+  await c.send(new PutObjectCommand({ Bucket: bucket, Key: key, Body: buf, ContentType: contentType }));
+  const head = await c.send(new HeadObjectCommand({ Bucket: bucket, Key: key }));
   if (head.ContentLength !== buf.length) {
     throw new Error(`r2: verificação falhou pra ${key} (esperado ${buf.length}, gravado ${head.ContentLength})`);
   }
 }
 
 /** URL GET presigned (TTL curto) pro objeto de episódio. Lança se R2 não configurado. */
-export async function presignGet(key: string, ttlSeconds = 120): Promise<string> {
+export async function presignGet(key: string, ttlSeconds = 120, bucket = config.R2_BUCKET_EPISODES!): Promise<string> {
   if (!r2Configured()) throw new Error('r2: não configurado (R2_* ausentes)');
-  const cmd = new GetObjectCommand({ Bucket: config.R2_BUCKET_EPISODES!, Key: key });
+  const cmd = new GetObjectCommand({ Bucket: bucket, Key: key });
   return getSignedUrl(client(), cmd, { expiresIn: ttlSeconds });
+}
+
+/** Download de objeto como Buffer. */
+export async function getObjectBuffer(key: string, bucket = config.R2_BUCKET_EPISODES!): Promise<Buffer> {
+  const out = await client().send(new GetObjectCommand({ Bucket: bucket, Key: key }));
+  const bytes = await out.Body!.transformToByteArray();
+  return Buffer.from(bytes);
 }
