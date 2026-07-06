@@ -171,11 +171,12 @@ export async function listThreads(pool: Pool, p: {
   return { threads, nextCursor };
 }
 
-export type Msg = { direction: string; text: string | null; agent: string | null; createdAt: string; author: string | null; authorName: string | null };
+export type Msg = { id: number; direction: string; text: string | null; agent: string | null; createdAt: string; author: string | null; authorName: string | null; kind: string; transcriptionStatus: string | null; mediaDurationS: number | null; hasMedia: boolean };
 export async function listThreadMessages(pool: Pool, p: { workspaceId: string; numberId: number; identifier: string; limit: number; cursor?: string; since?: string; until?: string }) {
   const before = p.cursor ? Buffer.from(p.cursor, 'base64').toString() : null;
   const { rows } = await pool.query(
-    `SELECT m.direction, m.text, m.agent, m.created_at, m.author,
+    `SELECT m.id, m.direction, m.text, m.agent, m.created_at, m.author,
+            m.kind, m.transcription_status, m.media_duration_s, m.media_key,
             w.push_name AS author_name
        FROM messages m
        LEFT JOIN webhook_logs w
@@ -188,7 +189,7 @@ export async function listThreadMessages(pool: Pool, p: { workspaceId: string; n
         AND ($6::timestamptz IS NULL OR m.created_at <= $6)
       ORDER BY m.created_at DESC LIMIT $4`,
     [p.numberId, p.identifier, before, p.limit, p.since ?? null, p.until ?? null, p.workspaceId]);
-  const messages: Msg[] = rows.map(r => ({ direction: r.direction, text: r.text, agent: r.agent, createdAt: r.created_at.toISOString(), author: r.author, authorName: r.author_name }));
+  const messages: Msg[] = rows.map(r => ({ id: Number(r.id), direction: r.direction, text: r.text, agent: r.agent, createdAt: r.created_at.toISOString(), author: r.author, authorName: r.author_name, kind: r.kind, transcriptionStatus: r.transcription_status, mediaDurationS: r.media_duration_s, hasMedia: r.media_key != null }));
   const lastMsg = messages.at(-1);
   const nextCursor = messages.length === p.limit && lastMsg ? Buffer.from(lastMsg.createdAt).toString('base64') : null;
   return { messages, nextCursor };
