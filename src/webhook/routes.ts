@@ -4,6 +4,7 @@ import {
   enqueuePendingTrigger,
   getAgentProjectConfig,
   insertMessage,
+  insertTranscriptionJob,
   lookupContact,
   logWebhook,
   pool,
@@ -16,6 +17,18 @@ import { createTask } from '../bloquim/client.js';
 import { computeScheduledAt } from '../triggers/quiet-hours.js';
 import { agentsToTrigger, quarantineUnknownInstance } from '../whatsapp/reaction.js';
 import { detectAndTagSource } from '../whatsapp/source-signals.js';
+
+/**
+ * Gate puro de ingestão de áudio (number-path, só DM). `off` ou grupo ou sem
+ * mídia → não captura (nem placeholder, nem job). `manual`/`auto` capturam;
+ * só `auto` suprime o trigger reativo na chegada (o poller dispara depois de
+ * transcrever). Extraído como função pura testável sem precisar de Postgres.
+ */
+export function audioIngestPlan(mode: 'off' | 'manual' | 'auto', isGroup: boolean, hasAudio: boolean):
+  { capture: boolean; suppressTrigger: boolean } {
+  if (!hasAudio || isGroup || mode === 'off') return { capture: false, suppressTrigger: false };
+  return { capture: true, suppressTrigger: mode === 'auto' };
+}
 
 export async function registerWebhookRoutes(app: FastifyInstance) {
   app.post('/webhook', async (req, reply) => {
@@ -40,9 +53,14 @@ export async function registerWebhookRoutes(app: FastifyInstance) {
       return { ignored: true, reason: 'parse-failed-or-irrelevant' };
     }
 
-    // Diagnóstico: quando texto vier null, loga o keyset da envelope pra entender
-    // que tipo de mensagem foi enviada. Sem isso a investigação fica cega.
-    if (!msg.messageText) {
+    // Áudio (number-path, só DM): decide se captura (placeholder + job) e se
+    // suprime o trigger reativo na chegada (auto → poller dispara pós-transcrição).
+    const plan = audioIngestPlan(config.TRANSCRIBE_MODE, msg.isGroup, !!msg.media);
+
+    // Diagnóstico: quando texto vier null (e não for áudio capturado), loga o
+    // keyset da envelope pra entender que tipo de mensagem foi enviada. Sem
+    // isso a investigação fica cega.
+    if (!msg.messageText && !msg.media) {
       const envelope = (req.body as any)?.data?.message;
       const envelopeKeys = envelope && typeof envelope === 'object' ? Object.keys(envelope) : [];
       req.log.warn(
@@ -88,12 +106,28 @@ export async function registerWebhookRoutes(app: FastifyInstance) {
         message_text: msg.messageText,
         workspace_id: resolved.workspaceId,
         evolution_event_id: msg.rawEventId,
-        payload_summary: (msg.messageText ?? '').slice(0, 80) || '(sem texto)',
+        payload_summary: plan.capture ? '[áudio]' : ((msg.messageText ?? '').slice(0, 80) || '(sem texto)'),
         bloquim_task_id: null,
         fallback_used: false,
         whatsapp_number_id: resolved.numberId,
       });
-      if (msg.messageText && msg.identifier) {
+      if (plan.capture) {
+        try {
+          const audioMsg = await insertMessage({
+            agent, channel: msg.channel, identifier: msg.identifier, author: msg.author,
+            direction: msg.fromMe ? 'outbound' : 'inbound', text: '[áudio]',
+            evolution_event_id: msg.rawEventId, whatsapp_number_id: resolved.numberId, workspace_id: resolved.workspaceId,
+            kind: 'audio', media_mime: msg.media!.mime, media_duration_s: msg.media!.durationS, transcription_status: 'pending',
+          });
+          await insertTranscriptionJob({
+            message_id: audioMsg.id, whatsapp_number_id: resolved.numberId!, workspace_id: resolved.workspaceId ?? null,
+            instance: msg.instance, evolution_event_id: msg.rawEventId, direction: msg.fromMe ? 'outbound' : 'inbound',
+            is_group: false, identifier: msg.identifier, inbox_id: inserted.id, raw_envelope: (req.body as any)?.data ?? {},
+          });
+        } catch (err) {
+          req.log.warn({ err: (err as Error).message }, 'enfileirar áudio falhou — webhook segue');
+        }
+      } else if (msg.messageText && msg.identifier) {
         try {
           const msgInserted = await insertMessage({
             agent,
@@ -123,7 +157,8 @@ export async function registerWebhookRoutes(app: FastifyInstance) {
       }
       // Reação: agentes reactive que operam o número recebem trigger (debounce/quiet-hours
       // pelo poller). Só DM e só em mensagem nova (não duplicada). Sweep não dispara aqui (cron).
-      if (!inserted.duplicate && msg.identifier && !msg.isGroup && !msg.fromMe) {
+      // Áudio em modo auto suprime o trigger na chegada — o poller dispara pós-transcrição.
+      if (!inserted.duplicate && msg.identifier && !msg.isGroup && !msg.fromMe && !plan.suppressTrigger) {
         const toTrigger = await agentsToTrigger(pool, {
           workspaceId: resolved.workspaceId!,
           numberId: resolved.numberId!,
