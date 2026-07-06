@@ -278,6 +278,10 @@ export async function insertMessage(args: {
   latency_ms?: number | null;
   whatsapp_number_id?: number | null;
   workspace_id?: string | null;
+  kind?: string | null;
+  media_mime?: string | null;
+  media_duration_s?: number | null;
+  transcription_status?: string | null;
 }): Promise<{ id: number; duplicate: boolean }> {
   // ingest_source: todas as linhas inseridas aqui recebem 'live' via DEFAULT da coluna (migration 034).
   // Number-path (monitored/agent_operated): dedup por (whatsapp_number_id, evolution_event_id).
@@ -286,13 +290,15 @@ export async function insertMessage(args: {
   if (args.evolution_event_id && args.whatsapp_number_id != null) {
     const insert = await pool.query<{ id: number }>(
       `INSERT INTO messages
-         (agent, project, channel, identifier, author, direction, text, evolution_event_id, whatsapp_number_id, workspace_id)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+         (agent, project, channel, identifier, author, direction, text, evolution_event_id, whatsapp_number_id, workspace_id,
+          kind, media_mime, media_duration_s, transcription_status)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
        ON CONFLICT (whatsapp_number_id, evolution_event_id)
          WHERE whatsapp_number_id IS NOT NULL AND evolution_event_id IS NOT NULL
          DO NOTHING
        RETURNING id`,
-      [args.agent, args.project ?? null, args.channel, args.identifier, args.author ?? null, args.direction, args.text, args.evolution_event_id, args.whatsapp_number_id, args.workspace_id ?? null]
+      [args.agent, args.project ?? null, args.channel, args.identifier, args.author ?? null, args.direction, args.text, args.evolution_event_id, args.whatsapp_number_id, args.workspace_id ?? null,
+       args.kind ?? 'text', args.media_mime ?? null, args.media_duration_s ?? null, args.transcription_status ?? null]
     );
     if (insert.rows[0]) return { id: insert.rows[0].id, duplicate: false };
     const existing = await pool.query<{ id: number }>(
@@ -624,4 +630,70 @@ export async function insertLlmMetric(args: {
     ]
   );
   return { id: rows[0]!.id };
+}
+
+export type TranscriptionJob = {
+  id: number; message_id: number; whatsapp_number_id: number; workspace_id: string | null;
+  instance: string; evolution_event_id: string; direction: string; is_group: boolean;
+  identifier: string; inbox_id: number | null; raw_envelope: any; status: string; attempts: number;
+};
+
+export async function insertTranscriptionJob(a: {
+  message_id: number; whatsapp_number_id: number; workspace_id: string | null; instance: string;
+  evolution_event_id: string; direction: string; is_group: boolean; identifier: string;
+  inbox_id: number | null; raw_envelope: unknown;
+}): Promise<{ id: number | null }> {
+  const { rows } = await pool.query<{ id: number }>(
+    `INSERT INTO transcription_jobs
+       (message_id, whatsapp_number_id, workspace_id, instance, evolution_event_id, direction, is_group, identifier, inbox_id, raw_envelope)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+     ON CONFLICT (whatsapp_number_id, evolution_event_id) DO NOTHING
+     RETURNING id`,
+    [a.message_id, a.whatsapp_number_id, a.workspace_id, a.instance, a.evolution_event_id, a.direction, a.is_group, a.identifier, a.inbox_id, JSON.stringify(a.raw_envelope)]);
+  return { id: rows[0]?.id ?? null };
+}
+
+const TJ_COLS = `id, message_id, whatsapp_number_id, workspace_id, instance, evolution_event_id, direction, is_group, identifier, inbox_id, raw_envelope, status, attempts`;
+
+export async function claimDueTranscriptionJobs(batchSize = 20): Promise<TranscriptionJob[]> {
+  const { rows } = await pool.query<TranscriptionJob>(
+    `WITH due AS (
+       SELECT id FROM transcription_jobs
+        WHERE status='pending' AND scheduled_at <= NOW()
+        ORDER BY scheduled_at ASC LIMIT $1
+        FOR UPDATE SKIP LOCKED
+     )
+     UPDATE transcription_jobs t
+        SET attempts = t.attempts + 1, scheduled_at = NOW() + INTERVAL '5 minutes', updated_at = NOW()
+       FROM due WHERE t.id = due.id
+      RETURNING ${TJ_COLS}`,
+    [batchSize]);
+  return rows;
+}
+
+export async function selectPendingTranscriptionJobs(limit = 20): Promise<TranscriptionJob[]> {
+  const { rows } = await pool.query<TranscriptionJob>(
+    `SELECT ${TJ_COLS} FROM transcription_jobs WHERE status='pending' AND scheduled_at <= NOW() ORDER BY scheduled_at ASC LIMIT $1`, [limit]);
+  return rows;
+}
+
+export async function getTranscriptionJobByMessageId(messageId: number): Promise<TranscriptionJob | null> {
+  const { rows } = await pool.query<TranscriptionJob>(`SELECT ${TJ_COLS} FROM transcription_jobs WHERE message_id=$1`, [messageId]);
+  return rows[0] ?? null;
+}
+
+export async function markTranscriptionDone(jobId: number): Promise<void> {
+  await pool.query(`UPDATE transcription_jobs SET status='done', raw_envelope='{}'::jsonb, last_error=NULL, updated_at=NOW() WHERE id=$1`, [jobId]);
+}
+
+export async function markTranscriptionRetryOrFail(jobId: number, attempts: number, maxAttempts: number, error: string): Promise<{ retried: boolean }> {
+  if (attempts >= maxAttempts) {
+    await pool.query(`UPDATE transcription_jobs SET status='failed', last_error=$2, updated_at=NOW() WHERE id=$1`, [jobId, error]);
+    return { retried: false };
+  }
+  const backoffSec = Math.min(attempts * 30, 300);
+  await pool.query(
+    `UPDATE transcription_jobs SET status='pending', scheduled_at = NOW() + ($2 || ' seconds')::INTERVAL, last_error=$3, updated_at=NOW() WHERE id=$1`,
+    [jobId, String(backoffSec), error]);
+  return { retried: true };
 }
