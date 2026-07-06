@@ -6,6 +6,7 @@ export type ProvisioningRow = {
   createdBy: string | null;
   createdAt: string;
   expiresAt: string;
+  blockedWorkspaceId: string | null;
 };
 
 function map(r: any): ProvisioningRow {
@@ -15,6 +16,7 @@ function map(r: any): ProvisioningRow {
     createdBy: r.created_by,
     createdAt: r.created_at.toISOString?.() ?? r.created_at,
     expiresAt: r.expires_at.toISOString?.() ?? r.expires_at,
+    blockedWorkspaceId: r.blocked_workspace_id ?? null,
   };
 }
 
@@ -46,4 +48,11 @@ export async function listExpiredProvisioning(pool: Pool, limit = 200): Promise<
     [limit],
   );
   return rows.map(map);
+}
+
+export async function markProvisioningBlocked(pool: Pool, instance: string, blockedWorkspaceId: string): Promise<void> {
+  await pool.query(
+    `UPDATE whatsapp_provisioning SET blocked_workspace_id = $2 WHERE evolution_instance = $1`,
+    [instance, blockedWorkspaceId],
+  );
 }

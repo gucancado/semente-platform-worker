@@ -1,7 +1,7 @@
 import { test, beforeEach, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { pool } from '../../src/db.js';
-import { createProvisioning, getProvisioning, deleteProvisioning, listExpiredProvisioning } from '../../src/whatsapp/provisioning.js';
+import { createProvisioning, getProvisioning, deleteProvisioning, listExpiredProvisioning, markProvisioningBlocked } from '../../src/whatsapp/provisioning.js';
 
 beforeEach(async () => {
   await pool.query('TRUNCATE whatsapp_provisioning');
@@ -29,4 +29,11 @@ test('listExpired devolve só os vencidos', async () => {
   await createProvisioning(pool, { evolutionInstance: 'stale', workspaceId: 'ws-1', createdBy: null, ttlSeconds: -10 });
   const expired = await listExpiredProvisioning(pool, 100);
   assert.deepEqual(expired.map((r) => r.evolutionInstance), ['stale']);
+});
+
+test('markProvisioningBlocked seta blocked_workspace_id; getProvisioning devolve', async () => {
+  await createProvisioning(pool, { evolutionInstance: 'blk-1', workspaceId: 'ws-B', createdBy: null, ttlSeconds: 90 });
+  await markProvisioningBlocked(pool, 'blk-1', 'ws-A');
+  const got = await getProvisioning(pool, 'blk-1');
+  assert.equal(got?.blockedWorkspaceId, 'ws-A');
 });
