@@ -76,8 +76,10 @@ test('falha final (attempts>=max) → failed + placeholder', async () => {
 });
 
 test('cap de duração: não chama ASR, sobe ogg, failed com placeholder de longo', async () => {
-  await pool.query(`UPDATE messages SET media_duration_s=999 WHERE evolution_event_id='E1'`);
-  const job = await seedJob('inbound'); // media_duration_s do job vem do envelope; força via override abaixo
+  const job = await seedJob('inbound');
+  // duração é relida de messages dentro do processJob → setar DEPOIS do seed (o
+  // beforeEach fez TRUNCATE, então um UPDATE antes do seed afetaria 0 linhas).
+  await pool.query(`UPDATE messages SET media_duration_s=999 WHERE id=$1`, [job.message_id]);
   await processJob(deps({ maxDurationS: 600, provider: { transcribe: async () => { throw new Error('nao deveria chamar'); } } }), { ...job });
   const { rows: m } = await pool.query(`SELECT text, transcription_status, media_key FROM messages WHERE id=$1`, [job.message_id]);
   assert.equal(m[0].transcription_status, 'failed');

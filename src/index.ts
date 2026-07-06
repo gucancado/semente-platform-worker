@@ -135,6 +135,10 @@ async function main() {
     registerWriteRoutes(scope, { pool, panelToken: config.PANEL_TOKEN });
   });
 
+  // Fail-fast ANTES de bindar/subir pollers: TRANSCRIBE_MODE≠off exige OPENAI + R2.
+  // Se inválido, o processo sai limpo aqui (sem servidor no ar nem crons rodando).
+  assertTranscribeConfig(config, r2Configured());
+
   await app.listen({ host: '0.0.0.0', port: config.PORT });
   app.log.info({ port: config.PORT }, 'semente-platform-worker up');
 
@@ -168,8 +172,7 @@ async function main() {
     evolution: { baseUrl: config.EVOLUTION_API_URL, apiKey: config.EVOLUTION_API_KEY },
   });
 
-  // Serviço de transcrição de áudio (isolado). Fail-fast se ligado sem pré-requisitos.
-  assertTranscribeConfig(config, r2Configured());
+  // Serviço de transcrição de áudio (isolado). Pré-requisitos já validados acima.
   if (config.TRANSCRIBE_MODE === 'auto') {
     startTranscriptionPoller(app.log);
   } else {
