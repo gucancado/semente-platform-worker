@@ -654,6 +654,9 @@ export async function insertTranscriptionJob(a: {
 }
 
 const TJ_COLS = `id, message_id, whatsapp_number_id, workspace_id, instance, evolution_event_id, direction, is_group, identifier, inbox_id, raw_envelope, status, attempts`;
+// RETURNING num UPDATE ... FROM due precisa qualificar as colunas com `t.` — sem
+// isso `id` é ambíguo (a CTE `due` também tem `id`). Espelha claimDuePendingTriggers.
+const TJ_COLS_T = TJ_COLS.split(', ').map((c) => `t.${c}`).join(', ');
 
 export async function claimDueTranscriptionJobs(batchSize = 20): Promise<TranscriptionJob[]> {
   const { rows } = await pool.query<TranscriptionJob>(
@@ -666,7 +669,7 @@ export async function claimDueTranscriptionJobs(batchSize = 20): Promise<Transcr
      UPDATE transcription_jobs t
         SET attempts = t.attempts + 1, scheduled_at = NOW() + INTERVAL '5 minutes', updated_at = NOW()
        FROM due WHERE t.id = due.id
-      RETURNING ${TJ_COLS}`,
+      RETURNING ${TJ_COLS_T}`,
     [batchSize]);
   return rows;
 }
