@@ -22,6 +22,7 @@ import { startReconcileCron } from './goals/scheduling/reconcile-trigger.js';
 import { startOutboxDispatcher } from './events/dispatcher.js';
 import { startLuaScheduler } from './lua/scheduler.js';
 import { startProvisioningReaperCron } from './whatsapp/provisioning-reaper.js';
+import { startConnectionAlertSweep } from './whatsapp/connection-alerts.js';
 import { startTranscriptionPoller } from './transcription/poller.js';
 import { r2Configured } from './integrations/r2.js';
 
@@ -171,6 +172,10 @@ async function main() {
     pool,
     evolution: { baseUrl: config.EVOLUTION_API_URL, apiKey: config.EVOLUTION_API_KEY },
   });
+
+  // Sweep de queda de conexão WhatsApp: alerta (painel + WhatsApp Saturno) quando um
+  // número cai de 'connected' e fica fora do ar além do debounce. Idempotente por episódio.
+  startConnectionAlertSweep(pool, app.log);
 
   // Serviço de transcrição de áudio (isolado). Pré-requisitos já validados acima.
   if (config.TRANSCRIBE_MODE === 'auto') {

@@ -93,6 +93,15 @@ const EnvSchema = z.object({
   GOOGLE_TOKEN_ENCRYPTION_KEY: z.string().min(40),
   GOOGLE_OAUTH_STATE_SECRET: z.string().min(40),
 
+  // ── Alerta de queda de conexão WhatsApp ──
+  // Sweep varre números fora do ar; dispara alerta (outbox + WhatsApp) após o debounce.
+  CONNECTION_ALERT_SWEEP_INTERVAL_MS: z.coerce.number().int().positive().default(60_000),
+  CONNECTION_ALERT_DEBOUNCE_MS: z.coerce.number().int().positive().default(300_000), // 5 min
+  // Instância Evolution que envia o aviso (número-sistema, ex.: saturno-<algo>). Vazio → só painel.
+  CONNECTION_ALERT_SENDER_INSTANCE: z.string().optional(),
+  // Destino do aviso: telefone E.164 (com ou sem +) ou JID de grupo (...@g.us). Vazio → só painel.
+  CONNECTION_ALERT_TARGET: z.string().optional(),
+
   // Burst smoothing / debounce: tempo de espera após cada msg recebida antes
   // de disparar trigger pro mercurio. Nova msg na janela reseta o timer.
   TRIGGER_DEBOUNCE_MS: z.coerce.number().int().positive().default(25_000),

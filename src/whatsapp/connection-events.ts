@@ -6,6 +6,7 @@ import { seedDefaultSourceSignals } from './source-signals.js';
 import { config } from '../config.js';
 import { deleteInstance } from '../evolution/client.js';
 import { syncGroupSubjectsDebounced } from './group-sync.js';
+import { enqueueConnectionEvent } from './connection-alerts.js';
 
 async function insertFirstTime(
   pool: Pool, evoDeps: { baseUrl: string; apiKey: string },
@@ -46,8 +47,15 @@ export async function handleConnectionEvent(pool: Pool, payload: any): Promise<b
   let numberId: number | null = null;
   const existing = await getNumberByInstance(pool, instance);
   if (existing) {
-    await updateNumberStatus(pool, instance, { status, phone: extractPhone(payload.data) });
+    const t = await updateNumberStatus(pool, instance, { status, phone: extractPhone(payload.data) });
     numberId = existing.id;
+    // Reconectou após um alerta de queda já disparado → limpa o alerta no painel.
+    if (t && t.newStatus === 'connected' && t.wasAlerted) {
+      await enqueueConnectionEvent(pool, {
+        status: 'resolved', workspaceId: t.workspaceId, numberId: t.numberId,
+        phone: t.phone, label: t.label, state: t.newStatus, since: null,
+      }).catch((err) => console.error('[connection-alerts] resolve enqueue falhou:', (err as Error).message));
+    }
   } else {
     const prov = await getProvisioning(pool, instance);
     if (prov) {

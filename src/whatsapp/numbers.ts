@@ -8,6 +8,12 @@ export type WhatsappNumber = {
   removedAt: string | null;
 };
 
+export type StatusTransition = {
+  numberId: number; workspaceId: string; phone: string | null; label: string | null;
+  oldStatus: WhatsappNumber['status']; newStatus: WhatsappNumber['status'];
+  wasAlerted: boolean;
+};
+
 const SELECT = `SELECT id, workspace_id, phone, evolution_instance, label, status, mode,
   expose_groups_in_mcp, created_by, created_at, updated_at, removed_at FROM whatsapp_numbers`;
 
@@ -60,10 +66,35 @@ export async function upsertConnectedNumber(
 export async function renameNumberLabel(pool: Pool, id: number, label: string | null): Promise<void> {
   await pool.query(`UPDATE whatsapp_numbers SET label = $2, updated_at = NOW() WHERE id = $1`, [id, label]);
 }
-export async function updateNumberStatus(pool: Pool, instance: string, p: { status: WhatsappNumber['status']; phone?: string }) {
-  await pool.query(
-    `UPDATE whatsapp_numbers SET status = $2, phone = COALESCE($3, phone), updated_at = NOW() WHERE evolution_instance = $1`,
+export async function updateNumberStatus(
+  pool: Pool, instance: string, p: { status: WhatsappNumber['status']; phone?: string },
+): Promise<StatusTransition | null> {
+  const { rows } = await pool.query(
+    `WITH prev AS (
+       SELECT id, status AS old_status, alerted_at AS old_alerted_at
+         FROM whatsapp_numbers WHERE evolution_instance = $1 FOR UPDATE
+     )
+     UPDATE whatsapp_numbers wn SET
+       status = $2,
+       phone = COALESCE($3, wn.phone),
+       updated_at = NOW(),
+       disconnected_since = CASE
+         WHEN $2 = 'connected' THEN NULL
+         WHEN prev.old_status = 'connected' THEN NOW()
+         ELSE wn.disconnected_since END,
+       alerted_at = CASE WHEN $2 = 'connected' THEN NULL ELSE wn.alerted_at END
+     FROM prev
+     WHERE wn.id = prev.id
+     RETURNING wn.id AS number_id, wn.workspace_id, wn.phone, wn.label,
+               prev.old_status, wn.status AS new_status,
+               (prev.old_alerted_at IS NOT NULL) AS was_alerted`,
     [instance, p.status, p.phone ?? null]);
+  const r = rows[0];
+  if (!r) return null;
+  return {
+    numberId: Number(r.number_id), workspaceId: r.workspace_id, phone: r.phone, label: r.label,
+    oldStatus: r.old_status, newStatus: r.new_status, wasAlerted: r.was_alerted === true,
+  };
 }
 
 export function normalizePhone(raw: string | null | undefined): string | undefined {
