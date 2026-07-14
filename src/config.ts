@@ -209,6 +209,20 @@ export function assertTranscribeConfig(
 }
 
 /**
+ * Fail-fast de pré-requisitos da coleta de reuniões (Vexa). Quando habilitada
+ * (VEXA_API_URL + VEXA_API_KEY presentes), ambas são obrigatórias — senão as rotas
+ * e o poller registrariam com um VexaClient quebrado. Chamado no startup (index.ts).
+ */
+export function assertMeetingsCollectConfig(
+  cfg: Pick<typeof config, 'VEXA_API_URL' | 'VEXA_API_KEY'>, enabled: boolean,
+): void {
+  if (!enabled) return;
+  if (!cfg.VEXA_API_URL || !cfg.VEXA_API_KEY) {
+    throw new Error('meetings-collect ligado exige VEXA_API_URL + VEXA_API_KEY');
+  }
+}
+
+/**
  * Resolve qual agente um token X-Agent-Token pertence.
  * Retorna o nome do agente + sua config, ou null se token desconhecido.
  */

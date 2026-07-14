@@ -1,5 +1,5 @@
 import Fastify from 'fastify';
-import { config, assertTranscribeConfig } from './config.js';
+import { config, assertTranscribeConfig, assertMeetingsCollectConfig } from './config.js';
 import { registerAdminRoutes } from './admin/routes.js';
 import { registerContactsRoutes } from './contacts/routes.js';
 import { registerWebhookRoutes } from './webhook/routes.js';
@@ -14,6 +14,10 @@ import { registerMemoriaRoutes } from './lua/routes.js';
 import { registerProvisionRoutes } from './whatsapp/provision-routes.js';
 import { registerReadRoutes } from './whatsapp/read-routes.js';
 import { registerWriteRoutes } from './whatsapp/write-routes.js';
+import { registerMeetingsCollectRoutes } from './meetings-collect/routes.js';
+import { startMeetingsCollectPoller } from './meetings-collect/poller.js';
+import { buildMeetingsCollectDeps } from './meetings-collect/runtime.js';
+import { VexaClient } from './integrations/vexa/client.js';
 import { pool } from './db.js';
 import { requireAgentToken } from './auth.js';
 import { startTriggerPoller } from './triggers/poller.js';
@@ -136,6 +140,22 @@ async function main() {
     registerWriteRoutes(scope, { pool, panelToken: config.PANEL_TOKEN });
   });
 
+  // Coleta de reuniões (Vexa): auth X-Panel-Token. Só registra se VEXA_* presentes.
+  const meetingsEnabled = Boolean(config.VEXA_API_URL && config.VEXA_API_KEY);
+  assertMeetingsCollectConfig(config, meetingsEnabled);
+  if (meetingsEnabled) {
+    await app.register(async (scope) => {
+      registerMeetingsCollectRoutes(scope, {
+        pool,
+        panelToken: config.PANEL_TOKEN,
+        vexa: new VexaClient(config.VEXA_API_URL!, config.VEXA_API_KEY!),
+        collectDeps: buildMeetingsCollectDeps(),
+      });
+    });
+  } else {
+    app.log.info('meetings-collect: rotas NÃO registradas (VEXA_API_URL/KEY ausentes)');
+  }
+
   // Fail-fast ANTES de bindar/subir pollers: TRANSCRIBE_MODE≠off exige OPENAI + R2.
   // Se inválido, o processo sai limpo aqui (sem servidor no ar nem crons rodando).
   assertTranscribeConfig(config, r2Configured());
@@ -182,6 +202,14 @@ async function main() {
     startTranscriptionPoller(app.log);
   } else {
     app.log.info({ mode: config.TRANSCRIBE_MODE }, 'transcrição: poller NÃO iniciado (modo != auto)');
+  }
+
+  // Poller de coleta de reuniões (Vexa): varre collected_meetings ativas, detecta
+  // inatividade/conclusão e importa episódio. Pré-requisitos já validados acima.
+  if (meetingsEnabled) {
+    startMeetingsCollectPoller(app.log);
+  } else {
+    app.log.info('meetings-collect: poller NÃO iniciado (VEXA_* ausentes)');
   }
 }
 
