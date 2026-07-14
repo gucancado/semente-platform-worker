@@ -180,6 +180,14 @@ const EnvSchema = z.object({
   INTERNAL_WORKSPACE_ID: z.string().optional(),
   INTERNAL_DOMAINS: z.string().default('beeads.com.br').transform((s) => s.split(',').map((d) => d.trim()).filter(Boolean)),
   FREEMAIL_DOMAINS_EXTRA: z.string().optional().transform((s) => (s ? s.split(',').map((d) => d.trim()).filter(Boolean) : [])),
+
+  // ── Coleta de reuniões (Vexa) ──
+  VEXA_API_URL: z.string().url().optional(),
+  VEXA_API_KEY: z.string().optional(),
+  MEETINGS_INACTIVITY_STOP_MIN: z.coerce.number().int().positive().default(10),
+  MEETINGS_ADMISSION_TIMEOUT_MIN: z.coerce.number().int().positive().default(10),
+  MEETINGS_COLLECT_POLLER_INTERVAL_MS: z.coerce.number().int().positive().default(60_000),
+  MEETINGS_COLLECT_POLLER_BATCH_SIZE: z.coerce.number().int().positive().default(10),
 });
 
 export const config = EnvSchema.parse(process.env);
