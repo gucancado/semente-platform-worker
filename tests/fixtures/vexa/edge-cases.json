@@ -1,0 +1,15 @@
+{
+  "id": 99,
+  "platform": "google_meet",
+  "native_meeting_id": "xyz-abcd-efg",
+  "status": "completed",
+  "start_time": "2026-07-13T14:00:00.000000",
+  "end_time": "2026-07-13T14:05:00.000000",
+  "segments": [
+    { "start": 1000.00, "end": 1000.00, "text": "Bom dia a todos.", "language": null, "speaker": "Ana", "absolute_start_time": "2083-01-17T19:56:56.107234" },
+    { "start": 1000.02, "end": 1003.50, "text": "Bom dia a todos.", "language": null, "speaker": "Ana", "absolute_start_time": "2083-01-17T19:56:56.127234" },
+    { "start": 1004.00, "end": 1006.00, "text": "Vamos comecar.", "language": null, "speaker": "Ana", "absolute_start_time": "2083-01-17T19:57:00.000000" },
+    { "start": 1007.00, "end": 1009.00, "text": "Perfeito.", "language": null, "speaker": "Bruno", "absolute_start_time": "2083-01-17T19:57:03.000000" },
+    { "start": 1010.00, "end": 1012.00, "text": "Concordo.", "language": null, "speaker": "Speaker", "absolute_start_time": "2083-01-17T19:57:06.000000" }
+  ]
+}
