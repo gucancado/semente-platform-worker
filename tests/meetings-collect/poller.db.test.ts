@@ -50,11 +50,12 @@ test('meeting completed → import: R2 antes, episódio criado, status=imported'
 test('inatividade > limite → stopBot + import', async () => {
   const row = await createCollectedMeeting(pool, { meetCode: 'abc-defg-hij', workspaceId: null, requestedBy: 'u' });
   const now = new Date('2026-07-13T15:00:00Z');
-  await updateCollectedMeeting(pool, row.id, { lastSegmentAt: new Date('2026-07-13T14:45:00Z') }); // 15 min atrás
+  const nowS = now.getTime() / 1000;
   const meeting = {
     id: 502, native_meeting_id: 'abc-defg-hij', status: 'active',
     start_time: '2026-07-13T14:00:00.000000', end_time: null,
-    segments: [{ start: 1000, end: 1002, text: 'oi', language: null, speaker: 'Ana' }],
+    // último segment 15 min antes de `now` (epoch s) → idle 15min > 10min → import
+    segments: [{ start: nowS - 16 * 60, end: nowS - 15 * 60, text: 'oi', language: null, speaker: 'Ana' }],
   };
   await runMeetingsCollectBatch(baseDeps({ 'abc-defg-hij': meeting }, now));
   const r = await getCollectedMeeting(pool, row.id);
@@ -75,17 +76,17 @@ test('zero segments + admissão estourada → failed/not_admitted', async () => 
 test('ainda ativa, com segments recentes → segue coletando', async () => {
   const row = await createCollectedMeeting(pool, { meetCode: 'abc-defg-hij', workspaceId: null, requestedBy: 'u' });
   const now = new Date('2026-07-13T15:00:00Z');
+  const nowS = now.getTime() / 1000;
   const meeting = {
     id: 504, native_meeting_id: 'abc-defg-hij', status: 'active',
     start_time: '2026-07-13T14:00:00.000000', end_time: null,
-    // último segment "agora" em epoch s: 2026-07-13T14:59:00Z ≈ 1784. Usa um relativo recente.
-    segments: [{ start: 1000, end: 3540, text: 'oi', language: null, speaker: 'Ana' }],
+    // último segment 5s antes de `now` (epoch s) → idle 5s < 10min → segue coletando
+    segments: [{ start: nowS - 60, end: nowS - 5, text: 'oi', language: null, speaker: 'Ana' }],
   };
-  // last_segment_at será derivado; para o teste, garantimos recência via now próximo do fim.
-  await runMeetingsCollectBatch(baseDeps({ 'abc-defg-hij': meeting }, new Date('2026-07-13T14:00:05Z')));
+  await runMeetingsCollectBatch(baseDeps({ 'abc-defg-hij': meeting }, now));
   const r = await getCollectedMeeting(pool, row.id);
   assert.equal(r!.status, 'collecting');
-  assert.ok(r!.last_segment_at); // atualizado
+  assert.ok(r!.last_segment_at);
 });
 
 test('import é idempotente (rodar 2x não duplica episódio)', async () => {
