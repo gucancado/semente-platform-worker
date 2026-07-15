@@ -339,6 +339,33 @@ test('stats-kind-3: GET /whatsapp/stats?kind=xpto (inválido) → mainQuery $6 =
   await app.close();
 });
 
+// stats-nid-1: `Number('') === 0`, NÃO NaN — o guard `isNaN(Number(number_id))`
+// sozinho deixa `?number_id=` (vazio) passar e manda `whatsapp_number_id = 0` pro
+// SQL, que não casa nada: 200 com stats ZERADOS em vez do agregado do workspace,
+// em silêncio. `?number_id=%20%20` (whitespace) é o mesmo caso. Os dois têm que
+// virar $2=null (sem filtro por número), como se o param fosse ausente.
+test('stats-nid-1: GET /whatsapp/stats?number_id= (vazio/whitespace) → $2=null, não 0', async () => {
+  for (const raw of ['', '%20%20']) {
+    const { pool, calls } = makeStubPool();
+    const app = Fastify({ logger: false });
+    registerReadRoutes(app, { pool, panelToken: PANEL_TOKEN, authz: makeMemberAllowed(), logAccess: () => {} });
+
+    const res = await app.inject({
+      method: 'GET',
+      url: `/whatsapp/stats?workspace_id=ws-1&number_id=${raw}`,
+      headers: ACTOR_HEADERS,
+    });
+
+    assert.equal(res.statusCode, 200, `number_id=${JSON.stringify(raw)} deve seguir como agregado do workspace`);
+    const mainCall = calls.find(c => /kind_match/.test(c.text));
+    assert.ok(mainCall, 'mainQuery must have run');
+    assert.equal(mainCall!.params[1], null, `number_id=${JSON.stringify(raw)} → $2 deve ser null, não 0`);
+    // E o ctx NÃO pode ir buscar o número 0 no banco (branch de getNumber).
+    assert.ok(!calls.some(c => /FROM whatsapp_numbers WHERE id/.test(c.text)), 'não deve resolver getNumber(0)');
+    await app.close();
+  }
+});
+
 // stats-7: stats logAccess MUST omit `meta` (MINOR #8) so access-log stores NULL,
 // not the literal string '{}'.
 test('stats-7: GET /whatsapp/stats — logAccess called without meta', async () => {

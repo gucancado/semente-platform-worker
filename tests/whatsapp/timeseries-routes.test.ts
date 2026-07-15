@@ -265,6 +265,27 @@ test('ts-13: envelope whatsapp_v1 + eco de bucket/periodBasis/window/series', as
   await app.close();
 });
 
+// `Number('') === 0`, NÃO NaN — o guard `isNaN(Number(number_id))` sozinho deixa
+// `?number_id=` (vazio) passar e manda `whatsapp_number_id = 0` pro SQL, que não
+// casa nada: 200 com série toda zerada em vez do agregado do workspace, em
+// silêncio. `?number_id=%20%20` (whitespace) é o mesmo caso.
+test('ts-15: number_id VAZIO/whitespace → $2=null (agregado do workspace), não 0', async () => {
+  for (const raw of ['', '%20%20']) {
+    const { pool, calls } = makeStubPool();
+    const app = buildApp({ pool, authz: makeMemberAllowed() });
+    const res = await app.inject({
+      method: 'GET',
+      url: `${URL}?workspace_id=ws-1&number_id=${raw}`,
+      headers: ACTOR_HEADERS,
+    });
+    assert.equal(res.statusCode, 200, `number_id=${JSON.stringify(raw)} deve seguir como agregado do workspace`);
+    const call = findTimeseriesCall(calls);
+    assert.ok(call, 'a query da série deve ter rodado');
+    assert.equal(call!.params[1], null, `number_id=${JSON.stringify(raw)} → $2 deve ser null, não 0`);
+    await app.close();
+  }
+});
+
 test('ts-14: period_basis default = arrival; kind inválido → all', async () => {
   const { pool, calls } = makeStubPool();
   const app = buildApp({ pool, authz: makeMemberAllowed() });

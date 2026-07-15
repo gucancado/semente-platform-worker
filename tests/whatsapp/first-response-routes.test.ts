@@ -69,10 +69,16 @@ const PANEL_HEADERS = { 'x-panel-token': PANEL_TOKEN };
 const ACTOR_HEADERS = { 'x-panel-token': PANEL_TOKEN, 'x-acting-user': 'user-abc' };
 const URL = '/whatsapp/first-response';
 
-function buildApp(opts: { pool: any; authz: RouteAuthz }) {
+function buildApp(opts: { pool: any; authz: RouteAuthz; logAccess?: (...a: any[]) => void }) {
   const app = Fastify({ logger: false });
-  registerReadRoutes(app, { pool: opts.pool, panelToken: PANEL_TOKEN, authz: opts.authz, logAccess: () => {} });
+  registerReadRoutes(app, { pool: opts.pool, panelToken: PANEL_TOKEN, authz: opts.authz, logAccess: opts.logAccess ?? (() => {}) });
   return app;
+}
+
+/** Coletor de logAccess — o stub default descarta e não prenderia a `action`. */
+function makeLogCollector() {
+  const entries: any[] = [];
+  return { entries, logAccess: (_pool: any, e: any) => { entries.push(e); } };
 }
 
 // A query do getFirstResponse é a única que roda nesta rota (logAccess é stubbed).
@@ -212,5 +218,42 @@ test('fr-10: number_id repassado como number (não string) ao getFirstResponse',
   assert.equal(call!.params[0], 'ws-1'); // $1 workspace
   assert.equal(call!.params[1], 7);      // $2 number_id — number, não "7"
   assert.strictEqual(typeof call!.params[1], 'number');
+  await app.close();
+});
+
+// `Number('') === 0`, NÃO NaN: um guard que só testa isNaN deixa `?number_id=`
+// passar e manda `whatsapp_number_id = 0` pro SQL, que não casa nada → 200 com
+// agregado ZERADO em vez do agregado do workspace, em silêncio. `?number_id=%20%20`
+// (whitespace) é o mesmo caso. Ambos têm que virar $2=null (sem filtro por número).
+test('fr-11: number_id VAZIO/whitespace → $2=null (agregado do workspace), não 0', async () => {
+  for (const raw of ['', '%20%20']) {
+    const { pool, calls } = makeStubPool();
+    const app = buildApp({ pool, authz: makeMemberAllowed() });
+    const res = await app.inject({ method: 'GET', url: `${URL}?workspace_id=ws-1&number_id=${raw}`, headers: ACTOR_HEADERS });
+    assert.equal(res.statusCode, 200, `number_id=${JSON.stringify(raw)} deve seguir como agregado do workspace`);
+    const call = findFirstResponseCall(calls);
+    assert.ok(call, 'a query deve ter rodado');
+    assert.equal(call!.params[1], null, `number_id=${JSON.stringify(raw)} → $2 deve ser null, não 0`);
+    await app.close();
+  }
+});
+
+// A spec exige `action: 'first_response'` no logAccess; o stub `() => {}` dos
+// outros casos descarta a chamada e não prenderia a ação nem o numberId.
+test('fr-12: logAccess registra action="first_response" com o numberId normalizado', async () => {
+  const { pool } = makeStubPool();
+  const log = makeLogCollector();
+  const app = buildApp({ pool, authz: makeMemberAllowed(), logAccess: log.logAccess });
+
+  await app.inject({ method: 'GET', url: `${URL}?workspace_id=ws-1&number_id=7`, headers: ACTOR_HEADERS });
+  assert.equal(log.entries.length, 1);
+  assert.equal(log.entries[0].action, 'first_response');
+  assert.equal(log.entries[0].workspaceId, 'ws-1');
+  assert.equal(log.entries[0].actor, 'user-abc');
+  assert.equal(log.entries[0].numberId, 7);
+
+  // number_id vazio → numberId do log é null (não 0).
+  await app.inject({ method: 'GET', url: `${URL}?workspace_id=ws-1&number_id=`, headers: ACTOR_HEADERS });
+  assert.equal(log.entries[1].numberId, null, 'number_id vazio → log com numberId null, não 0');
   await app.close();
 });
