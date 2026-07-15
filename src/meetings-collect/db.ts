@@ -19,6 +19,14 @@ export type CollectedMeetingRow = {
 const COLS = `id, meet_code, vexa_meeting_id, workspace_id, status, failure_reason,
               requested_by, last_segment_at, episode_id, created_at, updated_at`;
 
+/** episode_id é BIGINT e o driver pg entrega int8 como string (sem setTypeParser,
+ *  que é global e mudaria o worker inteiro). Normaliza aqui, no ponto de leitura,
+ *  para o tipo declarado ser verdade e o contrato meetings_v1 (episode_id: number)
+ *  valer na resposta HTTP. vexa_meeting_id é INT (int4) e já chega number. */
+export function mapCollectedMeetingRow(row: CollectedMeetingRow): CollectedMeetingRow {
+  return { ...row, episode_id: row.episode_id == null ? null : Number(row.episode_id) };
+}
+
 export async function createCollectedMeeting(
   pool: Pool,
   a: { meetCode: string; workspaceId: string | null; requestedBy: string },
@@ -28,7 +36,7 @@ export async function createCollectedMeeting(
      VALUES ($1,$2,$3,'collecting') RETURNING ${COLS}`,
     [a.meetCode, a.workspaceId, a.requestedBy],
   );
-  return rows[0]!;
+  return mapCollectedMeetingRow(rows[0]!);
 }
 
 /** GLOBAL: existe alguma coleta ativa (Vexa Lite = 1 simultânea). */
@@ -37,20 +45,20 @@ export async function getActiveCollectedMeeting(pool: Pool): Promise<CollectedMe
     `SELECT ${COLS} FROM collected_meetings
       WHERE status IN ('collecting','stopping') ORDER BY created_at ASC LIMIT 1`,
   );
-  return rows[0] ?? null;
+  return rows[0] ? mapCollectedMeetingRow(rows[0]) : null;
 }
 
 export async function getCollectedMeeting(pool: Pool, id: string): Promise<CollectedMeetingRow | null> {
   const { rows } = await pool.query<CollectedMeetingRow>(
     `SELECT ${COLS} FROM collected_meetings WHERE id=$1`, [id]);
-  return rows[0] ?? null;
+  return rows[0] ? mapCollectedMeetingRow(rows[0]) : null;
 }
 
 export async function listActiveCollectedMeetings(pool: Pool): Promise<CollectedMeetingRow[]> {
   const { rows } = await pool.query<CollectedMeetingRow>(
     `SELECT ${COLS} FROM collected_meetings
       WHERE status IN ('collecting','stopping') ORDER BY created_at ASC`);
-  return rows;
+  return rows.map(mapCollectedMeetingRow);
 }
 
 export async function updateCollectedMeeting(
