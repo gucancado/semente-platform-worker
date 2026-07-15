@@ -94,3 +94,49 @@ test('whatsapp_groups de OUTRO workspace não vaza (mesmo identifier, numberId o
   assert.equal(r.answered, 1, 'thread de ws-leak-a é DM real; whatsapp_groups de ws-leak-b não pode reclassificá-la como grupo');
   assert.equal(r.unanswered, 0);
 });
+
+// CONTRAPROVA do teste acima (direção positiva). O teste negativo sozinho ficaria
+// VERDE mesmo se `WORKSPACE_NUMBERS` fosse um predicado sempre-falso — e aí grupos
+// vazariam PARA DENTRO do kind='dm' (o inverso exato do bug corrigido). Este caso
+// prende que `g.jid IS NOT NULL` de fato casa quando a row de grupo é do PRÓPRIO
+// workspace: mesmo JID, mesmo cenário, só muda o dono da row de grupo.
+test('whatsapp_groups do PRÓPRIO workspace CASA (mesmo JID) → thread é grupo, excluída do kind=dm', async () => {
+  await insertNumber(12, 'ws-own-a');
+  await insertNumber(13, 'ws-own-b');
+  // Mesma montagem do teste anterior: thread respondida, JID compartilhado.
+  await insertMsg({ numberId: 12, workspaceId: 'ws-own-a', identifier: 'shared-jid', createdAt: '2026-06-02T10:00:00Z', direction: 'inbound' });
+  await insertMsg({ numberId: 12, workspaceId: 'ws-own-a', identifier: 'shared-jid', createdAt: '2026-06-02T10:30:00Z', direction: 'outbound' });
+  // Diferença: quem marca o JID como grupo é o PRÓPRIO ws-own-a (não o vizinho).
+  await insertGroup(12, 'ws-own-a', 'shared-jid');
+
+  const dm = await getFirstResponse(pool, { workspaceId: 'ws-own-a' }); // default kind='dm'
+  assert.equal(dm.answered, 0, 'row de grupo do próprio workspace DEVE casar → thread sai do escopo dm');
+  assert.equal(dm.unanswered, 0);
+
+  // E, sob kind='group', a mesma thread reaparece — prova que ela não sumiu, foi reclassificada.
+  const grp = await getFirstResponse(pool, { workspaceId: 'ws-own-a', kind: 'group' });
+  assert.equal(grp.answered, 1, 'a thread existe e é grupo');
+  assert.equal(grp.medianMinutes, 30);
+});
+
+// p90 vs mediana: com UMA amostra as duas coincidem, então o teste principal não
+// distingue um p90 correto de um erro de fração (0.9 → 0.09). Amostras múltiplas
+// separam os dois valores e prendem a fração do PERCENTILE_CONT.
+test('p90 e mediana divergem com múltiplas amostras (prende a fração do percentil)', async () => {
+  await insertNumber(14, 'ws-p90');
+  // 10 threads respondidas em 1..10 minutos (interpolação linear do PERCENTILE_CONT:
+  // mediana = 5.5; p90 = 9.1).
+  for (let i = 1; i <= 10; i++) {
+    const id = `t${i}`;
+    await insertMsg({ numberId: 14, workspaceId: 'ws-p90', identifier: id, createdAt: '2026-06-02T10:00:00Z', direction: 'inbound' });
+    const out = new Date(Date.UTC(2026, 5, 2, 10, i, 0)).toISOString(); // 10:0i → i minutos
+    await insertMsg({ numberId: 14, workspaceId: 'ws-p90', identifier: id, createdAt: out, direction: 'outbound' });
+  }
+
+  const r = await getFirstResponse(pool, { workspaceId: 'ws-p90', numberId: 14 });
+  assert.equal(r.answered, 10);
+  assert.equal(r.avgMinutes, 5.5);
+  assert.equal(r.medianMinutes, 5.5, 'PERCENTILE_CONT(0.5) sobre 1..10 = 5.5');
+  assert.equal(r.p90Minutes, 9.1, 'PERCENTILE_CONT(0.9) sobre 1..10 = 9.1 (não 5.5, não ~1.8)');
+  assert.notEqual(r.p90Minutes, r.medianMinutes, 'p90 tem que divergir da mediana');
+});
