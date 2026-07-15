@@ -15,6 +15,9 @@ import { emptyToUndefined } from './query-coerce.js';
 import { tenantContext } from './tenant-context.js';
 import { presignGet, whatsappMediaBucket } from '../integrations/r2.js';
 
+/** Teto de pontos da série de /whatsapp/stats/timeseries (guarda pré-DB). */
+const MAX_BUCKETS = 200;
+
 export function registerReadRoutes(
   app: FastifyInstance,
   deps: { pool: Pool; panelToken: string; authz?: RouteAuthz; logAccess?: LogAccessFn },
@@ -135,8 +138,17 @@ export function registerReadRoutes(
     const sinceEff = emptyToUndefined(since) ?? new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
     const spanMs = new Date(untilEff).getTime() - new Date(sinceEff).getTime();
     if (Number.isNaN(spanMs) || spanMs <= 0) return reply.code(400).send({ error: 'invalid since/until' });
-    if (spanMs / (bu === 'week' ? 7 * 86_400_000 : 86_400_000) > 200) {
-      return reply.code(400).send({ error: 'window exceeds 200 buckets' });
+    // Teto de buckets — guarda PRÉ-DB (não montar/trafegar série gigante).
+    // A contagem emitida NÃO é span/step: `since`/`until` são INCLUSIVOS e os buckets
+    // são alinhados ao fuso SP, então as duas pontas contam — uma janela de exatamente
+    // 200 dias emite 201 buckets. Em vez de reintroduzir aritmética de fuso em JS (o
+    // SQL é a única autoridade de fuso — ver timeseries.ts), usamos um LIMITE SUPERIOR
+    // da contagem: um intervalo de span S cruza no máximo floor(S/step)+1 fronteiras de
+    // bucket, logo emite no máximo floor(S/step)+2 buckets. Rejeitar por esse teto
+    // garante que a série nunca passa de MAX_BUCKETS (conservador em ~1 na borda).
+    const stepMs = bu === 'week' ? 7 * 86_400_000 : 86_400_000;
+    if (Math.floor(spanMs / stepMs) + 2 > MAX_BUCKETS) {
+      return reply.code(400).send({ error: `window exceeds ${MAX_BUCKETS} buckets` });
     }
     const k = kind === 'dm' || kind === 'group' ? kind : 'all';
     const result = await getTimeseries(deps.pool, {
