@@ -52,6 +52,10 @@ test('outbound ANTES do primeiro inbound não conta como resposta', async () => 
   const r = await getFirstResponse(pool, { workspaceId: 'ws-fr2', numberId: 2 });
   assert.equal(r.answered, 0);
   assert.equal(r.unanswered, 1);
+  // answered=0 → PERCENTILE_CONT/AVG sobre conjunto vazio devem virar null, não NaN.
+  assert.equal(r.avgMinutes, null);
+  assert.equal(r.medianMinutes, null);
+  assert.equal(r.p90Minutes, null);
 });
 
 test('mensagens backfill são ignoradas (live-only)', async () => {
