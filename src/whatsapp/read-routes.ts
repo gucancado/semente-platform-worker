@@ -5,6 +5,7 @@ import { listThreads, listThreadMessages, searchThreads } from './read-queries.j
 import { exportConversation } from './export.js';
 import { getStats } from './stats.js';
 import { getTimeseries } from './timeseries.js';
+import { getFirstResponse } from './first-response.js';
 import { listDisqualifyReasons } from './disqualify-reasons.js';
 import { listSourceSignals } from './source-signals.js';
 import { requirePanelToken } from './provision-routes.js';
@@ -160,6 +161,28 @@ export function registerReadRoutes(
     });
     logAccess(deps.pool, { actor: req.actingUser, action: 'stats_timeseries', workspaceId: workspace_id, numberId: number_id !== undefined ? Number(number_id) : null });
     return reply.send({ schema: 'whatsapp_v1', context: tenantContext({ workspaceId: workspace_id }), bucket: bu, periodBasis: pb ?? 'arrival', window: { since: sinceEff, until: untilEff }, ...result });
+  });
+
+  // ── GET /whatsapp/first-response ────────────────────────────────────────────
+  // Tempo de 1ª resposta agregado (live-only, DM por default). Member gate.
+  app.get('/whatsapp/first-response', { preHandler: auth }, async (req: any, reply) => {
+    const { workspace_id, number_id, since, until, kind } = req.query as Record<string, string | undefined>;
+    if (!workspace_id) return reply.code(400).send({ error: 'workspace_id required' });
+    if (number_id !== undefined && Number.isNaN(Number(number_id))) {
+      return reply.code(400).send({ error: 'number_id must be numeric' });
+    }
+    if (!await gateMember(req, reply, workspace_id, authz)) return;
+    const k = kind === 'dm' || kind === 'group' || kind === 'all' ? kind : 'dm';
+    const sinceEff = emptyToUndefined(since) ?? new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+    const result = await getFirstResponse(deps.pool, {
+      workspaceId: workspace_id,
+      numberId: number_id !== undefined ? Number(number_id) : undefined,
+      since: sinceEff,
+      until: emptyToUndefined(until),
+      kind: k,
+    });
+    logAccess(deps.pool, { actor: req.actingUser, action: 'first_response', workspaceId: workspace_id, numberId: number_id !== undefined ? Number(number_id) : null });
+    return reply.send({ schema: 'whatsapp_v1', context: tenantContext({ workspaceId: workspace_id }), window: { since: sinceEff, until: emptyToUndefined(until) ?? null }, kind: k, ...result });
   });
 
   // ── GET /whatsapp/threads/:identifier/messages ───────────────────────────────
