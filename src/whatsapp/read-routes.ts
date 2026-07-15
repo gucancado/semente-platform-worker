@@ -4,6 +4,7 @@ import { listNumbers, getNumber } from './numbers.js';
 import { listThreads, listThreadMessages, searchThreads } from './read-queries.js';
 import { exportConversation } from './export.js';
 import { getStats } from './stats.js';
+import { getTimeseries } from './timeseries.js';
 import { listDisqualifyReasons } from './disqualify-reasons.js';
 import { listSourceSignals } from './source-signals.js';
 import { requirePanelToken } from './provision-routes.js';
@@ -111,6 +112,42 @@ export function registerReadRoutes(
       numberId: number_id !== undefined ? Number(number_id) : null,
     });
     return reply.send({ schema: 'whatsapp_v1', context: ctx, ...stats });
+  });
+
+  // ── GET /whatsapp/stats/timeseries ──────────────────────────────────────────
+  // Série temporal agregada (sem identifier/texto no payload). Member gate.
+  app.get('/whatsapp/stats/timeseries', { preHandler: auth }, async (req: any, reply) => {
+    const { workspace_id, number_id, since, until, period_basis, kind, bucket } = req.query as Record<string, string | undefined>;
+    if (!workspace_id) return reply.code(400).send({ error: 'workspace_id required' });
+    if (number_id !== undefined && Number.isNaN(Number(number_id))) {
+      return reply.code(400).send({ error: 'number_id must be numeric' });
+    }
+    const pb = emptyToUndefined(period_basis);
+    if (pb !== undefined && pb !== 'arrival' && pb !== 'activity') {
+      return reply.code(400).send({ error: "period_basis must be 'arrival' or 'activity'" });
+    }
+    const bu = emptyToUndefined(bucket) ?? 'day';
+    if (bu !== 'day' && bu !== 'week') {
+      return reply.code(400).send({ error: "bucket must be 'day' or 'week'" });
+    }
+    if (!await gateMember(req, reply, workspace_id, authz)) return;
+    const untilEff = emptyToUndefined(until) ?? new Date().toISOString();
+    const sinceEff = emptyToUndefined(since) ?? new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+    const spanMs = new Date(untilEff).getTime() - new Date(sinceEff).getTime();
+    if (Number.isNaN(spanMs) || spanMs <= 0) return reply.code(400).send({ error: 'invalid since/until' });
+    if (spanMs / (bu === 'week' ? 7 * 86_400_000 : 86_400_000) > 200) {
+      return reply.code(400).send({ error: 'window exceeds 200 buckets' });
+    }
+    const k = kind === 'dm' || kind === 'group' ? kind : 'all';
+    const result = await getTimeseries(deps.pool, {
+      workspaceId: workspace_id,
+      numberId: number_id !== undefined ? Number(number_id) : undefined,
+      since: sinceEff, until: untilEff,
+      periodBasis: pb as 'arrival' | 'activity' | undefined,
+      kind: k, bucket: bu,
+    });
+    logAccess(deps.pool, { actor: req.actingUser, action: 'stats_timeseries', workspaceId: workspace_id, numberId: number_id !== undefined ? Number(number_id) : null });
+    return reply.send({ schema: 'whatsapp_v1', context: tenantContext({ workspaceId: workspace_id }), bucket: bu, periodBasis: pb ?? 'arrival', window: { since: sinceEff, until: untilEff }, ...result });
   });
 
   // ── GET /whatsapp/threads/:identifier/messages ───────────────────────────────
