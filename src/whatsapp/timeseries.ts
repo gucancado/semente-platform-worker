@@ -24,7 +24,7 @@ import type { Pool } from 'pg';
 // Autoridade única do escopo de workspace nos laterais de metadado (thread_meta /
 // groups são chaveados por identifier, que não é único entre workspaces).
 // Definido em stats.ts, de onde este módulo já herda a semântica de `leads`.
-import { WORKSPACE_NUMBERS } from './stats.js';
+import { WORKSPACE_NUMBERS } from './sql-scope.js';
 
 export type TimeseriesPoint = { bucketStart: string; total: number; leads: number };
 

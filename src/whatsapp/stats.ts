@@ -20,20 +20,8 @@
  */
 
 import type { Pool } from 'pg';
-
-/**
- * Números do workspace $1. Escopo OBRIGATÓRIO de todo lateral de metadado.
- *
- * `whatsapp_thread_meta` e `whatsapp_groups` são chaveados por `identifier` (JID de
- * telefone), que NÃO é único entre workspaces. Casar só por identifier + o filtro
- * opcional `($2 IS NULL OR ... = $2)` deixa o lateral SEM escopo nenhum quando $2 é
- * NULL (agregado do workspace) → metadado de outro workspace vaza para este.
- *
- * Este é o mesmo padrão que `byTag` já usava isolado (ver IMPORTANT #2 abaixo);
- * agora é a autoridade única, compartilhada com timeseries.ts, para "que números
- * pertencem a este workspace".
- */
-export const WORKSPACE_NUMBERS = `(SELECT id FROM whatsapp_numbers WHERE workspace_id = $1)`;
+// Escopo de workspace ($1) — autoridade única em sql-scope.ts.
+import { WORKSPACE_NUMBERS } from './sql-scope.js';
 
 export type Stats = {
   /** Total distinct thread identifiers in scope. */
