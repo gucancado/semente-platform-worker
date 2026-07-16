@@ -47,8 +47,8 @@ export async function listMeetings(
 
 export type MeetingsStats = {
   total: number;
-  totalSeconds: number;
-  avgSeconds: number;
+  total_seconds: number;
+  avg_seconds: number;
   daily: Array<{ day: string; count: number }>;
   speakers: Array<{ speaker: string; segments: number }>;
   health: Record<string, number>;
@@ -123,7 +123,7 @@ export async function getMeetingTranscript(
 ): Promise<MeetingTranscript | null> {
   const ep = await pool.query(
     `SELECT id, title, occurred_at, duration_seconds, participants, workspace_id
-     FROM episodes WHERE id=$1`, [a.episodeId]);
+     FROM episodes WHERE id=$1 AND external_source='vexa'`, [a.episodeId]);
   const row = ep.rows[0];
   // Revalidação de tenant: episódio inexistente OU de outro workspace → null (404 na rota).
   if (!row || row.workspace_id !== a.workspaceId) return null;
@@ -156,8 +156,8 @@ export async function getMeetingsStats(
   const t = totals.rows[0] ?? { n: 0, total_seconds: 0, avg_seconds: 0 };
   return {
     total: t.n,
-    totalSeconds: t.total_seconds,
-    avgSeconds: Math.round(t.avg_seconds),
+    total_seconds: t.total_seconds,
+    avg_seconds: Math.round(t.avg_seconds),
     daily: fillDailySeries(daily.rows.map((r) => ({ day: r.day, count: r.n })), a.since, a.until),
     speakers: speakers.rows.map((r) => ({ speaker: r.speaker, segments: r.segments })),
     health: Object.fromEntries(health.rows.map((r) => [r.status, r.n])),

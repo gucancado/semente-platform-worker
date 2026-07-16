@@ -25,8 +25,8 @@ test('getMeetingsStats agrega volume, participantes e saúde', async () => {
 
   const stats = await getMeetingsStats(pool, { workspaceId: ws, since: '2026-07-10', until: '2026-07-11' });
   assert.equal(stats.total, 2);
-  assert.equal(stats.totalSeconds, 180);
-  assert.equal(stats.avgSeconds, 90);
+  assert.equal(stats.total_seconds, 180);
+  assert.equal(stats.avg_seconds, 90);
   assert.equal(stats.daily.length, 2);
   assert.deepEqual(stats.daily.map((d) => d.count), [1, 1]);
   assert.deepEqual(stats.speakers, [{ speaker: 'Gustavo', segments: 8 }, { speaker: 'Ana', segments: 2 }]);
