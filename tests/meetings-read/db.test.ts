@@ -12,13 +12,16 @@ test('mapMeetingListRow converte episode_id (int8 string) em number', () => {
   assert.equal(typeof row.episode_id, 'number');
 });
 
-test('mapMeetingListRow preserva episode_id nulo (reunião não importada)', () => {
+test('mapMeetingListRow com fireflies (sem coleta): collected_id/meet_code nulos, episode_id number', () => {
   const row = mapMeetingListRow({
-    collected_id: 'uuid-2', episode_id: null, meet_code: 'ddd-eeee-fff',
-    status: 'failed', failure_reason: 'not_admitted', title: null, occurred_at: null,
-    duration_seconds: null, participants: null, sort_at: new Date(),
+    collected_id: null, episode_id: '7' as unknown as number, meet_code: null,
+    status: 'transcribed', failure_reason: null, title: 'Chianca + BeeAds', occurred_at: new Date(),
+    duration_seconds: 1865, participants: null, sort_at: new Date(),
   });
-  assert.equal(row.episode_id, null);
+  assert.equal(row.episode_id, 7);
+  assert.equal(typeof row.episode_id, 'number');
+  assert.equal(row.collected_id, null);
+  assert.equal(row.meet_code, null);
 });
 
 test('fillDailySeries preenche dias vazios com zero no intervalo', () => {

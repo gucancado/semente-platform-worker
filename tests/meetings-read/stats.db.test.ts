@@ -8,17 +8,36 @@ beforeEach(async () => {
 });
 after(() => pool.end());
 
-test('getMeetingsStats agrega volume, participantes e saúde', async () => {
+async function seedEp(ws: string, ext: string, occurredAt: string, dur: number): Promise<number> {
+  const { rows } = await pool.query(
+    `INSERT INTO episodes (fonte, external_source, external_id, title, occurred_at, duration_seconds, workspace_id, participants, metadata)
+     VALUES ('reuniao', $4, $5, 'R', $2, $3, $1, '[]', '{}') RETURNING id`,
+    [ws, occurredAt, dur, ext, `x-${occurredAt}`],
+  );
+  return Number(rows[0].id);
+}
+async function seedTurns(epId: number, speaker: string, n: number): Promise<void> {
+  for (let i = 0; i < n; i++) {
+    await pool.query(
+      `INSERT INTO episode_turns (episode_id, turn_index, speaker_name, text)
+       VALUES ($1, (SELECT COALESCE(MAX(turn_index),-1)+1 FROM episode_turns WHERE episode_id=$1), $2, 'fala')`,
+      [epId, speaker],
+    );
+  }
+}
+
+test('getMeetingsStats: volume de fonte=reuniao, speakers dos turns, saúde do collected_meetings', async () => {
   const ws = 'ws-s';
-  const { rows: e1 } = await pool.query(
-    `INSERT INTO episodes (fonte, external_source, external_id, title, occurred_at, duration_seconds, workspace_id, participants, metadata)
-     VALUES ('reuniao','vexa','x1','R1','2026-07-10T12:00:00Z',120,$1,'[]','{"speaker_counts":{"Gustavo":5,"Ana":2}}') RETURNING id`, [ws]);
-  await pool.query(
-    `INSERT INTO episodes (fonte, external_source, external_id, title, occurred_at, duration_seconds, workspace_id, participants, metadata)
-     VALUES ('reuniao','vexa','x2','R2','2026-07-11T12:00:00Z',60,$1,'[]','{"speaker_counts":{"Gustavo":3}}')`, [ws]);
+  // duas reuniões fireflies (sem metadata.speaker_counts — speakers vêm dos turns)
+  const e1 = await seedEp(ws, 'fireflies', '2026-07-10T12:00:00Z', 120);
+  const e2 = await seedEp(ws, 'fireflies', '2026-07-11T12:00:00Z', 60);
+  await seedTurns(e1, 'Gustavo', 5);
+  await seedTurns(e1, 'Ana', 2);
+  await seedTurns(e2, 'Gustavo', 3);
+  // saúde: pipeline Vexa (collected_meetings) — pode coexistir sem episode
   await pool.query(
     `INSERT INTO collected_meetings (meet_code, workspace_id, status, requested_by, episode_id, created_at)
-     VALUES ('aaa-bbbb-ccc',$1,'imported','u',$2,'2026-07-10T12:05:00Z')`, [ws, Number(e1[0].id)]);
+     VALUES ('aaa-bbbb-ccc',$1,'imported','u',$2,'2026-07-10T12:05:00Z')`, [ws, e1]);
   await pool.query(
     `INSERT INTO collected_meetings (meet_code, workspace_id, status, failure_reason, requested_by, created_at)
      VALUES ('ddd-eeee-fff',$1,'failed','not_admitted','u','2026-07-11T09:00:00Z')`, [ws]);

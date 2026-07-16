@@ -1,9 +1,9 @@
 import type { Pool } from 'pg';
 
 export type MeetingListRow = {
-  collected_id: string;
-  episode_id: number | null;
-  meet_code: string;
+  collected_id: string | null;
+  episode_id: number;
+  meet_code: string | null;
   status: string;
   failure_reason: string | null;
   title: string | null;
@@ -16,18 +16,21 @@ export type MeetingListRow = {
 /** episode_id é BIGINT: o driver pg devolve int8 como string. Normaliza no ponto de leitura
  *  (setTypeParser é global e mudaria o worker inteiro). */
 export function mapMeetingListRow(row: MeetingListRow): MeetingListRow {
-  return { ...row, episode_id: row.episode_id == null ? null : Number(row.episode_id) };
+  return { ...row, episode_id: Number(row.episode_id) };
 }
 
-// Fronteira de dia em America/Sao_Paulo: $2/$3 são datas YYYY-MM-DD (ou null).
+// Lista dirigida por EPISODES (toda reunião transcrita: fireflies importadas + vexa),
+// LEFT JOIN collected_meetings pra trazer o status/failure da coleta Vexa quando existir.
+// Episódio sem linha de coleta (fireflies) = 'transcribed'. Fronteira de dia em BRT.
 const LIST_SQL = `
   WITH m AS (
-    SELECT cm.id AS collected_id, cm.episode_id, cm.meet_code, cm.status, cm.failure_reason,
+    SELECT e.id AS episode_id, cm.id AS collected_id, cm.meet_code,
+           COALESCE(cm.status, 'transcribed') AS status, cm.failure_reason,
            e.title, e.occurred_at, e.duration_seconds, e.participants,
-           COALESCE(e.occurred_at, cm.created_at) AS sort_at
-    FROM collected_meetings cm
-    LEFT JOIN episodes e ON e.id = cm.episode_id
-    WHERE cm.workspace_id = $1
+           e.occurred_at AS sort_at
+    FROM episodes e
+    LEFT JOIN collected_meetings cm ON cm.episode_id = e.id
+    WHERE e.fonte = 'reuniao' AND e.workspace_id = $1
   )
   SELECT * FROM m
   WHERE ($2::date IS NULL OR sort_at >= ($2::date)::timestamp AT TIME ZONE 'America/Sao_Paulo')
@@ -78,25 +81,28 @@ const TOTALS_SQL = `
          COALESCE(sum(duration_seconds),0)::int AS total_seconds,
          COALESCE(avg(duration_seconds),0)::float AS avg_seconds
   FROM episodes
-  WHERE external_source='vexa' AND workspace_id=$1
+  WHERE fonte='reuniao' AND workspace_id=$1
     AND occurred_at >= ($2::date)::timestamp AT TIME ZONE 'America/Sao_Paulo'
     AND occurred_at <  ($3::date + 1)::timestamp AT TIME ZONE 'America/Sao_Paulo'`;
 
 const DAILY_SQL = `
   SELECT to_char((occurred_at AT TIME ZONE 'America/Sao_Paulo')::date, 'YYYY-MM-DD') AS day, count(*)::int AS n
   FROM episodes
-  WHERE external_source='vexa' AND workspace_id=$1
+  WHERE fonte='reuniao' AND workspace_id=$1
     AND occurred_at >= ($2::date)::timestamp AT TIME ZONE 'America/Sao_Paulo'
     AND occurred_at <  ($3::date + 1)::timestamp AT TIME ZONE 'America/Sao_Paulo'
   GROUP BY 1 ORDER BY 1`;
 
+// Participação agregada dos TURNS (universal: fireflies não populou metadata.speaker_counts,
+// mas todo episódio de reunião tem episode_turns com speaker_name). "segments" = nº de turnos.
 const SPEAKERS_SQL = `
-  SELECT sk.key AS speaker, SUM((sk.value)::int)::int AS segments
-  FROM episodes e, jsonb_each_text(e.metadata->'speaker_counts') AS sk
-  WHERE e.external_source='vexa' AND e.workspace_id=$1 AND e.metadata ? 'speaker_counts'
+  SELECT et.speaker_name AS speaker, count(*)::int AS segments
+  FROM episode_turns et
+  JOIN episodes e ON e.id = et.episode_id
+  WHERE e.fonte='reuniao' AND e.workspace_id=$1 AND et.speaker_name IS NOT NULL
     AND e.occurred_at >= ($2::date)::timestamp AT TIME ZONE 'America/Sao_Paulo'
     AND e.occurred_at <  ($3::date + 1)::timestamp AT TIME ZONE 'America/Sao_Paulo'
-  GROUP BY sk.key ORDER BY segments DESC`;
+  GROUP BY et.speaker_name ORDER BY segments DESC`;
 
 const HEALTH_SQL = `
   SELECT status, count(*)::int AS n
@@ -123,7 +129,7 @@ export async function getMeetingTranscript(
 ): Promise<MeetingTranscript | null> {
   const ep = await pool.query(
     `SELECT id, title, occurred_at, duration_seconds, participants, workspace_id
-     FROM episodes WHERE id=$1 AND external_source='vexa'`, [a.episodeId]);
+     FROM episodes WHERE id=$1 AND fonte='reuniao'`, [a.episodeId]);
   const row = ep.rows[0];
   // Revalidação de tenant: episódio inexistente OU de outro workspace → null (404 na rota).
   if (!row || row.workspace_id !== a.workspaceId) return null;
