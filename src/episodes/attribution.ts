@@ -6,7 +6,7 @@ export const DEFAULT_FREEMAIL = [
 export type DomainRule = { workspace_id: string; project_slug: string | null };
 export type AttributionResult = {
   workspace_id: string | null; project_slug: string | null;
-  method: 'domain' | 'internal' | 'none'; unresolved_domains: string[];
+  method: 'domain' | 'internal' | 'title' | 'none'; unresolved_domains: string[];
 };
 
 function domainOf(email: string | undefined | null): string | null {
@@ -86,4 +86,35 @@ export async function upsertDomainRule(args: { domain: string; workspace_id: str
   if (!rows[0]) {
     throw new Error(`workspace_domains: '${args.domain}' já mapeado pra outro workspace — ambiguidade de domínio exige resolução manual`);
   }
+}
+
+// ── Fallback por título (spec: reunião sem e-mail de cliente mas com nome no título) ──
+
+export type TitleRule = { pattern: string; workspace_id: string; project_slug: string | null };
+
+/** Carrega regras de título (tabela pequena — cache em memória por execução). */
+export async function loadTitleRules(): Promise<TitleRule[]> {
+  const { pool } = await import('../db.js');
+  const { rows } = await pool.query<TitleRule>(
+    `SELECT pattern, workspace_id, project_slug FROM workspace_title_rules`
+  );
+  return rows.map((r) => ({ ...r, pattern: r.pattern.toLowerCase() }));
+}
+
+/**
+ * Resolve workspace pelo TÍTULO quando o domínio não resolveu (método 'none').
+ * Casa cada `pattern` como substring do título (lowercased). Se os patterns que
+ * casam apontam pra UM workspace → 'title'; se divergem (2+ workspaces) → 'none'
+ * (ambíguo, não chuta); nenhum casa → 'none'. Determinístico: independe da ordem.
+ */
+export function resolveByTitle(title: string | null | undefined, rules: TitleRule[]): AttributionResult {
+  const t = (title ?? '').toLowerCase();
+  if (!t) return { workspace_id: null, project_slug: null, method: 'none', unresolved_domains: [] };
+  const matched = rules.filter((r) => r.pattern && t.includes(r.pattern));
+  if (matched.length === 0) return { workspace_id: null, project_slug: null, method: 'none', unresolved_domains: [] };
+  const workspaces = new Set(matched.map((r) => r.workspace_id));
+  if (workspaces.size > 1) return { workspace_id: null, project_slug: null, method: 'none', unresolved_domains: [] };
+  // Empate de patterns no mesmo workspace: escolhe o pattern mais específico (mais longo).
+  const best = matched.sort((a, b) => b.pattern.length - a.pattern.length)[0]!;
+  return { workspace_id: best.workspace_id, project_slug: best.project_slug, method: 'title', unresolved_domains: [] };
 }

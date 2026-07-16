@@ -1,6 +1,6 @@
 import { config } from '../config.js';
 import { insertEpisodeWithTurns } from '../episodes/db.js';
-import { resolveAttribution, loadDomainRules, DEFAULT_FREEMAIL } from '../episodes/attribution.js';
+import { resolveAttribution, resolveByTitle, loadDomainRules, loadTitleRules, DEFAULT_FREEMAIL } from '../episodes/attribution.js';
 import { transcriptToEpisodeInput, type FirefliesTranscript } from '../integrations/fireflies/normalize.js';
 import { FirefliesClient } from '../integrations/fireflies/client.js';
 import { r2Configured, putAndVerify } from '../integrations/r2.js';
@@ -19,6 +19,7 @@ export async function runImport(
   opts: { dryRun: boolean; force?: boolean; internalWorkspaceId?: string }
 ): Promise<ImportReport> {
   const rules = await loadDomainRules();
+  const titleRules = await loadTitleRules();
   const freemail = [...DEFAULT_FREEMAIL, ...config.FREEMAIL_DOMAINS_EXTRA];
   const report: ImportReport = {
     total_seen: 0, imported: 0, duplicates: 0, forced: 0, skipped_empty: 0,
@@ -31,10 +32,15 @@ export async function runImport(
     try {
       const rawKey = `fireflies/${t.id}.json`;
       const input = transcriptToEpisodeInput(t, rawKey);
-      const attr = resolveAttribution(
+      let attr = resolveAttribution(
         input.participants ?? [], rules,
         { internalDomains: config.INTERNAL_DOMAINS, freemailDomains: freemail, internalWorkspaceId: opts.internalWorkspaceId }
       );
+      // Fallback: domínio não resolveu (só beeads + freemail) mas o título nomeia o cliente.
+      if (attr.method === 'none') {
+        const byTitle = resolveByTitle(t.title, titleRules);
+        if (byTitle.workspace_id) attr = { ...byTitle, unresolved_domains: attr.unresolved_domains };
+      }
       input.workspace_id = attr.workspace_id;
       input.project_slug = attr.project_slug;
       input.attribution_method = attr.method;
