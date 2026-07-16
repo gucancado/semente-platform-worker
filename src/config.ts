@@ -188,6 +188,9 @@ const EnvSchema = z.object({
   MEETINGS_ADMISSION_TIMEOUT_MIN: z.coerce.number().int().positive().default(10),
   MEETINGS_COLLECT_POLLER_INTERVAL_MS: z.coerce.number().int().positive().default(60_000),
   MEETINGS_COLLECT_POLLER_BATCH_SIZE: z.coerce.number().int().positive().default(10),
+  // ── Leitura de reuniões (contrato meetings_read_v1) ──
+  // Master switch: default OFF. Parse ESTRITO (NÃO z.coerce.boolean — ver LUA_ENABLED acima).
+  MEETINGS_READ_ENABLED: z.enum(['true', 'false']).default('false').transform((v) => v === 'true'),
 });
 
 export const config = EnvSchema.parse(process.env);
@@ -219,6 +222,19 @@ export function assertMeetingsCollectConfig(
   if (!enabled) return;
   if (!cfg.VEXA_API_URL || !cfg.VEXA_API_KEY) {
     throw new Error('meetings-collect ligado exige VEXA_API_URL + VEXA_API_KEY');
+  }
+}
+
+/**
+ * Fail-fast de pré-requisitos da leitura de reuniões (contrato meetings_read_v1).
+ * Leitura só depende do pool (sempre presente); o assert existe pra manter o padrão
+ * fail-fast/simetria com assertMeetingsCollectConfig. Chamado no startup (index.ts).
+ */
+export function assertMeetingsReadConfig(
+  cfg: Pick<typeof config, 'MEETINGS_READ_ENABLED'>, enabled: boolean,
+): void {
+  if (enabled && cfg.MEETINGS_READ_ENABLED !== true) {
+    throw new Error('meetings-read wiring inconsistente');
   }
 }
 

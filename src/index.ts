@@ -1,5 +1,5 @@
 import Fastify from 'fastify';
-import { config, assertTranscribeConfig, assertMeetingsCollectConfig } from './config.js';
+import { config, assertTranscribeConfig, assertMeetingsCollectConfig, assertMeetingsReadConfig } from './config.js';
 import { registerAdminRoutes } from './admin/routes.js';
 import { registerContactsRoutes } from './contacts/routes.js';
 import { registerWebhookRoutes } from './webhook/routes.js';
@@ -15,6 +15,7 @@ import { registerProvisionRoutes } from './whatsapp/provision-routes.js';
 import { registerReadRoutes } from './whatsapp/read-routes.js';
 import { registerWriteRoutes } from './whatsapp/write-routes.js';
 import { registerMeetingsCollectRoutes } from './meetings-collect/routes.js';
+import { registerMeetingsReadRoutes } from './meetings-read/routes.js';
 import { startMeetingsCollectPoller } from './meetings-collect/poller.js';
 import { buildMeetingsCollectDeps } from './meetings-collect/runtime.js';
 import { VexaClient } from './integrations/vexa/client.js';
@@ -154,6 +155,17 @@ async function main() {
     });
   } else {
     app.log.info('meetings-collect: rotas NÃO registradas (VEXA_API_URL/KEY ausentes)');
+  }
+
+  // Leitura de reuniões (contrato meetings_read_v1): auth X-Panel-Token. Gate por env.
+  assertMeetingsReadConfig(config, config.MEETINGS_READ_ENABLED);
+  if (config.MEETINGS_READ_ENABLED) {
+    await app.register(async (scope) => {
+      registerMeetingsReadRoutes(scope, { pool, panelToken: config.PANEL_TOKEN });
+    });
+    app.log.info('meetings-read: rotas registradas');
+  } else {
+    app.log.info('meetings-read: rotas NÃO registradas (MEETINGS_READ_ENABLED != true)');
   }
 
   // Fail-fast ANTES de bindar/subir pollers: TRANSCRIBE_MODE≠off exige OPENAI + R2.
