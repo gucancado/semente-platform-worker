@@ -19,11 +19,11 @@
  * no-op quando $2 (numberId) é omitido — uma linha de whatsapp_groups de OUTRO
  * workspace com o mesmo JID reclassificaria erradamente uma DM como grupo
  * (excluída do default kind='dm', zerando answered/unanswered). Usa a mesma
- * autoridade compartilhada `WORKSPACE_NUMBERS` de stats.ts/timeseries.ts —
- * não reinventa o escopo.
+ * autoridade compartilhada `WORKSPACE_NUMBERS` (sql-scope.ts) — não reinventa
+ * o escopo.
  */
 import type { Pool } from 'pg';
-import { WORKSPACE_NUMBERS } from './stats.js';
+import { WORKSPACE_NUMBERS } from './sql-scope.js';
 
 export type FirstResponseStats = {
   answered: number;
