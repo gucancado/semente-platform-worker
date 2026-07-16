@@ -4,6 +4,8 @@ import { listNumbers, getNumber } from './numbers.js';
 import { listThreads, listThreadMessages, searchThreads } from './read-queries.js';
 import { exportConversation } from './export.js';
 import { getStats } from './stats.js';
+import { getTimeseries } from './timeseries.js';
+import { getFirstResponse } from './first-response.js';
 import { listDisqualifyReasons } from './disqualify-reasons.js';
 import { listSourceSignals } from './source-signals.js';
 import { requirePanelToken } from './provision-routes.js';
@@ -13,6 +15,36 @@ import { logAccess as defaultLogAccess, type LogAccessFn } from './access-log.js
 import { emptyToUndefined } from './query-coerce.js';
 import { tenantContext } from './tenant-context.js';
 import { presignGet, whatsappMediaBucket } from '../integrations/r2.js';
+
+/** Teto de pontos da série de /whatsapp/stats/timeseries (guarda pré-DB). */
+const MAX_BUCKETS = 200;
+
+/** Sentinela de `number_id` sintaticamente inválido (≠ "ausente"). */
+const INVALID = Symbol('invalid-number-id');
+
+/**
+ * Normaliza `?number_id=` das rotas de agregado (stats / stats/timeseries /
+ * first-response), onde o param é OPCIONAL e ausente significa "agregue o
+ * workspace inteiro".
+ *
+ * `Number('')` e `Number('  ')` são **0**, não NaN — um guard que só testa
+ * `Number.isNaN(Number(v))` deixa passar `?number_id=` (vazio) e manda
+ * `whatsapp_number_id = 0` pro SQL, que não casa nada: a rota devolve 200 com o
+ * agregado ZERADO em vez do agregado do workspace, em silêncio. É exatamente a
+ * classe de bug que o `emptyToUndefined` já previne em since/until/period_basis
+ * ("prevents `?lead_stage=` from reaching SQL as `lead_stage = ''`"); só faltava
+ * aplicá-lo aqui. Vira ativo assim que um caller (ex.: tool MCP) encaminhar um
+ * valor não setado como param vazio.
+ *
+ * Retorna `undefined` (ausente/vazio → sem filtro por número), `INVALID`
+ * (não-numérico → 400) ou o número.
+ */
+function parseNumberId(raw: unknown): number | undefined | typeof INVALID {
+  const v = emptyToUndefined(raw);
+  if (v === undefined) return undefined;
+  const n = Number(v);
+  return Number.isNaN(n) ? INVALID : n;
+}
 
 export function registerReadRoutes(
   app: FastifyInstance,
@@ -75,9 +107,8 @@ export function registerReadRoutes(
   app.get('/whatsapp/stats', { preHandler: auth }, async (req: any, reply) => {
     const { workspace_id, number_id, since, until, period_basis, kind } = req.query as Record<string, string | undefined>;
     if (!workspace_id) return reply.code(400).send({ error: 'workspace_id required' });
-    if (number_id !== undefined && Number.isNaN(Number(number_id))) {
-      return reply.code(400).send({ error: 'number_id must be numeric' });
-    }
+    const nid = parseNumberId(number_id);
+    if (nid === INVALID) return reply.code(400).send({ error: 'number_id must be numeric' });
     const pb = emptyToUndefined(period_basis);
     if (pb !== undefined && pb !== 'arrival' && pb !== 'activity') {
       return reply.code(400).send({ error: "period_basis must be 'arrival' or 'activity'" });
@@ -87,15 +118,15 @@ export function registerReadRoutes(
     const k = kind === 'dm' || kind === 'group' ? kind : 'all';
     const stats = await getStats(deps.pool, {
       workspaceId: workspace_id,
-      numberId: number_id !== undefined ? Number(number_id) : undefined,
+      numberId: nid,
       since: emptyToUndefined(since),
       until: emptyToUndefined(until),
       periodBasis,
       kind: k,
     });
     let ctx;
-    if (number_id !== undefined) {
-      const numForCtx = await getNumber(deps.pool, Number(number_id));
+    if (nid !== undefined) {
+      const numForCtx = await getNumber(deps.pool, nid);
       ctx = numForCtx && numForCtx.workspaceId === workspace_id
         ? tenantContext(numForCtx) : tenantContext({ workspaceId: workspace_id });
     } else {
@@ -108,9 +139,74 @@ export function registerReadRoutes(
       actor: req.actingUser,
       action: 'stats',
       workspaceId: workspace_id,
-      numberId: number_id !== undefined ? Number(number_id) : null,
+      numberId: nid ?? null,
     });
     return reply.send({ schema: 'whatsapp_v1', context: ctx, ...stats });
+  });
+
+  // ── GET /whatsapp/stats/timeseries ──────────────────────────────────────────
+  // Série temporal agregada (sem identifier/texto no payload). Member gate.
+  app.get('/whatsapp/stats/timeseries', { preHandler: auth }, async (req: any, reply) => {
+    const { workspace_id, number_id, since, until, period_basis, kind, bucket } = req.query as Record<string, string | undefined>;
+    if (!workspace_id) return reply.code(400).send({ error: 'workspace_id required' });
+    const nid = parseNumberId(number_id);
+    if (nid === INVALID) return reply.code(400).send({ error: 'number_id must be numeric' });
+    const pb = emptyToUndefined(period_basis);
+    if (pb !== undefined && pb !== 'arrival' && pb !== 'activity') {
+      return reply.code(400).send({ error: "period_basis must be 'arrival' or 'activity'" });
+    }
+    const bu = emptyToUndefined(bucket) ?? 'day';
+    if (bu !== 'day' && bu !== 'week') {
+      return reply.code(400).send({ error: "bucket must be 'day' or 'week'" });
+    }
+    if (!await gateMember(req, reply, workspace_id, authz)) return;
+    const untilEff = emptyToUndefined(until) ?? new Date().toISOString();
+    const sinceEff = emptyToUndefined(since) ?? new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+    const spanMs = new Date(untilEff).getTime() - new Date(sinceEff).getTime();
+    if (Number.isNaN(spanMs) || spanMs <= 0) return reply.code(400).send({ error: 'invalid since/until' });
+    // Teto de buckets — guarda PRÉ-DB (não montar/trafegar série gigante).
+    // A contagem emitida NÃO é span/step: `since`/`until` são INCLUSIVOS e os buckets
+    // são alinhados ao fuso SP, então as duas pontas contam — uma janela de exatamente
+    // 200 dias emite 201 buckets. Em vez de reintroduzir aritmética de fuso em JS (o
+    // SQL é a única autoridade de fuso — ver timeseries.ts), usamos um LIMITE SUPERIOR
+    // da contagem: um intervalo de span S cruza no máximo floor(S/step)+1 fronteiras de
+    // bucket, logo emite no máximo floor(S/step)+2 buckets. Rejeitar por esse teto
+    // garante que a série nunca passa de MAX_BUCKETS (conservador em ~1 na borda).
+    const stepMs = bu === 'week' ? 7 * 86_400_000 : 86_400_000;
+    if (Math.floor(spanMs / stepMs) + 2 > MAX_BUCKETS) {
+      return reply.code(400).send({ error: `window exceeds ${MAX_BUCKETS} buckets` });
+    }
+    const k = kind === 'dm' || kind === 'group' ? kind : 'all';
+    const result = await getTimeseries(deps.pool, {
+      workspaceId: workspace_id,
+      numberId: nid,
+      since: sinceEff, until: untilEff,
+      periodBasis: pb as 'arrival' | 'activity' | undefined,
+      kind: k, bucket: bu,
+    });
+    logAccess(deps.pool, { actor: req.actingUser, action: 'stats_timeseries', workspaceId: workspace_id, numberId: nid ?? null });
+    return reply.send({ schema: 'whatsapp_v1', context: tenantContext({ workspaceId: workspace_id }), bucket: bu, periodBasis: pb ?? 'arrival', window: { since: sinceEff, until: untilEff }, ...result });
+  });
+
+  // ── GET /whatsapp/first-response ────────────────────────────────────────────
+  // Tempo de 1ª resposta agregado (live-only, DM por default). Member gate.
+  app.get('/whatsapp/first-response', { preHandler: auth }, async (req: any, reply) => {
+    const { workspace_id, number_id, since, until, kind } = req.query as Record<string, string | undefined>;
+    if (!workspace_id) return reply.code(400).send({ error: 'workspace_id required' });
+    const nid = parseNumberId(number_id);
+    if (nid === INVALID) return reply.code(400).send({ error: 'number_id must be numeric' });
+    if (!await gateMember(req, reply, workspace_id, authz)) return;
+    const k = kind === 'dm' || kind === 'group' || kind === 'all' ? kind : 'dm';
+    const sinceEff = emptyToUndefined(since) ?? new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+    const result = await getFirstResponse(deps.pool, {
+      workspaceId: workspace_id,
+      numberId: nid,
+      since: sinceEff,
+      until: emptyToUndefined(until),
+      kind: k,
+    });
+    logAccess(deps.pool, { actor: req.actingUser, action: 'first_response', workspaceId: workspace_id, numberId: nid ?? null });
+    return reply.send({ schema: 'whatsapp_v1', context: tenantContext({ workspaceId: workspace_id }), window: { since: sinceEff, until: emptyToUndefined(until) ?? null }, kind: k, ...result });
   });
 
   // ── GET /whatsapp/threads/:identifier/messages ───────────────────────────────

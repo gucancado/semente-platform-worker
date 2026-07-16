@@ -21,6 +21,20 @@
 
 import type { Pool } from 'pg';
 
+/**
+ * Números do workspace $1. Escopo OBRIGATÓRIO de todo lateral de metadado.
+ *
+ * `whatsapp_thread_meta` e `whatsapp_groups` são chaveados por `identifier` (JID de
+ * telefone), que NÃO é único entre workspaces. Casar só por identifier + o filtro
+ * opcional `($2 IS NULL OR ... = $2)` deixa o lateral SEM escopo nenhum quando $2 é
+ * NULL (agregado do workspace) → metadado de outro workspace vaza para este.
+ *
+ * Este é o mesmo padrão que `byTag` já usava isolado (ver IMPORTANT #2 abaixo);
+ * agora é a autoridade única, compartilhada com timeseries.ts, para "que números
+ * pertencem a este workspace".
+ */
+export const WORKSPACE_NUMBERS = `(SELECT id FROM whatsapp_numbers WHERE workspace_id = $1)`;
+
 export type Stats = {
   /** Total distinct thread identifiers in scope. */
   total: number;
@@ -144,6 +158,7 @@ export async function getStats(
       LEFT JOIN LATERAL (
         SELECT g2.jid FROM whatsapp_groups g2
          WHERE g2.jid = a.identifier
+           AND g2.whatsapp_number_id IN ${WORKSPACE_NUMBERS}
            AND ($2::int IS NULL OR g2.whatsapp_number_id = $2)
          LIMIT 1
       ) g ON TRUE
@@ -193,6 +208,7 @@ export async function getStats(
            SELECT g2.jid
              FROM whatsapp_groups g2
             WHERE g2.jid = a.identifier
+              AND g2.whatsapp_number_id IN ${WORKSPACE_NUMBERS}
               AND ($2::int IS NULL OR g2.whatsapp_number_id = $2)
             LIMIT 1
          ) g ON TRUE
@@ -200,7 +216,9 @@ export async function getStats(
            SELECT tm2.is_lead, tm2.lead_stage
              FROM whatsapp_thread_meta tm2
             WHERE tm2.identifier = a.identifier
+              AND tm2.whatsapp_number_id IN ${WORKSPACE_NUMBERS}
               AND ($2::int IS NULL OR tm2.whatsapp_number_id = $2)
+            ORDER BY tm2.whatsapp_number_id
             LIMIT 1
          ) tm ON TRUE
      ) sub`,
@@ -222,7 +240,9 @@ export async function getStats(
          SELECT tm2.lead_stage
            FROM whatsapp_thread_meta tm2
           WHERE tm2.identifier = t.identifier
+            AND tm2.whatsapp_number_id IN ${WORKSPACE_NUMBERS}
             AND ($2::int IS NULL OR tm2.whatsapp_number_id = $2)
+          ORDER BY tm2.whatsapp_number_id
           LIMIT 1
        ) tm ON TRUE
       GROUP BY COALESCE(tm.lead_stage, 'null')`,
@@ -244,7 +264,9 @@ export async function getStats(
          SELECT tm2.lead_temperature
            FROM whatsapp_thread_meta tm2
           WHERE tm2.identifier = t.identifier
+            AND tm2.whatsapp_number_id IN ${WORKSPACE_NUMBERS}
             AND ($2::int IS NULL OR tm2.whatsapp_number_id = $2)
+          ORDER BY tm2.whatsapp_number_id
           LIMIT 1
        ) tm ON TRUE
       GROUP BY COALESCE(tm.lead_temperature, 'null')`,
@@ -266,7 +288,9 @@ export async function getStats(
          SELECT tm2.lead_source
            FROM whatsapp_thread_meta tm2
           WHERE tm2.identifier = t.identifier
+            AND tm2.whatsapp_number_id IN ${WORKSPACE_NUMBERS}
             AND ($2::int IS NULL OR tm2.whatsapp_number_id = $2)
+          ORDER BY tm2.whatsapp_number_id
           LIMIT 1
        ) tm ON TRUE
       GROUP BY COALESCE(tm.lead_source, 'null')`,
@@ -311,9 +335,7 @@ export async function getStats(
     `WITH ${scopedCte}
      SELECT tt.tag, COUNT(DISTINCT tt.identifier)::int AS cnt
        FROM whatsapp_thread_tags tt
-      WHERE tt.whatsapp_number_id IN (
-              SELECT id FROM whatsapp_numbers WHERE workspace_id = $1
-            )
+      WHERE tt.whatsapp_number_id IN ${WORKSPACE_NUMBERS}
         AND ($2::int IS NULL OR tt.whatsapp_number_id = $2)
         AND tt.identifier IN (SELECT identifier FROM threads_scoped)
       GROUP BY tt.tag`,
