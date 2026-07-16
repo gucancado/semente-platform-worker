@@ -106,6 +106,42 @@ const HEALTH_SQL = `
     AND created_at <  ($3::date + 1)::timestamp AT TIME ZONE 'America/Sao_Paulo'
   GROUP BY status`;
 
+export type MeetingTranscript = {
+  episode: {
+    id: number; title: string | null; occurred_at: Date; duration_seconds: number | null;
+    participants: Array<{ name: string; email: string | null }>;
+  };
+  turns: Array<{
+    turn_index: number; speaker_name: string | null;
+    started_at_ms: number | null; ended_at_ms: number | null; text: string;
+  }>;
+};
+
+export async function getMeetingTranscript(
+  pool: Pool,
+  a: { episodeId: number; workspaceId: string },
+): Promise<MeetingTranscript | null> {
+  const ep = await pool.query(
+    `SELECT id, title, occurred_at, duration_seconds, participants, workspace_id
+     FROM episodes WHERE id=$1`, [a.episodeId]);
+  const row = ep.rows[0];
+  // Revalidação de tenant: episódio inexistente OU de outro workspace → null (404 na rota).
+  if (!row || row.workspace_id !== a.workspaceId) return null;
+  const turns = await pool.query(
+    `SELECT turn_index, speaker_name, started_at_ms, ended_at_ms, text
+     FROM episode_turns WHERE episode_id=$1 ORDER BY turn_index ASC`, [a.episodeId]);
+  return {
+    episode: {
+      id: Number(row.id), title: row.title, occurred_at: row.occurred_at,
+      duration_seconds: row.duration_seconds, participants: row.participants ?? [],
+    },
+    turns: turns.rows.map((r) => ({
+      turn_index: r.turn_index, speaker_name: r.speaker_name,
+      started_at_ms: r.started_at_ms, ended_at_ms: r.ended_at_ms, text: r.text,
+    })),
+  };
+}
+
 export async function getMeetingsStats(
   pool: Pool,
   a: { workspaceId: string; since: string; until: string },
