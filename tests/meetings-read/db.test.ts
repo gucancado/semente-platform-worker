@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mapMeetingListRow } from '../../src/meetings-read/db.js';
+import { mapMeetingListRow, fillDailySeries } from '../../src/meetings-read/db.js';
 
 test('mapMeetingListRow converte episode_id (int8 string) em number', () => {
   const row = mapMeetingListRow({
@@ -19,4 +19,13 @@ test('mapMeetingListRow preserva episode_id nulo (reunião não importada)', () 
     duration_seconds: null, participants: null, sort_at: new Date(),
   });
   assert.equal(row.episode_id, null);
+});
+
+test('fillDailySeries preenche dias vazios com zero no intervalo', () => {
+  const out = fillDailySeries([{ day: '2026-07-02', count: 3 }], '2026-07-01', '2026-07-03');
+  assert.deepEqual(out, [
+    { day: '2026-07-01', count: 0 },
+    { day: '2026-07-02', count: 3 },
+    { day: '2026-07-03', count: 0 },
+  ]);
 });
