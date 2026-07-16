@@ -36,8 +36,10 @@ export async function runImport(
         input.participants ?? [], rules,
         { internalDomains: config.INTERNAL_DOMAINS, freemailDomains: freemail, internalWorkspaceId: opts.internalWorkspaceId }
       );
-      // Fallback: domínio não resolveu (só beeads + freemail) mas o título nomeia o cliente.
-      if (attr.method === 'none') {
+      // Título é mais específico que 'internal' (reunião "Cliente + BeeAds" só com
+      // participantes beeads NÃO é interna — é do cliente). Só o 'domain' (e-mail de
+      // cliente presente) vence o título. Precedência: domain > title > internal > none.
+      if (attr.method !== 'domain') {
         const byTitle = resolveByTitle(t.title, titleRules);
         if (byTitle.workspace_id) attr = { ...byTitle, unresolved_domains: attr.unresolved_domains };
       }
