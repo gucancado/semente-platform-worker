@@ -141,7 +141,9 @@ export async function listThreads(pool: Pool, p: {
           OR ($6 = 'group' AND (a.has_author OR g.jid IS NOT NULL))
           OR ($6 = 'dm' AND NOT (a.has_author OR g.jid IS NOT NULL)))
         AND ${leadFilterSql(leadStatus)}
-        AND ($7::text IS NULL OR tm.lead_stage = $7)
+        AND ($7::text IS NULL
+             OR ($7 = 'none' AND tm.lead_stage IS NULL)
+             OR ($7 <> 'none' AND tm.lead_stage = $7))
         AND ($8::text IS NULL OR tm.lead_source = $8)
         AND ($13::text IS NULL OR tm.lead_temperature = $13)
         AND ($9::text IS NULL OR EXISTS (
@@ -283,7 +285,9 @@ export async function searchThreads(pool: Pool, p: {
           OR ($6 = 'group' AND (h.has_author OR g.jid IS NOT NULL))
           OR ($6 = 'dm' AND NOT (h.has_author OR g.jid IS NOT NULL)))
         AND ${leadFilterSql(leadStatus)}
-        AND ($8::text IS NULL OR tm.lead_stage = $8)
+        AND ($8::text IS NULL
+             OR ($8 = 'none' AND tm.lead_stage IS NULL)
+             OR ($8 <> 'none' AND tm.lead_stage = $8))
         AND ($9::text IS NULL OR tm.lead_source = $9)
         AND ($10::text IS NULL OR EXISTS (
               SELECT 1 FROM whatsapp_thread_tags t
