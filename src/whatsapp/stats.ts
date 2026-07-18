@@ -59,6 +59,17 @@ export type Stats = {
   byIngestSource: Record<string, number>;
   /** Thread count per tag. Threads with no tags are not included. */
   byTag: Record<string, number>;
+  /**
+   * Métricas de TRIAGEM (aditivo — itens 4/5).
+   * `queue`: fila real = conversas DM marcadas como lead e ainda SEM stage (kind=dm,
+   *   is_lead NULL|TRUE, lead_stage IS NULL). Independe do filtro `kind`.
+   * `hiddenGroups`: threads de grupo em números com expose_groups_in_mcp=FALSE — não
+   *   qualificáveis, ficam FORA da fila; contadas aqui para transparência (elas inflam
+   *   byStage.null e byKind.group).
+   * `note`: aviso de que byStage.null/byLeadStatus incluem grupos e não-leads e não
+   *   representam o tamanho da fila.
+   */
+  triage: { queue: number; hiddenGroups: number; note: string };
 };
 
 /**
@@ -175,7 +186,8 @@ export async function getStats(
        COALESCE(SUM(CASE WHEN is_group THEN 1 ELSE 0 END), 0)::int AS group_count,
        COALESCE(SUM(CASE WHEN NOT is_group THEN 1 ELSE 0 END), 0)::int AS dm_count,
        COUNT(*) FILTER (WHERE kind_match AND (tm_is_lead IS NULL OR tm_is_lead = TRUE))::int AS lead_count,
-       COUNT(*) FILTER (WHERE kind_match AND tm_is_lead = FALSE)::int AS not_lead_count
+       COUNT(*) FILTER (WHERE kind_match AND tm_is_lead = FALSE)::int AS not_lead_count,
+       COUNT(*) FILTER (WHERE NOT is_group AND (tm_is_lead IS NULL OR tm_is_lead = TRUE) AND tm_lead_stage IS NULL)::int AS triage_queue
      FROM (
        SELECT
          a.identifier,
@@ -183,7 +195,8 @@ export async function getStats(
          ($6 = 'all'
            OR ($6 = 'dm' AND NOT (a.has_author OR g.jid IS NOT NULL))
            OR ($6 = 'group' AND (a.has_author OR g.jid IS NOT NULL))) AS kind_match,
-         tm.is_lead                           AS tm_is_lead
+         tm.is_lead                           AS tm_is_lead,
+         tm.lead_stage                        AS tm_lead_stage
          FROM (
            SELECT m.identifier,
                   bool_or(m.author IS NOT NULL) AS has_author
@@ -330,18 +343,43 @@ export async function getStats(
     params,
   );
 
-  const [mainRes, stageRes, temperatureRes, sourceRes, ingestRes, tagRes] = await Promise.all([
+  // ── (7) hiddenGroups — grupos em números com exposição OFF (transparência item 5) ──
+  // Um thread é grupo se tem author OU existe whatsapp_groups.jid. "Oculto" = TODOS os
+  // números do thread têm expose_groups_in_mcp=FALSE. Período-escopado (threads_in_period)
+  // para coerência com total. Referencia $1..$5 (não usa $6/kind) → passa params.slice(0,5).
+  const hiddenGroupsQuery = pool.query(
+    `WITH ${periodCte}
+     SELECT COUNT(*)::int AS hidden_groups
+       FROM (
+         SELECT m.identifier
+           FROM messages m
+           JOIN whatsapp_numbers n ON n.id = m.whatsapp_number_id
+          WHERE m.workspace_id = $1 ${numFilter}
+            AND m.identifier IN (SELECT identifier FROM threads_in_period)
+          GROUP BY m.identifier
+         HAVING bool_and(n.expose_groups_in_mcp = FALSE)
+            AND (bool_or(m.author IS NOT NULL)
+                 OR EXISTS (SELECT 1 FROM whatsapp_groups g
+                             WHERE g.jid = m.identifier
+                               AND g.whatsapp_number_id IN ${WORKSPACE_NUMBERS}
+                               AND ($2::int IS NULL OR g.whatsapp_number_id = $2)))
+       ) x`,
+    params.slice(0, 5),
+  );
+
+  const [mainRes, stageRes, temperatureRes, sourceRes, ingestRes, tagRes, hiddenRes] = await Promise.all([
     mainQuery,
     stageQuery,
     temperatureQuery,
     sourceQuery,
     ingestQuery,
     tagQuery,
+    hiddenGroupsQuery,
   ]);
 
   // Empty workspace → mainRes still returns exactly one row of zeros (COALESCE above),
   // but guard the no-row case defensively so every field stays a number.
-  const mainRow = mainRes.rows[0] ?? { total: 0, group_count: 0, dm_count: 0, lead_count: 0, not_lead_count: 0 };
+  const mainRow = mainRes.rows[0] ?? { total: 0, group_count: 0, dm_count: 0, lead_count: 0, not_lead_count: 0, triage_queue: 0 };
 
   const byStage: Record<string, number> = {};
   for (const r of stageRes.rows) {
@@ -383,5 +421,10 @@ export async function getStats(
     },
     byIngestSource,
     byTag,
+    triage: {
+      queue: Number(mainRow.triage_queue) || 0,
+      hiddenGroups: Number(hiddenRes.rows[0]?.hidden_groups) || 0,
+      note: "triage.queue = DMs marcadas como lead e ainda sem stage (fila real de triagem). byStage.null e byKind.group incluem grupos e não-leads — não use como tamanho de fila. hiddenGroups = grupos de números com exposição desligada (não qualificáveis, fora da fila).",
+    },
   };
 }
