@@ -299,7 +299,7 @@ export function registerReadRoutes(
   // caller-supplied workspace_id), then authz. Otherwise a member of ws A could
   // pass workspace_id=A + a number_id belonging to ws B and exfiltrate B's data.
   app.get('/whatsapp/threads/:identifier/export', { preHandler: auth }, async (req: any, reply) => {
-    const { number_id, since, until, max_messages } = req.query;
+    const { number_id, since, until, max_messages, order } = req.query;
     if (!number_id) return reply.code(400).send({ error: 'number_id required' });
     if (Number.isNaN(Number(number_id))) return reply.code(400).send({ error: 'number_id must be numeric' });
     // Actor check first (before any DB call).
@@ -307,7 +307,8 @@ export function registerReadRoutes(
     const num = await getNumber(deps.pool, Number(number_id));
     if (!num) return reply.code(404).send({ error: 'number not found' });
     if (!await gateMember(req, reply, num.workspaceId, authz)) return;
-    const out = await exportConversation(deps.pool, { workspaceId: num.workspaceId, numberId: Number(number_id), identifier: req.params.identifier, since, until, maxMessages: max_messages ? Number(max_messages) : undefined });
+    const ord = order === 'head' || order === 'tail' ? order : undefined; // desconhecido → default (tail)
+    const out = await exportConversation(deps.pool, { workspaceId: num.workspaceId, numberId: Number(number_id), identifier: req.params.identifier, since, until, maxMessages: max_messages ? Number(max_messages) : undefined, order: ord });
     logAccess(deps.pool, { actor: req.actingUser, action: 'export', workspaceId: num.workspaceId, numberId: Number(number_id), identifier: req.params.identifier, meta: { messageCount: out.messageCount } });
     return reply.send({ schema: 'whatsapp_v1', context: tenantContext(num), ...out });
   });
