@@ -6,7 +6,7 @@ import { setLeadStatus } from './thread-meta.js';
 import { getNumber } from './numbers.js';
 import { defaultRouteAuthz, gateAdmin, type RouteAuthz } from './route-authz.js';
 import { logAccess as defaultLogAccess, type LogAccessFn } from './access-log.js';
-import { validateLeadQualifyFields, validateDisqualifyReason } from './lead-qualify.js';
+import { validateLeadQualifyFields, validateDisqualifyReason, resolveLeadStatus } from './lead-qualify.js';
 import { bulkSetLeadStatus, BulkLeadIdentifierError, BULK_LEAD_MAX } from './bulk-lead.js';
 import { upsertDisqualifyReason, deactivateDisqualifyReason } from './disqualify-reasons.js';
 import { upsertSourceSignal, deactivateSourceSignal } from './source-signals.js';
@@ -16,9 +16,11 @@ import { tenantContext } from './tenant-context.js';
 function bulkItemError(upd: any, i: number): string | null {
   if (!upd || typeof upd !== 'object') return `updates[${i}]: must be an object`;
   if (typeof upd.identifier !== 'string' || upd.identifier.trim() === '') return `updates[${i}]: identifier is required`;
-  if (upd.status !== 'lead' && upd.status !== 'not_lead') return `updates[${i}] (${upd.identifier}): status must be 'lead' or 'not_lead'`;
   const q = validateLeadQualifyFields({ status: upd.status, stage: upd.stage ?? null, disqualifyReason: upd.disqualifyReason ?? null });
   if (q) return `updates[${i}] (${upd.identifier}): ${q}`;
+  // Item 6: status opcional — derivado do stage. Valida via resolveLeadStatus.
+  const st = resolveLeadStatus(upd.status, upd.stage ?? null);
+  if ('error' in st) return `updates[${i}] (${upd.identifier}): ${st.error}`;
   if (upd.tags !== undefined && !(Array.isArray(upd.tags) && upd.tags.every((t: unknown) => typeof t === 'string'))) return `updates[${i}] (${upd.identifier}): tags must be an array of strings`;
   return null;
 }
@@ -42,15 +44,20 @@ export function registerWriteRoutes(
   // NO workspace_id in body; derive workspace from number_id, then assertAdmin (fresh).
   app.post('/whatsapp/threads/:identifier/lead', { preHandler: auth }, async (req: any, reply) => {
     const { number_id, status, stage, temperature, source, disqualifyReason, tags, notes } = req.body ?? {};
-    if (!number_id || (status !== 'lead' && status !== 'not_lead')) return reply.code(400).send({ error: 'number_id e status (lead|not_lead) obrigatórios' });
+    if (number_id === undefined || number_id === null) return reply.code(400).send({ error: 'number_id obrigatório' });
     if (Number.isNaN(Number(number_id))) return reply.code(400).send({ error: 'number_id must be numeric' });
     // Actor check first (before any DB call).
     if (!req.actingUser) return reply.code(400).send({ error: 'x-acting-user required' });
 
     // ── Pure (no-DB) validation — safe to run before the authz gate (cheap, no info leak).
-    // Validate qualification fields (stage whitelist + coherence).
+    // Validate qualification fields (stage whitelist + coherence com status cru).
     const qualifyErr = validateLeadQualifyFields({ status, stage: stage ?? null, disqualifyReason: disqualifyReason ?? null });
     if (qualifyErr) return reply.code(400).send({ error: qualifyErr });
+
+    // Item 6: status é opcional; derivar do stage quando omitido.
+    const resolved = resolveLeadStatus(status, stage ?? null);
+    if ('error' in resolved) return reply.code(400).send({ error: resolved.error });
+    const effectiveStatus = resolved.status;
 
     // `tags`, when present, must be an array of strings. A genuinely omitted `tags`
     // means "don't touch tags"; `[]` means "clear all tags". A non-array (e.g. the
@@ -74,7 +81,7 @@ export function registerWriteRoutes(
     await setLeadStatus(deps.pool, {
       numberId: Number(number_id),
       identifier: req.params.identifier,
-      isLead: status === 'lead',
+      isLead: effectiveStatus === 'lead',
       updatedBy: req.actingUser,
       stage: stage ?? undefined,
       temperature: temperature ?? undefined,
@@ -88,8 +95,8 @@ export function registerWriteRoutes(
     // (temperature/stage/source/disqualifyReason/tags) torna diagnosticável, pela aba
     // Auditoria, se um "não persistiu" futuro foi o cliente NÃO enviar o campo vs falha
     // de gravação. `notes` fica de fora de propósito (texto livre/PII — minimização LGPD).
-    logAccess(deps.pool, { actor: req.actingUser, action: 'set_lead', workspaceId: num.workspaceId, numberId: Number(number_id), identifier: req.params.identifier, meta: { status, stage, source, temperature, disqualifyReason, tags } });
-    return reply.send({ schema: 'whatsapp_v1', context: tenantContext(num), ok: true, identifier: req.params.identifier, leadStatus: status });
+    logAccess(deps.pool, { actor: req.actingUser, action: 'set_lead', workspaceId: num.workspaceId, numberId: Number(number_id), identifier: req.params.identifier, meta: { status: effectiveStatus, stage, source, temperature, disqualifyReason, tags } });
+    return reply.send({ schema: 'whatsapp_v1', context: tenantContext(num), ok: true, identifier: req.params.identifier, leadStatus: effectiveStatus });
   });
 
   // ── POST /whatsapp/threads/bulk-lead ─────────────────────────────────────────
@@ -174,11 +181,15 @@ export function registerWriteRoutes(
     try {
       result = await bulkSetLeadStatus(deps.pool, {
         numberId: Number(number_id), workspaceId: num.workspaceId, updatedBy: req.actingUser, mode,
-        updates: candidates.map((u: any) => ({
-          identifier: u.identifier, status: u.status as 'lead' | 'not_lead',
-          stage: u.stage, temperature: u.temperature, source: u.source,
-          disqualifyReason: u.disqualifyReason, tags: Array.isArray(u.tags) ? u.tags : undefined, notes: u.notes,
-        })),
+        updates: candidates.map((u: any) => {
+          const st = resolveLeadStatus(u.status, u.stage ?? null);
+          return {
+            identifier: u.identifier,
+            status: ('status' in st ? st.status : u.status) as 'lead' | 'not_lead',
+            stage: u.stage, temperature: u.temperature, source: u.source,
+            disqualifyReason: u.disqualifyReason, tags: Array.isArray(u.tags) ? u.tags : undefined, notes: u.notes,
+          };
+        }),
       });
     } catch (err) {
       if (err instanceof BulkLeadIdentifierError) return reply.code(400).send({ error: 'identifiers not found', unknownIdentifiers: err.unknownIdentifiers });

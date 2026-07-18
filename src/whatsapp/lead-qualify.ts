@@ -35,6 +35,28 @@ export function validateLeadQualifyFields(p: {
 }
 
 /**
+ * Resolve o `status` efetivo (is_lead). Item 6: `status` passa a ser OPCIONAL — quando
+ * omitido, é DERIVADO do stage. Chamar SEMPRE após `validateLeadQualifyFields` (que já
+ * valida o whitelist de stage e a incompatibilidade lead+desqualificado).
+ *  - status explícito ('lead'|'not_lead') → vence.
+ *  - status omitido + stage presente → 'desqualificado' vira 'not_lead'; os demais
+ *    (qualificado|cliente|perdido) viram 'lead'.
+ *  - status omitido + stage omitido → erro (nada a setar em is_lead).
+ *  - status inválido → erro.
+ */
+export function resolveLeadStatus(
+  status: unknown,
+  stage: string | null | undefined,
+): { status: 'lead' | 'not_lead' } | { error: string } {
+  if (status === 'lead' || status === 'not_lead') return { status };
+  if (status === undefined || status === null) {
+    if (stage == null) return { error: "status é obrigatório quando stage é omitido (lead|not_lead)" };
+    return { status: stage === 'desqualificado' ? 'not_lead' : 'lead' };
+  }
+  return { error: "status must be 'lead' or 'not_lead'" };
+}
+
+/**
  * Checks disqualify_reason against the whatsapp_disqualify_reasons table (active only),
  * scoped to the given workspace. A code active in workspace B does NOT validate for
  * workspace A — prevents cross-workspace authorization leaks.
