@@ -7,22 +7,27 @@ import { formatTranscript, type TranscriptMsg } from './transcript.js';
 
 const HARD_CAP = 2000;
 
-export async function exportConversation(pool: Pool, p: { workspaceId: string; numberId: number; identifier: string; since?: string; until?: string; maxMessages?: number }) {
+export async function exportConversation(pool: Pool, p: { workspaceId: string; numberId: number; identifier: string; since?: string; until?: string; maxMessages?: number; order?: 'head' | 'tail' }) {
   const cap = Math.min(p.maxMessages ?? 500, HARD_CAP);
+  const order = p.order ?? 'tail';
+  // tail (default/compat): pagina do MAIS NOVO (DESC) e mantém as ÚLTIMAS N (o desfecho).
+  // head: pagina do MAIS ANTIGO (ASC) e mantém as PRIMEIRAS N (o começo da conversa).
+  const fetchOrder: 'asc' | 'desc' = order === 'head' ? 'asc' : 'desc';
   const isGroup = await isGroupThread(pool, p.numberId, p.identifier);
 
-  // Auto-pagina (listThreadMessages devolve DESC; acumula até o cap, depois ordena ASC).
+  // Auto-pagina: acumula até o cap na direção escolhida.
   const collected: TranscriptMsg[] = [];
   let cursor: string | undefined = undefined;
   let truncated = false;
   while (collected.length < cap) {
-    const page = await listThreadMessages(pool, { workspaceId: p.workspaceId, numberId: p.numberId, identifier: p.identifier, limit: Math.min(100, cap - collected.length), cursor, since: p.since, until: p.until });
+    const page = await listThreadMessages(pool, { workspaceId: p.workspaceId, numberId: p.numberId, identifier: p.identifier, limit: Math.min(100, cap - collected.length), cursor, since: p.since, until: p.until, order: fetchOrder });
     collected.push(...page.messages.map(m => ({ direction: m.direction, text: m.text, author: m.author, authorName: m.authorName, createdAt: m.createdAt })));
     if (!page.nextCursor) break;
     cursor = page.nextCursor;
     if (collected.length >= cap) { truncated = true; break; }
   }
-  const asc = collected.slice().reverse();
+  // head já vem cronológico (ASC); tail vem do mais novo → inverter p/ cronológico.
+  const asc = order === 'head' ? collected.slice() : collected.slice().reverse();
 
   // Identidade do contato (DM) p/ rótulo; membro de equipe = tem role em algum workspace.
   let contactName: string | null = null;

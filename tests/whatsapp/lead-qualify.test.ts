@@ -1,7 +1,7 @@
 // tests/whatsapp/lead-qualify.test.ts  — DB-FREE (runs locally with node --test)
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { isValidStage, validateLeadQualifyFields, VALID_STAGES } from '../../src/whatsapp/lead-qualify.js';
+import { isValidStage, validateLeadQualifyFields, VALID_STAGES, resolveLeadStatus } from '../../src/whatsapp/lead-qualify.js';
 import { emptyToUndefined } from '../../src/whatsapp/query-coerce.js';
 
 // ── emptyToUndefined (filter coercion) ───────────────────────────────────────
@@ -71,4 +71,26 @@ test('validateLeadQualifyFields: rejeita stage=desqualificado com status=lead (C
 test('validateLeadQualifyFields: sem status, stage=desqualificado não causa erro puro', () => {
   // Sem status a coerção de is_lead não pode ser checada — passa sem erro de coherência
   assert.equal(validateLeadQualifyFields({ stage: 'desqualificado' }), null);
+});
+
+// ── resolveLeadStatus (Item 6: status opcional/derivado do stage) ─────────────
+test('status explícito vence', () => {
+  assert.deepEqual(resolveLeadStatus('lead', 'qualificado'), { status: 'lead' });
+  assert.deepEqual(resolveLeadStatus('not_lead', null), { status: 'not_lead' });
+});
+test('derivação: desqualificado → not_lead', () => {
+  assert.deepEqual(resolveLeadStatus(undefined, 'desqualificado'), { status: 'not_lead' });
+});
+test('derivação: qualificado/cliente/perdido → lead', () => {
+  assert.deepEqual(resolveLeadStatus(undefined, 'qualificado'), { status: 'lead' });
+  assert.deepEqual(resolveLeadStatus(undefined, 'cliente'), { status: 'lead' });
+  assert.deepEqual(resolveLeadStatus(undefined, 'perdido'), { status: 'lead' });
+});
+test('status e stage ambos omitidos → erro', () => {
+  const r = resolveLeadStatus(undefined, null);
+  assert.ok('error' in r);
+});
+test('status inválido → erro', () => {
+  const r = resolveLeadStatus('foo', 'qualificado');
+  assert.ok('error' in r);
 });

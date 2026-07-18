@@ -141,7 +141,9 @@ export async function listThreads(pool: Pool, p: {
           OR ($6 = 'group' AND (a.has_author OR g.jid IS NOT NULL))
           OR ($6 = 'dm' AND NOT (a.has_author OR g.jid IS NOT NULL)))
         AND ${leadFilterSql(leadStatus)}
-        AND ($7::text IS NULL OR tm.lead_stage = $7)
+        AND ($7::text IS NULL
+             OR ($7 = 'none' AND tm.lead_stage IS NULL)
+             OR ($7 <> 'none' AND tm.lead_stage = $7))
         AND ($8::text IS NULL OR tm.lead_source = $8)
         AND ($13::text IS NULL OR tm.lead_temperature = $13)
         AND ($9::text IS NULL OR EXISTS (
@@ -176,8 +178,12 @@ export async function listThreads(pool: Pool, p: {
 }
 
 export type Msg = { id: number; direction: string; text: string | null; agent: string | null; createdAt: string; author: string | null; authorName: string | null; kind: string; transcriptionStatus: string | null; mediaDurationS: number | null; hasMedia: boolean };
-export async function listThreadMessages(pool: Pool, p: { workspaceId: string; numberId: number; identifier: string; limit: number; cursor?: string; since?: string; until?: string }) {
+export async function listThreadMessages(pool: Pool, p: { workspaceId: string; numberId: number; identifier: string; limit: number; cursor?: string; since?: string; until?: string; order?: 'asc' | 'desc' }) {
   const before = p.cursor ? Buffer.from(p.cursor, 'base64').toString() : null;
+  // order 'desc' (default) = mais novas primeiro (compat). 'asc' = mais antigas primeiro (paginação p/ frente).
+  const asc = p.order === 'asc';
+  const cmp = asc ? '>' : '<';
+  const dir = asc ? 'ASC' : 'DESC';
   const { rows } = await pool.query(
     `SELECT m.id, m.direction, m.text, m.agent, m.created_at, m.author,
             m.kind, m.transcription_status, m.media_duration_s, m.media_key,
@@ -188,10 +194,10 @@ export async function listThreadMessages(pool: Pool, p: { workspaceId: string; n
         AND w.whatsapp_number_id = m.whatsapp_number_id
         AND m.direction = 'inbound'
       WHERE m.whatsapp_number_id = $1 AND m.identifier = $2 AND m.workspace_id = $7
-        AND ($3::timestamptz IS NULL OR m.created_at < $3)
+        AND ($3::timestamptz IS NULL OR m.created_at ${cmp} $3)
         AND ($5::timestamptz IS NULL OR m.created_at >= $5)
         AND ($6::timestamptz IS NULL OR m.created_at <= $6)
-      ORDER BY m.created_at DESC LIMIT $4`,
+      ORDER BY m.created_at ${dir} LIMIT $4`,
     [p.numberId, p.identifier, before, p.limit, p.since ?? null, p.until ?? null, p.workspaceId]);
   const messages: Msg[] = rows.map(r => ({ id: Number(r.id), direction: r.direction, text: r.text, agent: r.agent, createdAt: r.created_at.toISOString(), author: r.author, authorName: r.author_name, kind: r.kind, transcriptionStatus: r.transcription_status, mediaDurationS: r.media_duration_s, hasMedia: r.media_key != null }));
   const lastMsg = messages.at(-1);
@@ -283,7 +289,9 @@ export async function searchThreads(pool: Pool, p: {
           OR ($6 = 'group' AND (h.has_author OR g.jid IS NOT NULL))
           OR ($6 = 'dm' AND NOT (h.has_author OR g.jid IS NOT NULL)))
         AND ${leadFilterSql(leadStatus)}
-        AND ($8::text IS NULL OR tm.lead_stage = $8)
+        AND ($8::text IS NULL
+             OR ($8 = 'none' AND tm.lead_stage IS NULL)
+             OR ($8 <> 'none' AND tm.lead_stage = $8))
         AND ($9::text IS NULL OR tm.lead_source = $9)
         AND ($10::text IS NULL OR EXISTS (
               SELECT 1 FROM whatsapp_thread_tags t
