@@ -26,7 +26,14 @@ import type { Pool } from 'pg';
 // Definido em stats.ts, de onde este módulo já herda a semântica de `leads`.
 import { WORKSPACE_NUMBERS } from './sql-scope.js';
 
-export type TimeseriesPoint = { bucketStart: string; total: number; leads: number };
+export type TimeseriesPoint = { bucketStart: string; total: number; leads: number; oportunidades: number };
+
+/**
+ * Oportunidade = thread com lead_stage em (qualificado, cliente) — mesma
+ * definição do funil do painel (byStage.qualificado + byStage.cliente em
+ * stats.ts). Alterar aqui exige alterar lá (e vice-versa).
+ */
+const OPORT_FILTER = `COUNT(*) FILTER (WHERE tm.lead_stage IN ('qualificado', 'cliente'))::int AS oportunidades`;
 
 const KIND_PREDICATE = `($6 = 'all'
   OR ($6 = 'dm' AND NOT (tk.has_author OR g.jid IS NOT NULL))
@@ -81,7 +88,8 @@ export async function getTimeseries(
       agg AS (
         SELECT to_char(date_trunc($5::text, tk.first_at AT TIME ZONE 'America/Sao_Paulo'), 'YYYY-MM-DD') AS bucket,
                COUNT(*)::int AS total,
-               COUNT(*) FILTER (WHERE tm.is_lead IS NULL OR tm.is_lead = TRUE)::int AS leads
+               COUNT(*) FILTER (WHERE tm.is_lead IS NULL OR tm.is_lead = TRUE)::int AS leads,
+               ${OPORT_FILTER}
           FROM threads tk
           LEFT JOIN LATERAL (
             SELECT g2.jid FROM whatsapp_groups g2
@@ -90,7 +98,7 @@ export async function getTimeseries(
                AND ($2::int IS NULL OR g2.whatsapp_number_id = $2) LIMIT 1
           ) g ON TRUE
           LEFT JOIN LATERAL (
-            SELECT tm2.is_lead FROM whatsapp_thread_meta tm2
+            SELECT tm2.is_lead, tm2.lead_stage FROM whatsapp_thread_meta tm2
              WHERE tm2.identifier = tk.identifier
                AND tm2.whatsapp_number_id IN ${WORKSPACE_NUMBERS}
                AND ($2::int IS NULL OR tm2.whatsapp_number_id = $2)
@@ -100,7 +108,8 @@ export async function getTimeseries(
          GROUP BY 1
       ),
       ${BUCKETS_CTE}
-      SELECT b.bucket, COALESCE(a.total, 0)::int AS total, COALESCE(a.leads, 0)::int AS leads
+      SELECT b.bucket, COALESCE(a.total, 0)::int AS total, COALESCE(a.leads, 0)::int AS leads,
+             COALESCE(a.oportunidades, 0)::int AS oportunidades
         FROM buckets b LEFT JOIN agg a ON a.bucket = b.bucket
        ORDER BY b.bucket`
     : `
@@ -119,7 +128,8 @@ export async function getTimeseries(
       agg AS (
         SELECT to_char(a.bucket_ts, 'YYYY-MM-DD') AS bucket,
                COUNT(*)::int AS total,
-               COUNT(*) FILTER (WHERE tm.is_lead IS NULL OR tm.is_lead = TRUE)::int AS leads
+               COUNT(*) FILTER (WHERE tm.is_lead IS NULL OR tm.is_lead = TRUE)::int AS leads,
+               ${OPORT_FILTER}
           FROM active a
           JOIN thread_kind tk ON tk.identifier = a.identifier
           LEFT JOIN LATERAL (
@@ -129,7 +139,7 @@ export async function getTimeseries(
                AND ($2::int IS NULL OR g2.whatsapp_number_id = $2) LIMIT 1
           ) g ON TRUE
           LEFT JOIN LATERAL (
-            SELECT tm2.is_lead FROM whatsapp_thread_meta tm2
+            SELECT tm2.is_lead, tm2.lead_stage FROM whatsapp_thread_meta tm2
              WHERE tm2.identifier = a.identifier
                AND tm2.whatsapp_number_id IN ${WORKSPACE_NUMBERS}
                AND ($2::int IS NULL OR tm2.whatsapp_number_id = $2)
@@ -139,7 +149,8 @@ export async function getTimeseries(
          GROUP BY 1
       ),
       ${BUCKETS_CTE}
-      SELECT b.bucket, COALESCE(a.total, 0)::int AS total, COALESCE(a.leads, 0)::int AS leads
+      SELECT b.bucket, COALESCE(a.total, 0)::int AS total, COALESCE(a.leads, 0)::int AS leads,
+             COALESCE(a.oportunidades, 0)::int AS oportunidades
         FROM buckets b LEFT JOIN agg a ON a.bucket = b.bucket
        ORDER BY b.bucket`;
 
@@ -151,6 +162,7 @@ export async function getTimeseries(
       bucketStart: String(r.bucket),
       total: Number(r.total),
       leads: Number(r.leads),
+      oportunidades: Number(r.oportunidades),
     })),
   };
 }
