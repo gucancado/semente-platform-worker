@@ -191,6 +191,12 @@ const EnvSchema = z.object({
   // ── Leitura de reuniões (contrato meetings_read_v1) ──
   // Master switch: default OFF. Parse ESTRITO (NÃO z.coerce.boolean — ver LUA_ENABLED acima).
   MEETINGS_READ_ENABLED: z.enum(['true', 'false']).default('false').transform((v) => v === 'true'),
+
+  // ── Cron diário do import Fireflies (coleta contínua de transcrições) ──
+  // Master switch: default OFF. Parse ESTRITO (NÃO z.coerce.boolean — ver LUA_ENABLED acima).
+  FIREFLIES_IMPORT_ENABLED: z.enum(['true', 'false']).default('false').transform((v) => v === 'true'),
+  // Hora LOCAL America/Sao_Paulo em que o import roda (0-23). Default ~04:00.
+  FIREFLIES_IMPORT_HOUR: z.coerce.number().int().min(0).max(23).default(4),
 });
 
 export const config = EnvSchema.parse(process.env);

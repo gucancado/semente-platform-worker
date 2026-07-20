@@ -1,5 +1,5 @@
 import { config } from '../config.js';
-import { insertEpisodeWithTurns } from '../episodes/db.js';
+import { insertEpisodeWithTurns, episodeExists } from '../episodes/db.js';
 import { resolveAttribution, resolveByTitle, loadDomainRules, loadTitleRules, DEFAULT_FREEMAIL } from '../episodes/attribution.js';
 import { transcriptToEpisodeInput, type FirefliesTranscript } from '../integrations/fireflies/normalize.js';
 import { FirefliesClient } from '../integrations/fireflies/client.js';
@@ -30,6 +30,18 @@ export async function runImport(
     report.total_seen++;
     if (!t.sentences?.length) { report.skipped_empty++; continue; }
     try {
+      // Dedup ANTES do R2 (cron diário — Task 1): sem isso, todo dia re-sobe raw
+      // JSON + áudio (timeout 120s cada) de reuniões já importadas. Early-skip:
+      // nem atribuição roda pra uma duplicata (não polui by_method/orphans/
+      // unresolved_domains a cada rodada — mudança de comportamento intencional;
+      // antes a atribuição rodava antes do insert e contava mesmo em duplicatas).
+      // Só se aplica sem force — com force o fluxo completo (R2 + substituição)
+      // continua intacto.
+      if (!opts.force && (await episodeExists('fireflies', t.id))) {
+        report.duplicates++;
+        continue;
+      }
+
       const rawKey = `fireflies/${t.id}.json`;
       const input = transcriptToEpisodeInput(t, rawKey);
       let attr = resolveAttribution(

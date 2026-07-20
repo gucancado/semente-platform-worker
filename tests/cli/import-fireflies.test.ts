@@ -41,3 +41,17 @@ test('import real: atribui por domínio e interno; vazio é pulado; re-rodar é 
   assert.equal(r2.imported, 0);
   assert.equal(r2.duplicates, 2);
 });
+
+test('early-skip: dup detectada antes do R2/insert — título original preservado', async () => {
+  await runImport(fakeSource([T1]), { dryRun: false, internalWorkspaceId: 'wks-interno' });
+  const T1_MODIFICADO: FirefliesTranscript = { ...T1, title: 'Outro Título Qualquer' };
+  const r2 = await runImport(fakeSource([T1_MODIFICADO]), { dryRun: false, internalWorkspaceId: 'wks-interno' });
+  assert.equal(r2.duplicates, 1);
+  assert.equal(r2.imported, 0);
+  // Early-skip: a atribuição roda ANTES do check de duplicata hoje — prova de que
+  // o skip é cedo (não polui by_method/orphans a cada rodada diária de re-ver).
+  assert.deepEqual(r2.by_method, {});
+  assert.equal(r2.orphans.length, 0);
+  const { rows } = await pool.query('SELECT title FROM episodes WHERE external_id = $1', ['ff-1']);
+  assert.equal(rows[0].title, 'Reunião Tagless');
+});

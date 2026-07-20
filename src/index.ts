@@ -26,6 +26,7 @@ import { startHoldsCleanupCron } from './goals/scheduling/holds-cleanup.js';
 import { startReconcileCron } from './goals/scheduling/reconcile-trigger.js';
 import { startOutboxDispatcher } from './events/dispatcher.js';
 import { startLuaScheduler } from './lua/scheduler.js';
+import { startFirefliesImportCron } from './integrations/fireflies/import-cron.js';
 import { startProvisioningReaperCron } from './whatsapp/provisioning-reaper.js';
 import { startConnectionAlertSweep } from './whatsapp/connection-alerts.js';
 import { startTranscriptionPoller } from './transcription/poller.js';
@@ -196,6 +197,11 @@ async function main() {
   // Self-check de LUA_ENABLED + janela a cada tick => iniciar sempre é seguro
   // (no-op enquanto desligado ou fora da janela 02h-05h local).
   startLuaScheduler(app.log);
+
+  // Cron diário do import Fireflies (coleta contínua de transcrições de reunião):
+  // tick 60s, claim por data em fireflies_import_runs, ~04:00 America/Sao_Paulo.
+  // Self-check de FIREFLIES_IMPORT_ENABLED a cada tick => iniciar sempre é seguro.
+  startFirefliesImportCron(app.log);
 
   // Cron que varre provisionamentos de WhatsApp vencidos (QR não escaneado):
   // remove a instância Evolution órfã + a linha de staging. Rede de segurança

@@ -101,6 +101,19 @@ export async function insertEpisodeWithTurns(a: EpisodeInput): Promise<{ id: num
   }
 }
 
+/**
+ * Existência rápida de um episódio por (external_source, external_id) — dedup
+ * ANTES do R2 (spec Task 1 do cron Fireflies): permite ao importador pular
+ * transcrições já importadas sem subir raw JSON/áudio de novo a cada rodada.
+ */
+export async function episodeExists(externalSource: string, externalId: string): Promise<boolean> {
+  const { rows } = await pool.query(
+    `SELECT 1 FROM episodes WHERE external_source = $1 AND external_id = $2 LIMIT 1`,
+    [externalSource, externalId]
+  );
+  return rows.length > 0;
+}
+
 export async function getEpisode(id: number): Promise<(EpisodeRow & { turns: EpisodeTurnInput[] }) | null> {
   const { rows } = await pool.query<EpisodeRow>(`SELECT * FROM episodes WHERE id=$1`, [id]);
   if (!rows[0]) return null;
