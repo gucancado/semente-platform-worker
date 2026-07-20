@@ -57,6 +57,7 @@ export async function upsertConnectedNumber(
      ON CONFLICT (evolution_instance) DO UPDATE
        SET status = 'connected',
            phone = COALESCE(EXCLUDED.phone, whatsapp_numbers.phone),
+           removed_at = NULL,
            updated_at = NOW()
      RETURNING *`,
     [p.workspaceId, p.evolutionInstance, p.phone ?? null, p.createdBy],
@@ -78,6 +79,9 @@ export async function updateNumberStatus(
        status = $2,
        phone = COALESCE($3, wn.phone),
        updated_at = NOW(),
+       -- Reconectar um número REMOVIDO o traz de volta (invariante: connected ⟹ not removed).
+       -- Só 'removido pelo botão' (removed_at) some da nav; desconectar (removed_at NULL) permanece.
+       removed_at = CASE WHEN $2 = 'connected' THEN NULL ELSE wn.removed_at END,
        disconnected_since = CASE
          WHEN $2 = 'connected' THEN NULL
          WHEN prev.old_status = 'connected' THEN NOW()

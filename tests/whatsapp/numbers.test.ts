@@ -75,6 +75,26 @@ test('setNumberLifecycle remove seta removed_at; disconnect não', async () => {
   assert.ok(r.rows[0].removed_at);
 });
 
+test('reconectar (updateNumberStatus connected) limpa removed_at → número volta pra nav', async () => {
+  const n = await upsertConnectedNumber(pool, { workspaceId: 'ws-1', evolutionInstance: 'inst-recon', phone: '+552', createdBy: null });
+  await setNumberLifecycle(pool, n.id, { status: 'disconnected', removed: true });
+  // removido some da nav (listNumbers exclui removed_at IS NOT NULL)
+  assert.equal((await listNumbers(pool, 'ws-1')).some((x) => x.id === n.id), false);
+  // mesma instância reconecta → connected + removed_at limpo
+  await updateNumberStatus(pool, 'inst-recon', { status: 'connected' });
+  const r = await pool.query(`SELECT status, removed_at FROM whatsapp_numbers WHERE id=$1`, [n.id]);
+  assert.equal(r.rows[0].status, 'connected');
+  assert.equal(r.rows[0].removed_at, null);
+  assert.equal((await listNumbers(pool, 'ws-1')).some((x) => x.id === n.id), true);
+});
+
+test('desconectar (não connected) NÃO mexe em removed_at', async () => {
+  const n = await upsertConnectedNumber(pool, { workspaceId: 'ws-1', evolutionInstance: 'inst-disc', phone: '+553', createdBy: null });
+  await updateNumberStatus(pool, 'inst-disc', { status: 'disconnected' });
+  const r = await pool.query(`SELECT removed_at FROM whatsapp_numbers WHERE id=$1`, [n.id]);
+  assert.equal(r.rows[0].removed_at, null); // desconectado permanece na nav
+});
+
 test('claim: telefone novo → insert', async () => {
   const r = await claimNumberByPhone(pool, { phone: '+5531000', newWorkspaceId: 'ws-1', evolutionInstance: 'i1' });
   assert.equal(r.kind, 'insert');
