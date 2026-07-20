@@ -25,7 +25,7 @@ function map(r: any): ProvisionLinkRow {
     clicksUsed: r.clicks_used,
     status: r.status,
     consumedAt: r.consumed_at?.toISOString?.() ?? r.consumed_at ?? null,
-    connectedNumberId: r.connected_number_id ?? null,
+    connectedNumberId: r.connected_number_id == null ? null : Number(r.connected_number_id),
     createdAt: r.created_at.toISOString?.() ?? r.created_at,
     expiresAt: r.expires_at.toISOString?.() ?? r.expires_at,
   };
@@ -94,11 +94,26 @@ export async function incrementLinkClick(
     await client.query('COMMIT');
     return { ok: true, workspaceId: row.workspaceId };
   } catch (e) {
-    await client.query('ROLLBACK');
+    await client.query('ROLLBACK').catch(() => {}); // não mascara o erro original se o próprio ROLLBACK falhar
     throw e;
   } finally {
     client.release();
   }
+}
+
+/**
+ * Reembolsa 1 clique quando a geração do QR falha DEPOIS do incremento (ex.: Evolution
+ * fora do ar) — senão uma janela de instabilidade queima o orçamento sem o cliente ver QR.
+ * Reverte 'exhausted' → 'active' se aplicável; nunca ressuscita 'consumed'.
+ */
+export async function refundLinkClick(pool: Pool, token: string): Promise<void> {
+  await pool.query(
+    `UPDATE whatsapp_provision_links
+       SET clicks_used = GREATEST(clicks_used - 1, 0),
+           status = CASE WHEN status = 'exhausted' THEN 'active' ELSE status END
+     WHERE token = $1 AND status <> 'consumed' AND clicks_used > 0`,
+    [token],
+  );
 }
 
 /** Marca 'consumed' quando um número conecta pelo link. Idempotente (só se ainda não consumido). */

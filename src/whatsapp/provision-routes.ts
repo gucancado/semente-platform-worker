@@ -3,7 +3,7 @@ import type { Pool } from 'pg';
 import { randomBytes } from 'node:crypto';
 import { getNumber, renameNumberLabel, getNumberByInstance, setNumberLifecycle } from './numbers.js';
 import { createProvisioning, getProvisioning, deleteProvisioning } from './provisioning.js';
-import { createProvisionLink, getProvisionLink, computeLinkState, incrementLinkClick, generateLinkToken } from './provision-links.js';
+import { createProvisionLink, getProvisionLink, computeLinkState, incrementLinkClick, refundLinkClick, generateLinkToken } from './provision-links.js';
 import { createEvolutionInstance, ensureEvolutionInstance, getQrCode, logoutInstance, deleteInstance, type EvolutionDeps } from '../evolution/client.js';
 import { syncGroupSubjects } from './group-sync.js';
 import { backfillNumber } from './backfill.js';
@@ -118,7 +118,13 @@ export function registerProvisionRoutes(app: FastifyInstance, deps: { pool: Pool
       const code = click.state === 'not_found' ? 404 : 409;
       return reply.code(code).send({ error: 'link_unavailable', state: click.state });
     }
-    return reply.send(await startProvision(click.workspaceId, req.actingUser, token));
+    try {
+      return reply.send(await startProvision(click.workspaceId, req.actingUser, token));
+    } catch (e) {
+      // Evolution falhou após o clique já ter sido contado → devolve o clique ao orçamento.
+      await refundLinkClick(deps.pool, token).catch(() => {});
+      throw e;
+    }
   });
 
   // Status/QR do provisionamento via link (workspace derivado do token).
