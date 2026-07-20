@@ -14,7 +14,9 @@ test('listThreadMessages devolve id/kind/transcriptionStatus/hasMedia', async ()
   await pool.query(`UPDATE messages SET media_key='k/1.ogg' WHERE id=$1`, [m.id]);
   const { messages } = await listThreadMessages(pool, { workspaceId: 'ws-1', numberId: 1, identifier: '+55a', limit: 10 });
   const row = messages[0] as any;
-  assert.equal(row.id, m.id);
+  // Msg.id é number (read-queries embrulha o BIGINT em Number()); insertMessage
+  // devolve o BIGINT cru do node-postgres como string ('1'). Comparar como number.
+  assert.equal(row.id, Number(m.id));
   assert.equal(row.kind, 'audio');
   assert.equal(row.transcriptionStatus, 'pending');
   assert.equal(row.hasMedia, true);
