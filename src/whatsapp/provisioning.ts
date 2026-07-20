@@ -7,6 +7,7 @@ export type ProvisioningRow = {
   createdAt: string;
   expiresAt: string;
   blockedWorkspaceId: string | null;
+  provisionLinkToken: string | null;
 };
 
 function map(r: any): ProvisioningRow {
@@ -17,18 +18,19 @@ function map(r: any): ProvisioningRow {
     createdAt: r.created_at.toISOString?.() ?? r.created_at,
     expiresAt: r.expires_at.toISOString?.() ?? r.expires_at,
     blockedWorkspaceId: r.blocked_workspace_id ?? null,
+    provisionLinkToken: r.provision_link_token ?? null,
   };
 }
 
 export async function createProvisioning(
   pool: Pool,
-  p: { evolutionInstance: string; workspaceId: string; createdBy: string | null; ttlSeconds: number },
+  p: { evolutionInstance: string; workspaceId: string; createdBy: string | null; ttlSeconds: number; provisionLinkToken?: string | null },
 ): Promise<ProvisioningRow> {
   const { rows } = await pool.query(
-    `INSERT INTO whatsapp_provisioning (evolution_instance, workspace_id, created_by, expires_at)
-     VALUES ($1, $2, $3, NOW() + ($4 || ' seconds')::interval)
+    `INSERT INTO whatsapp_provisioning (evolution_instance, workspace_id, created_by, expires_at, provision_link_token)
+     VALUES ($1, $2, $3, NOW() + ($4 || ' seconds')::interval, $5)
      RETURNING *`,
-    [p.evolutionInstance, p.workspaceId, p.createdBy, String(p.ttlSeconds)],
+    [p.evolutionInstance, p.workspaceId, p.createdBy, String(p.ttlSeconds), p.provisionLinkToken ?? null],
   );
   return map(rows[0]);
 }

@@ -9,6 +9,7 @@ import { upsertConnectedNumber, setNumberLifecycle } from '../../src/whatsapp/nu
 beforeEach(async () => {
   await pool.query('TRUNCATE whatsapp_numbers RESTART IDENTITY CASCADE');
   await pool.query('TRUNCATE whatsapp_provisioning');
+  await pool.query('TRUNCATE whatsapp_provision_links');
 });
 after(() => pool.end());
 
@@ -85,4 +86,16 @@ test('staging open SEM telefone extraível → não revive, cria ficha (phone nu
   assert.equal(rows.length, 1);
   assert.equal(rows[0].phone, null);
   assert.equal(rows[0].status, 'connected');
+});
+
+test('connect via link marca o link como consumed', async () => {
+  const { createProvisionLink, getProvisionLink, generateLinkToken } = await import('../../src/whatsapp/provision-links.js');
+  const { createProvisioning } = await import('../../src/whatsapp/provisioning.js');
+  const token = generateLinkToken();
+  await createProvisionLink(pool, { token, workspaceId: 'ws-link', createdBy: null, maxClicks: 10, ttlDays: 7 });
+  await createProvisioning(pool, { evolutionInstance: 'inst-link', workspaceId: 'ws-link', createdBy: null, ttlSeconds: 90, provisionLinkToken: token });
+  await handleConnectionEvent(pool, { event: 'connection.update', instance: 'inst-link', data: { state: 'open', wuid: '5511999998888@s.whatsapp.net' } });
+  const link = await getProvisionLink(pool, token);
+  assert.equal(link?.status, 'consumed');
+  assert.ok(link?.connectedNumberId);
 });

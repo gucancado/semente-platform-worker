@@ -1,6 +1,7 @@
 import type { Pool } from 'pg';
 import { updateNumberStatus, getNumberByInstance, upsertConnectedNumber, claimNumberByPhone, normalizePhone } from './numbers.js';
 import { getProvisioning, deleteProvisioning, markProvisioningBlocked } from './provisioning.js';
+import { markLinkConsumed } from './provision-links.js';
 import { seedDefaultReasons } from './disqualify-reasons.js';
 import { seedDefaultSourceSignals } from './source-signals.js';
 import { config } from '../config.js';
@@ -84,6 +85,11 @@ export async function handleConnectionEvent(pool: Pool, payload: any): Promise<b
       await deleteProvisioning(pool, instance);
       await seedDefaultReasons(pool, prov.workspaceId);
       await seedDefaultSourceSignals(pool, prov.workspaceId);
+      if (prov.provisionLinkToken && numberId !== null) {
+        await markLinkConsumed(pool, prov.provisionLinkToken, numberId).catch((err) =>
+          console.error('[provision-link] markConsumed falhou (não-fatal):', (err as Error).message),
+        );
+      }
     }
   }
 
