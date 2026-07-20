@@ -3,6 +3,7 @@ import type { Pool } from 'pg';
 import { randomBytes } from 'node:crypto';
 import { getNumber, renameNumberLabel, getNumberByInstance, setNumberLifecycle } from './numbers.js';
 import { createProvisioning, getProvisioning, deleteProvisioning } from './provisioning.js';
+import { createProvisionLink, getProvisionLink, computeLinkState, incrementLinkClick, generateLinkToken } from './provision-links.js';
 import { createEvolutionInstance, ensureEvolutionInstance, getQrCode, logoutInstance, deleteInstance, type EvolutionDeps } from '../evolution/client.js';
 import { syncGroupSubjects } from './group-sync.js';
 import { backfillNumber } from './backfill.js';
@@ -10,6 +11,8 @@ import { setGroupExposure } from './thread-meta.js';
 import { tenantContext } from './tenant-context.js';
 
 const PROVISION_TTL_SECONDS = 90;
+const LINK_MAX_CLICKS = 10;
+const LINK_TTL_DAYS = 7;
 
 export function generateInstanceName(workspaceId: string) {
   return `ws-${workspaceId.replace(/-/g, '').slice(0, 8)}-${randomBytes(4).toString('hex')}`;
@@ -27,12 +30,10 @@ export function registerProvisionRoutes(app: FastifyInstance, deps: { pool: Pool
     if (req.url.startsWith('/admin/whatsapp/')) return requirePanelToken(deps.panelToken)(req, reply);
   });
 
-  // Onboarding QR-first: provisiona instância Evolution + staging (NÃO grava número).
-  app.post('/admin/whatsapp/provision', async (req: any, reply) => {
-    const { workspace_id } = req.body ?? {};
-    if (!workspace_id || typeof workspace_id !== 'string') return reply.code(400).send({ error: 'workspace_id required' });
-    const instance = generateInstanceName(workspace_id);
-    const prov = await createProvisioning(deps.pool, { evolutionInstance: instance, workspaceId: workspace_id, createdBy: req.actingUser, ttlSeconds: PROVISION_TTL_SECONDS });
+  // Cria instância Evolution + staging. Rollback do staging se a Evolution falhar.
+  async function startProvision(workspaceId: string, createdBy: string | null, linkToken: string | null) {
+    const instance = generateInstanceName(workspaceId);
+    const prov = await createProvisioning(deps.pool, { evolutionInstance: instance, workspaceId, createdBy, ttlSeconds: PROVISION_TTL_SECONDS, provisionLinkToken: linkToken });
     try {
       await createEvolutionInstance(deps.evolution, instance, deps.webhook);
     } catch (e) {
@@ -40,32 +41,97 @@ export function registerProvisionRoutes(app: FastifyInstance, deps: { pool: Pool
       try { await deleteInstance(deps.evolution, instance); } catch { /* idempotente */ }
       throw e;
     }
-    return reply.send({ instance, expiresAt: prov.expiresAt });
+    return { instance, expiresAt: prov.expiresAt };
+  }
+
+  // Máquina de estados do status/QR, escopada a um workspace.
+  // Anotação explícita: sem ela, o TS não preserva o literal `404` na narrowing
+  // via `'code' in r` (o campo volta como `number | undefined`, não `404`).
+  async function provisionStatus(instance: string, ws: string): Promise<{ code: 404 } | { body: Record<string, unknown> }> {
+    const num = await getNumberByInstance(deps.pool, instance);
+    if (num) {
+      if (num.workspaceId !== ws) return { code: 404 as const };
+      if (num.status === 'connected') return { body: { state: 'connected', numberId: num.id, phone: num.phone } };
+    }
+    const prov = await getProvisioning(deps.pool, instance);
+    if (prov) {
+      if (prov.workspaceId !== ws) return { code: 404 as const };
+      if (prov.blockedWorkspaceId) return { body: { state: 'blocked', blockedWorkspaceId: prov.blockedWorkspaceId } };
+      if (new Date(prov.expiresAt).getTime() < Date.now()) return { body: { state: 'expired' } };
+      const qr = await getQrCode(deps.evolution, instance);
+      return { body: { state: 'awaiting_scan', qr: qr.base64, pairingCode: qr.pairingCode } };
+    }
+    return { body: { state: 'gone' } };
+  }
+
+  // Onboarding QR-first: provisiona instância Evolution + staging (NÃO grava número).
+  app.post('/admin/whatsapp/provision', async (req: any, reply) => {
+    const { workspace_id } = req.body ?? {};
+    if (!workspace_id || typeof workspace_id !== 'string') return reply.code(400).send({ error: 'workspace_id required' });
+    return reply.send(await startProvision(workspace_id, req.actingUser, null));
   });
 
   // Status do provisionamento: QR enquanto aguarda; connected após o webhook commitar.
   app.get('/admin/whatsapp/provision/:instance', async (req: any, reply) => {
-    const instance = String(req.params.instance);
     const ws = req.query.workspace_id;
     if (!ws) return reply.code(400).send({ error: 'workspace_id required' });
-    const num = await getNumberByInstance(deps.pool, instance);
-    if (num) {
-      if (num.workspaceId !== ws) return reply.code(404).send({ error: 'not found' });
-      if (num.status === 'connected') return reply.send({ state: 'connected', numberId: num.id, phone: num.phone });
-    }
-    const prov = await getProvisioning(deps.pool, instance);
-    if (prov) {
-      if (prov.workspaceId !== ws) return reply.code(404).send({ error: 'not found' });
-      if (prov.blockedWorkspaceId) return reply.send({ state: 'blocked', blockedWorkspaceId: prov.blockedWorkspaceId });
-      if (new Date(prov.expiresAt).getTime() < Date.now()) return reply.send({ state: 'expired' });
-      const qr = await getQrCode(deps.evolution, instance);
-      return reply.send({ state: 'awaiting_scan', qr: qr.base64, pairingCode: qr.pairingCode });
-    }
-    return reply.send({ state: 'gone' });
+    const r = await provisionStatus(String(req.params.instance), String(ws));
+    if ('code' in r) return reply.code(r.code).send({ error: 'not found' });
+    return reply.send(r.body);
   });
 
   // Abort: dropa staging + remove instância Evolution. Idempotente.
   app.delete('/admin/whatsapp/provision/:instance', async (req: any, reply) => {
+    const instance = String(req.params.instance);
+    try { await logoutInstance(deps.evolution, instance); await deleteInstance(deps.evolution, instance); } catch { /* idempotente */ }
+    await deleteProvisioning(deps.pool, instance);
+    return reply.send({ ok: true });
+  });
+
+  // Link de uso único: cria (painel logado; BCD já validou SSO+admin).
+  app.post('/admin/whatsapp/provision-links', async (req: any, reply) => {
+    const { workspace_id } = req.body ?? {};
+    if (!workspace_id || typeof workspace_id !== 'string') return reply.code(400).send({ error: 'workspace_id required' });
+    const token = generateLinkToken();
+    const link = await createProvisionLink(deps.pool, { token, workspaceId: workspace_id, createdBy: req.actingUser, maxClicks: LINK_MAX_CLICKS, ttlDays: LINK_TTL_DAYS });
+    return reply.send({ token: link.token, expiresAt: link.expiresAt, maxClicks: link.maxClicks });
+  });
+
+  // Estado do link (a página pública valida antes de renderizar o QR).
+  app.get('/admin/whatsapp/provision-links/:token', async (req: any, reply) => {
+    const link = await getProvisionLink(deps.pool, String(req.params.token));
+    if (!link) return reply.code(404).send({ error: 'not found' });
+    return reply.send({
+      status: computeLinkState(link, Date.now()),
+      workspaceId: link.workspaceId,
+      clicksUsed: link.clicksUsed,
+      maxClicks: link.maxClicks,
+      expiresAt: link.expiresAt,
+    });
+  });
+
+  // Provisiona VIA link: consome 1 clique e cria instância+staging no workspace do link.
+  app.post('/admin/whatsapp/link/:token/provision', async (req: any, reply) => {
+    const token = String(req.params.token);
+    const click = await incrementLinkClick(deps.pool, token);
+    if (!click.ok) {
+      const code = click.state === 'not_found' ? 404 : 409;
+      return reply.code(code).send({ error: 'link_unavailable', state: click.state });
+    }
+    return reply.send(await startProvision(click.workspaceId, req.actingUser, token));
+  });
+
+  // Status/QR do provisionamento via link (workspace derivado do token).
+  app.get('/admin/whatsapp/link/:token/provision/:instance', async (req: any, reply) => {
+    const link = await getProvisionLink(deps.pool, String(req.params.token));
+    if (!link) return reply.code(404).send({ error: 'not found' });
+    const r = await provisionStatus(String(req.params.instance), link.workspaceId);
+    if ('code' in r) return reply.code(r.code).send({ error: 'not found' });
+    return reply.send(r.body);
+  });
+
+  // Abort do provisionamento via link.
+  app.delete('/admin/whatsapp/link/:token/provision/:instance', async (req: any, reply) => {
     const instance = String(req.params.instance);
     try { await logoutInstance(deps.evolution, instance); await deleteInstance(deps.evolution, instance); } catch { /* idempotente */ }
     await deleteProvisioning(deps.pool, instance);
