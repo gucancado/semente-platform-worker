@@ -13,8 +13,10 @@ after(() => pool.end());
 
 test('create + getActive + get', async () => {
   const row = await createCollectedMeeting(pool, { meetCode: 'abc-defg-hij', workspaceId: 'ws-1', requestedBy: 'user-1' });
-  assert.equal(row.status, 'collecting');
+  assert.equal(row.status, 'queued'); // nasce na fila (default novo)
   assert.equal(row.meet_code, 'abc-defg-hij');
+  // getActive só enxerga collecting/stopping — promove antes de checar.
+  await updateCollectedMeeting(pool, row.id, { status: 'collecting' });
   const active = await getActiveCollectedMeeting(pool);
   assert.equal(active!.id, row.id);
   const fetched = await getCollectedMeeting(pool, row.id);
@@ -33,7 +35,7 @@ test('update aplica patch parcial', async () => {
   await updateCollectedMeeting(pool, row.id, { vexaMeetingId: 42, lastSegmentAt: new Date('2026-07-13T12:00:00Z') });
   const r = await getCollectedMeeting(pool, row.id);
   assert.equal(r!.vexa_meeting_id, 42);
-  assert.equal(r!.status, 'collecting');
+  assert.equal(r!.status, 'queued'); // patch não mexe em status → segue o default 'queued'
 });
 
 test('isEpisodeFrozen: true sse existe fato para o episodio', async () => {

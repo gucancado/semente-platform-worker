@@ -188,6 +188,10 @@ const EnvSchema = z.object({
   MEETINGS_ADMISSION_TIMEOUT_MIN: z.coerce.number().int().positive().default(10),
   MEETINGS_COLLECT_POLLER_INTERVAL_MS: z.coerce.number().int().positive().default(60_000),
   MEETINGS_COLLECT_POLLER_BATCH_SIZE: z.coerce.number().int().positive().default(10),
+  // Fila de slots (preparo multibot): quantas coletas simultâneas o pool Vexa comporta
+  // e por quanto tempo um pedido pode esperar na fila antes de expirar (no_slot).
+  VEXA_MAX_CONCURRENT: z.coerce.number().int().min(1).default(1),
+  MEETINGS_QUEUE_MAX_WAIT_MIN: z.coerce.number().int().positive().default(120),
   // ── Leitura de reuniões (contrato meetings_read_v1) ──
   // Master switch: default OFF. Parse ESTRITO (NÃO z.coerce.boolean — ver LUA_ENABLED acima).
   MEETINGS_READ_ENABLED: z.enum(['true', 'false']).default('false').transform((v) => v === 'true'),

@@ -1,6 +1,6 @@
 import type { Pool } from 'pg';
 
-export type CollectedMeetingStatus = 'collecting' | 'stopping' | 'imported' | 'failed' | 'canceled';
+export type CollectedMeetingStatus = 'queued' | 'collecting' | 'stopping' | 'imported' | 'failed' | 'canceled';
 
 export type CollectedMeetingRow = {
   id: string;
@@ -12,12 +12,15 @@ export type CollectedMeetingRow = {
   requested_by: string;
   last_segment_at: Date | null;
   episode_id: number | null;
+  title: string | null;
+  queue_expires_at: Date | null;
   created_at: Date;
   updated_at: Date;
 };
 
 const COLS = `id, meet_code, vexa_meeting_id, workspace_id, status, failure_reason,
-              requested_by, last_segment_at, episode_id, created_at, updated_at`;
+              requested_by, last_segment_at, episode_id, title, queue_expires_at,
+              created_at, updated_at`;
 
 /** episode_id é BIGINT e o driver pg entrega int8 como string (sem setTypeParser,
  *  que é global e mudaria o worker inteiro). Normaliza aqui, no ponto de leitura,
@@ -29,12 +32,13 @@ export function mapCollectedMeetingRow(row: CollectedMeetingRow): CollectedMeeti
 
 export async function createCollectedMeeting(
   pool: Pool,
-  a: { meetCode: string; workspaceId: string | null; requestedBy: string },
+  a: { meetCode: string; workspaceId: string | null; requestedBy: string; title?: string | null; queueExpiresAt?: Date | null },
 ): Promise<CollectedMeetingRow> {
   const { rows } = await pool.query<CollectedMeetingRow>(
-    `INSERT INTO collected_meetings (meet_code, workspace_id, requested_by, status)
-     VALUES ($1,$2,$3,'collecting') RETURNING ${COLS}`,
-    [a.meetCode, a.workspaceId, a.requestedBy],
+    `INSERT INTO collected_meetings (meet_code, workspace_id, requested_by, title, queue_expires_at, status)
+     VALUES ($1, $2, $3, $4, $5, 'queued')
+     RETURNING ${COLS}`,
+    [a.meetCode, a.workspaceId, a.requestedBy, a.title ?? null, a.queueExpiresAt ?? null],
   );
   return mapCollectedMeetingRow(rows[0]!);
 }
@@ -58,6 +62,22 @@ export async function listActiveCollectedMeetings(pool: Pool): Promise<Collected
   const { rows } = await pool.query<CollectedMeetingRow>(
     `SELECT ${COLS} FROM collected_meetings
       WHERE status IN ('collecting','stopping') ORDER BY created_at ASC`);
+  return rows.map(mapCollectedMeetingRow);
+}
+
+/** Coletas consumindo slot AGORA (bot no ar): collecting/stopping. Queued não conta. */
+export async function countActiveCollections(pool: Pool): Promise<number> {
+  const { rows } = await pool.query<{ n: string }>(
+    `SELECT count(*) AS n FROM collected_meetings WHERE status IN ('collecting','stopping')`,
+  );
+  return Number(rows[0]!.n);
+}
+
+/** Fila FIFO de coletas aguardando slot. */
+export async function listQueuedMeetings(pool: Pool): Promise<CollectedMeetingRow[]> {
+  const { rows } = await pool.query<CollectedMeetingRow>(
+    `SELECT ${COLS} FROM collected_meetings WHERE status = 'queued' ORDER BY created_at ASC`,
+  );
   return rows.map(mapCollectedMeetingRow);
 }
 
