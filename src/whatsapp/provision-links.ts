@@ -116,12 +116,16 @@ export async function refundLinkClick(pool: Pool, token: string): Promise<void> 
   );
 }
 
-/** Marca 'consumed' quando um número conecta pelo link. Idempotente (só se ainda não consumido). */
+/**
+ * Marca 'consumed' quando um número conecta pelo link. Idempotente (só se ainda não consumido).
+ * Respeita a expiração por TEMPO (expires_at >= NOW): um link vencido não vira 'consumed' — a
+ * expiração vence, conforme a regra "morre no primeiro de consumed/exhausted/7 dias".
+ */
 export async function markLinkConsumed(pool: Pool, token: string, numberId: number): Promise<void> {
   await pool.query(
     `UPDATE whatsapp_provision_links
        SET status='consumed', consumed_at=NOW(), connected_number_id=$2
-     WHERE token=$1 AND status <> 'consumed'`,
+     WHERE token=$1 AND status <> 'consumed' AND expires_at >= NOW()`,
     [token, numberId],
   );
 }

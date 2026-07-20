@@ -133,14 +133,27 @@ export function registerProvisionRoutes(app: FastifyInstance, deps: { pool: Pool
     if (!link) return reply.code(404).send({ error: 'not found' });
     const r = await provisionStatus(String(req.params.instance), link.workspaceId);
     if ('code' in r) return reply.code(r.code).send({ error: 'not found' });
+    // Link expirado por TEMPO não serve mais QR novo, mesmo que o staging (TTL 90s) siga vivo.
+    // 'exhausted' NÃO bloqueia: o 10º QR é válido e pode conectar. 'connected' sempre passa.
+    if (computeLinkState(link, Date.now()) === 'expired' && (r.body as any)?.state === 'awaiting_scan') {
+      return reply.send({ state: 'expired' });
+    }
     return reply.send(r.body);
   });
 
-  // Abort do provisionamento via link.
+  // Abort do provisionamento via link. Só aborta um staging que pertence a ESTE link/workspace
+  // (senão qualquer token válido + um instance adivinhado abortaria provisionamento alheio — IDOR).
   app.delete('/admin/whatsapp/link/:token/provision/:instance', async (req: any, reply) => {
+    const token = String(req.params.token);
     const instance = String(req.params.instance);
-    try { await logoutInstance(deps.evolution, instance); await deleteInstance(deps.evolution, instance); } catch { /* idempotente */ }
-    await deleteProvisioning(deps.pool, instance);
+    const link = await getProvisionLink(deps.pool, token);
+    if (!link) return reply.code(404).send({ error: 'not found' });
+    const prov = await getProvisioning(deps.pool, instance);
+    // No-op idempotente se o staging não é deste link (não vaza existência de instances alheios).
+    if (prov && prov.workspaceId === link.workspaceId && prov.provisionLinkToken === token) {
+      try { await logoutInstance(deps.evolution, instance); await deleteInstance(deps.evolution, instance); } catch { /* idempotente */ }
+      await deleteProvisioning(deps.pool, instance);
+    }
     return reply.send({ ok: true });
   });
 
