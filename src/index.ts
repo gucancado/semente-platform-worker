@@ -18,7 +18,6 @@ import { registerMeetingsCollectRoutes } from './meetings-collect/routes.js';
 import { registerMeetingsReadRoutes } from './meetings-read/routes.js';
 import { startMeetingsCollectPoller } from './meetings-collect/poller.js';
 import { buildMeetingsCollectDeps } from './meetings-collect/runtime.js';
-import { VexaClient } from './integrations/vexa/client.js';
 import { pool } from './db.js';
 import { requireAgentToken } from './auth.js';
 import { startTriggerPoller } from './triggers/poller.js';
@@ -150,7 +149,6 @@ async function main() {
       registerMeetingsCollectRoutes(scope, {
         pool,
         panelToken: config.PANEL_TOKEN,
-        vexa: new VexaClient(config.VEXA_API_URL!, config.VEXA_API_KEY!),
         collectDeps: buildMeetingsCollectDeps(),
       });
     });

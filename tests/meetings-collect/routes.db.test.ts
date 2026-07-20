@@ -4,7 +4,7 @@ import Fastify from 'fastify';
 import { pool } from '../../src/db.js';
 import { insertEpisodeWithTurns } from '../../src/episodes/db.js';
 import { registerMeetingsCollectRoutes } from '../../src/meetings-collect/routes.js';
-import { getCollectedMeeting, createCollectedMeeting } from '../../src/meetings-collect/db.js';
+import { getCollectedMeeting, createCollectedMeeting, updateCollectedMeeting } from '../../src/meetings-collect/db.js';
 
 const PANEL = 'tok-test';
 function buildApp(vexaOverrides: any = {}) {
@@ -17,9 +17,10 @@ function buildApp(vexaOverrides: any = {}) {
   };
   const collectDeps = {
     pool, vexa, putAndVerify: async () => {}, insertEpisode: insertEpisodeWithTurns,
-    inactivityStopMin: 10, admissionTimeoutMin: 10, now: () => new Date(),
+    inactivityStopMin: 10, admissionTimeoutMin: 10, botName: 'BeeAds Notetaker',
+    maxConcurrent: 1, queueMaxWaitMin: 120, now: () => new Date(),
   };
-  registerMeetingsCollectRoutes(app, { pool, panelToken: PANEL, vexa: vexa as any, collectDeps: collectDeps as any });
+  registerMeetingsCollectRoutes(app, { pool, panelToken: PANEL, collectDeps: collectDeps as any });
   return app;
 }
 const H = { 'x-panel-token': PANEL, 'x-acting-user': 'u1', 'content-type': 'application/json' };
@@ -40,12 +41,32 @@ test('POST cria coleta collecting', async () => {
   assert.equal(r.json().status, 'collecting');
 });
 
-test('POST concorrente → 409 collection_active', async () => {
+test('POST com coleta ativa → 200 status queued (entra na fila, sem 409)', async () => {
   const app = buildApp();
-  await createCollectedMeeting(pool, { meetCode: 'aaa-bbbb-ccc', workspaceId: null, requestedBy: 'x' });
+  // já há uma coleta ocupando o único slot
+  const active = await createCollectedMeeting(pool, { meetCode: 'aaa-bbbb-ccc', workspaceId: null, requestedBy: 'x' });
+  await updateCollectedMeeting(pool, active.id, { status: 'collecting' });
   const r = await app.inject({ method: 'POST', url: '/meetings-collect', headers: H, payload: { meetCode: 'abc-defg-hij' } });
-  assert.equal(r.statusCode, 409);
-  assert.equal(r.json().error, 'collection_active');
+  assert.equal(r.statusCode, 200);
+  assert.equal(r.json().status, 'queued');
+  assert.equal(r.json().meet_code, 'abc-defg-hij');
+});
+
+test('POST com slot livre → 200 status collecting e sendBot chamado com o meetCode', async () => {
+  const sendBotCalls: string[] = [];
+  const app = buildApp({ sendBot: async (code: string) => { sendBotCalls.push(code); return { id: 901, native_meeting_id: code, status: 'joining', start_time: null, end_time: null, segments: [] }; } });
+  const r = await app.inject({ method: 'POST', url: '/meetings-collect', headers: H, payload: { meetCode: 'abc-defg-hij' } });
+  assert.equal(r.statusCode, 200);
+  assert.equal(r.json().status, 'collecting');
+  assert.deepEqual(sendBotCalls, ['abc-defg-hij']); // a promoção é o único caminho que sobe bot
+});
+
+test('POST com title → row persiste o title', async () => {
+  const app = buildApp();
+  const r = await app.inject({ method: 'POST', url: '/meetings-collect', headers: H, payload: { meetCode: 'abc-defg-hij', title: 'Hoenka + BeeAds' } });
+  assert.equal(r.statusCode, 200);
+  const row = await getCollectedMeeting(pool, r.json().id);
+  assert.equal(row!.title, 'Hoenka + BeeAds');
 });
 
 test('PATCH attribution congela quando há fato (409 attribution_frozen)', async () => {

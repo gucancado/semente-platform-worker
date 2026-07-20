@@ -15,6 +15,9 @@ export function buildMeetingsCollectDeps(): MeetingsCollectDeps {
     insertEpisode: insertEpisodeWithTurns,
     inactivityStopMin: config.MEETINGS_INACTIVITY_STOP_MIN,
     admissionTimeoutMin: config.MEETINGS_ADMISSION_TIMEOUT_MIN,
+    botName: 'BeeAds Notetaker',
+    maxConcurrent: config.VEXA_MAX_CONCURRENT,
+    queueMaxWaitMin: config.MEETINGS_QUEUE_MAX_WAIT_MIN,
     now: () => new Date(),
   };
 }

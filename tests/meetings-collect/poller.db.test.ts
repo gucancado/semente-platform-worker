@@ -6,10 +6,11 @@ import { insertEpisodeWithTurns } from '../../src/episodes/db.js';
 import { runMeetingsCollectBatch, type MeetingsCollectDeps } from '../../src/meetings-collect/poller.js';
 
 const R2_CALLS: any[] = [];
-function baseDeps(vexaMeetingByCode: Record<string, any>, now: Date): MeetingsCollectDeps {
+function baseDeps(vexaMeetingByCode: Record<string, any>, now: Date, opts: { sendBotCalls?: string[] } = {}): MeetingsCollectDeps {
   return {
     pool,
     vexa: {
+      sendBot: async (code: string) => { opts.sendBotCalls?.push(code); return { id: 900, native_meeting_id: code, status: 'joining', start_time: null, end_time: null, segments: [] } as any; },
       getTranscript: async (code: string) => vexaMeetingByCode[code],
       stopBot: async () => {},
     },
@@ -17,6 +18,9 @@ function baseDeps(vexaMeetingByCode: Record<string, any>, now: Date): MeetingsCo
     insertEpisode: insertEpisodeWithTurns,
     inactivityStopMin: 10,
     admissionTimeoutMin: 10,
+    botName: 'BeeAds Notetaker',
+    maxConcurrent: 1,
+    queueMaxWaitMin: 120,
     now: () => now,
   };
 }
@@ -26,6 +30,25 @@ beforeEach(async () => {
   await pool.query('TRUNCATE collected_meetings, episode_turns, episodes RESTART IDENTITY CASCADE');
 });
 after(() => pool.end());
+
+test('tick promove queued (sendBot) ANTES de processar as ativas', async () => {
+  const row = await createCollectedMeeting(pool, { meetCode: 'abc-defg-hij', workspaceId: null, requestedBy: 'u' });
+  assert.equal(row.status, 'queued');
+  const now = new Date('2026-07-13T15:00:00Z');
+  const nowS = now.getTime() / 1000;
+  const meeting = {
+    id: 601, native_meeting_id: 'abc-defg-hij', status: 'active',
+    start_time: '2026-07-13T14:00:00.000000', end_time: null,
+    segments: [{ start: nowS - 60, end: nowS - 5, text: 'oi', language: null, speaker: 'Ana' }],
+  };
+  const sendBotCalls: string[] = [];
+  const n = await runMeetingsCollectBatch(baseDeps({ 'abc-defg-hij': meeting }, now, { sendBotCalls }));
+  assert.deepEqual(sendBotCalls, ['abc-defg-hij']); // promovido neste tick
+  assert.equal(n, 1); // após promoção, 1 ativa foi processada
+  const r = await getCollectedMeeting(pool, row.id);
+  assert.equal(r!.status, 'collecting');
+  assert.ok(r!.last_segment_at); // processCollectedMeeting rodou DEPOIS da promoção
+});
 
 test('meeting completed → import: R2 antes, episódio criado, status=imported', async () => {
   const row = await createCollectedMeeting(pool, { meetCode: 'abc-defg-hij', workspaceId: 'ws-1', requestedBy: 'u' });

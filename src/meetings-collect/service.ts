@@ -1,20 +1,53 @@
 import type { Pool } from 'pg';
 import type { VexaClient, VexaMeeting } from '../integrations/vexa/client.js';
 import type { CollectedMeetingRow } from './db.js';
-import { updateCollectedMeeting } from './db.js';
+import { updateCollectedMeeting, listQueuedMeetings, countActiveCollections } from './db.js';
 import { vexaMeetingToEpisodeInput } from '../integrations/vexa/normalize.js';
 import type { insertEpisodeWithTurns } from '../episodes/db.js';
 
 export type MeetingsCollectDeps = {
   pool: Pool;
-  vexa: Pick<VexaClient, 'getTranscript' | 'stopBot'>;
+  vexa: Pick<VexaClient, 'sendBot' | 'getTranscript' | 'stopBot'>;
   putAndVerify: (key: string, body: string, contentType: string) => Promise<void>;
   insertEpisode: typeof insertEpisodeWithTurns;
   inactivityStopMin: number;
   admissionTimeoutMin: number;
+  botName: string;
+  maxConcurrent: number;
+  queueMaxWaitMin: number;
   now: () => Date;
   log?: { warn: (o: unknown, m?: string) => void; info: (o: unknown, m?: string) => void };
 };
+
+/**
+ * Expira e promove a fila de coletas. Chamado pelo POST (resposta imediata
+ * quando há slot) e por TODO tick do poller. Nunca lança — falha de sendBot
+ * marca a row e segue; a promoção é sequencial (fila curta, sem paralelismo).
+ */
+export async function promoteQueuedMeetings(deps: MeetingsCollectDeps): Promise<{ promoted: number; expired: number }> {
+  const now = deps.now();
+  const queued = await listQueuedMeetings(deps.pool);
+  let promoted = 0; let expired = 0;
+  for (const row of queued) {
+    const limit = row.queue_expires_at ?? new Date(row.created_at.getTime() + deps.queueMaxWaitMin * 60_000);
+    if (limit < now) {
+      await updateCollectedMeeting(deps.pool, row.id, { status: 'failed', failureReason: 'no_slot' });
+      expired++;
+    }
+  }
+  for (const row of await listQueuedMeetings(deps.pool)) {
+    if ((await countActiveCollections(deps.pool)) >= deps.maxConcurrent) break;
+    try {
+      const meeting = await deps.vexa.sendBot(row.meet_code, deps.botName, 'pt');
+      await updateCollectedMeeting(deps.pool, row.id, { status: 'collecting', vexaMeetingId: meeting.id });
+      promoted++;
+    } catch (err) {
+      await updateCollectedMeeting(deps.pool, row.id, { status: 'failed', failureReason: 'vexa_send_failed' });
+      deps.log?.warn?.({ id: row.id, err: (err as Error).message }, 'meetings-collect: sendBot falhou na promoção');
+    }
+  }
+  return { promoted, expired };
+}
 
 function lastSegmentDate(meeting: VexaMeeting): Date | null {
   if (!meeting.segments?.length) return null;

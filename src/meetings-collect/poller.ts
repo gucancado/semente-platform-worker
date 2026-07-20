@@ -1,11 +1,14 @@
 import { config } from '../config.js';
 import { listActiveCollectedMeetings } from './db.js';
-import { processCollectedMeeting, type MeetingsCollectDeps } from './service.js';
+import { processCollectedMeeting, promoteQueuedMeetings, type MeetingsCollectDeps } from './service.js';
 import { buildMeetingsCollectDeps } from './runtime.js';
 
 export type { MeetingsCollectDeps } from './service.js';
 
 export async function runMeetingsCollectBatch(deps: MeetingsCollectDeps): Promise<number> {
+  // Antes de processar as ativas, expira/promove a fila — assim uma coleta que virou
+  // slot livre neste tick já sobe o bot e entra no processamento a seguir.
+  await promoteQueuedMeetings(deps);
   const rows = await listActiveCollectedMeetings(deps.pool);
   for (const row of rows) {
     try {
