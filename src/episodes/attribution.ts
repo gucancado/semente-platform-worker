@@ -63,7 +63,7 @@ export function resolveAttribution(
   return { workspace_id: null, project_slug: null, method: 'none', unresolved_domains: unresolved.sort() };
 }
 
-/** Carrega todas as regras (tabela pequena — cache em memória por execução do importador). */
+/** Carrega todas as regras (tabela pequena — consulta o DB a cada chamada; o importador chama 1x por execução, as rotas recarregam por request). */
 export async function loadDomainRules(): Promise<Map<string, DomainRule>> {
   const { pool } = await import('../db.js');
   const { rows } = await pool.query<{ domain: string; workspace_id: string; project_slug: string | null }>(
@@ -103,7 +103,7 @@ export async function upsertTitleRule(args: { pattern: string; workspace_id: str
   );
 }
 
-/** Carrega regras de título (tabela pequena — cache em memória por execução). */
+/** Carrega regras de título (tabela pequena — consulta o DB a cada chamada; o importador chama 1x por execução, as rotas recarregam por request). */
 export async function loadTitleRules(): Promise<TitleRule[]> {
   const { pool } = await import('../db.js');
   const { rows } = await pool.query<TitleRule>(
