@@ -74,6 +74,7 @@ export async function importCollectedMeeting(
   const rawKey = `vexa/${meeting.id}.json`;
   await deps.putAndVerify(rawKey, JSON.stringify(meeting), 'application/json');
   const input = vexaMeetingToEpisodeInput(meeting, rawKey);
+  input.title = row.title ?? null; // título vem da entidade (agenda/painel), não do Vexa
   input.workspace_id = row.workspace_id;
   input.attribution_method = 'manual';
   const r = await deps.insertEpisode(input);

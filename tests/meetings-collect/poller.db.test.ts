@@ -51,7 +51,7 @@ test('tick promove queued (sendBot) ANTES de processar as ativas', async () => {
 });
 
 test('meeting completed → import: R2 antes, episódio criado, status=imported', async () => {
-  const row = await createCollectedMeeting(pool, { meetCode: 'abc-defg-hij', workspaceId: 'ws-1', requestedBy: 'u' });
+  const row = await createCollectedMeeting(pool, { meetCode: 'abc-defg-hij', workspaceId: 'ws-1', requestedBy: 'u', title: 'Hoenka + BeeAds' });
   const now = new Date('2026-07-13T15:00:00Z');
   const meeting = {
     id: 501, native_meeting_id: 'abc-defg-hij', status: 'completed',
@@ -64,10 +64,26 @@ test('meeting completed → import: R2 antes, episódio criado, status=imported'
   const r = await getCollectedMeeting(pool, row.id);
   assert.equal(r!.status, 'imported');
   assert.ok(r!.episode_id);
-  const ep = await pool.query('SELECT external_source, workspace_id, attribution_method FROM episodes WHERE id=$1', [r!.episode_id]);
+  const ep = await pool.query('SELECT external_source, workspace_id, attribution_method, title FROM episodes WHERE id=$1', [r!.episode_id]);
   assert.equal(ep.rows[0].external_source, 'vexa');
   assert.equal(ep.rows[0].workspace_id, 'ws-1');
   assert.equal(ep.rows[0].attribution_method, 'manual');
+  assert.equal(ep.rows[0].title, 'Hoenka + BeeAds'); // título da entidade propaga ao episódio
+});
+
+test('import sem título na coleta → episódio nasce com title null', async () => {
+  const row = await createCollectedMeeting(pool, { meetCode: 'abc-defg-hij', workspaceId: 'ws-1', requestedBy: 'u', title: null });
+  const now = new Date('2026-07-13T15:00:00Z');
+  const meeting = {
+    id: 506, native_meeting_id: 'abc-defg-hij', status: 'completed',
+    start_time: '2026-07-13T14:00:00.000000', end_time: '2026-07-13T14:10:00.000000',
+    segments: [{ start: 1000, end: 1002, text: 'oi', language: null, speaker: 'Ana' }],
+  };
+  await runMeetingsCollectBatch(baseDeps({ 'abc-defg-hij': meeting }, now));
+  const r = await getCollectedMeeting(pool, row.id);
+  assert.equal(r!.status, 'imported');
+  const ep = await pool.query('SELECT title FROM episodes WHERE id=$1', [r!.episode_id]);
+  assert.equal(ep.rows[0].title, null);
 });
 
 test('inatividade > limite → stopBot + import', async () => {
