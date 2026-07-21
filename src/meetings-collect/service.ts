@@ -25,26 +25,38 @@ export type MeetingsCollectDeps = {
  * marca a row e segue; a promoção é sequencial (fila curta, sem paralelismo).
  */
 export async function promoteQueuedMeetings(deps: MeetingsCollectDeps): Promise<{ promoted: number; expired: number }> {
-  const now = deps.now();
-  const queued = await listQueuedMeetings(deps.pool);
   let promoted = 0; let expired = 0;
-  for (const row of queued) {
-    const limit = row.queue_expires_at ?? new Date(row.created_at.getTime() + deps.queueMaxWaitMin * 60_000);
-    if (limit < now) {
-      await updateCollectedMeeting(deps.pool, row.id, { status: 'failed', failureReason: 'no_slot' });
-      expired++;
+  // Contrato "Nunca lança": envolve TODA a rotina de expirar+promover. Qualquer erro de DB
+  // (listQueuedMeetings, countActiveCollections, updateCollectedMeeting) é engolido aqui e a
+  // função retorna os counts acumulados até o ponto do erro. Racional: é chamada em todo tick
+  // do poller (um erro de DB não pode derrubar o tick) e no caminho do POST — que faz sua
+  // PRÓPRIA re-leitura da row depois; se o DB estiver realmente fora, essa re-leitura falha e
+  // o POST 500a de qualquer forma, então engolir aqui não mascara erro real do POST.
+  try {
+    const now = deps.now();
+    const queued = await listQueuedMeetings(deps.pool);
+    for (const row of queued) {
+      const limit = row.queue_expires_at ?? new Date(row.created_at.getTime() + deps.queueMaxWaitMin * 60_000);
+      if (limit < now) {
+        await updateCollectedMeeting(deps.pool, row.id, { status: 'failed', failureReason: 'no_slot' });
+        expired++;
+      }
     }
-  }
-  for (const row of await listQueuedMeetings(deps.pool)) {
-    if ((await countActiveCollections(deps.pool)) >= deps.maxConcurrent) break;
-    try {
-      const meeting = await deps.vexa.sendBot(row.meet_code, deps.botName, 'pt');
-      await updateCollectedMeeting(deps.pool, row.id, { status: 'collecting', vexaMeetingId: meeting.id });
-      promoted++;
-    } catch (err) {
-      await updateCollectedMeeting(deps.pool, row.id, { status: 'failed', failureReason: 'vexa_send_failed' });
-      deps.log?.warn?.({ id: row.id, err: (err as Error).message }, 'meetings-collect: sendBot falhou na promoção');
+    for (const row of await listQueuedMeetings(deps.pool)) {
+      if ((await countActiveCollections(deps.pool)) >= deps.maxConcurrent) break;
+      // sendBot preserva o comportamento atual: falha marca a row failed/vexa_send_failed e SEGUE
+      // pra próxima da fila (não conta como erro fatal da rotina).
+      try {
+        const meeting = await deps.vexa.sendBot(row.meet_code, deps.botName, 'pt');
+        await updateCollectedMeeting(deps.pool, row.id, { status: 'collecting', vexaMeetingId: meeting.id });
+        promoted++;
+      } catch (err) {
+        await updateCollectedMeeting(deps.pool, row.id, { status: 'failed', failureReason: 'vexa_send_failed' });
+        deps.log?.warn?.({ id: row.id, err: (err as Error).message }, 'meetings-collect: sendBot falhou na promoção');
+      }
     }
+  } catch (err) {
+    deps.log?.warn?.({ err: (err as Error).message }, 'meetings-collect: promoteQueuedMeetings falhou');
   }
   return { promoted, expired };
 }

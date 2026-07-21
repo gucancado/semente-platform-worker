@@ -61,6 +61,13 @@ test('POST com slot livre → 200 status collecting e sendBot chamado com o meet
   assert.deepEqual(sendBotCalls, ['abc-defg-hij']); // a promoção é o único caminho que sobe bot
 });
 
+test('POST com expiresAt inválido → 400 invalid_expires_at', async () => {
+  const app = buildApp();
+  const r = await app.inject({ method: 'POST', url: '/meetings-collect', headers: H, payload: { meetCode: 'abc-defg-hij', expiresAt: 'not-a-date' } });
+  assert.equal(r.statusCode, 400);
+  assert.equal(r.json().error, 'invalid_expires_at');
+});
+
 test('POST com title → row persiste o title', async () => {
   const app = buildApp();
   const r = await app.inject({ method: 'POST', url: '/meetings-collect', headers: H, payload: { meetCode: 'abc-defg-hij', title: 'Hoenka + BeeAds' } });

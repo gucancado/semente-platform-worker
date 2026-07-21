@@ -29,6 +29,9 @@ export function registerMeetingsCollectRoutes(
     const title: string | null = req.body?.title ?? null;
     const expiresAt: string | undefined = req.body?.expiresAt;
     if (!meetCode || !MEET_RE.test(meetCode)) return reply.code(400).send({ error: 'invalid_meet_code' });
+    // expiresAt ausente/null/'' segue válido (a fila usa MEETINGS_QUEUE_MAX_WAIT_MIN); só uma
+    // string presente e não-parseável vira 400 (senão new Date inválida quebraria a persistência).
+    if (expiresAt && Number.isNaN(new Date(expiresAt).getTime())) return reply.code(400).send({ error: 'invalid_expires_at' });
     const queueExpiresAt = expiresAt ? new Date(expiresAt) : null;
 
     // Nasce `queued`; a fila de slots decide se sobe agora (collecting), espera, ou

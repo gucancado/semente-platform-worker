@@ -94,6 +94,22 @@ test('queued sem expires e created_at velho (> queueMaxWaitMin, now injetado): f
   assert.equal(r!.failure_reason, 'no_slot');
 });
 
+test('contrato nunca-lança: erro de DB na promoção é engolido (resolve, não rejeita)', async () => {
+  // pool-stub que rejeita em TODA query → listQueuedMeetings lança dentro de promote.
+  // Exercita o catch de erro de DB (não o de sendBot).
+  const throwingPool = { query: async () => { throw new Error('db down'); } } as any;
+  const warns: unknown[] = [];
+  const calls: Array<{ code: string; name: string; lang: string }> = [];
+  const deps = buildDeps({ sendBotCalls: calls, now: new Date() });
+  deps.pool = throwingPool;
+  deps.log = { warn: (o) => { warns.push(o); }, info: () => {} };
+  // Deve RESOLVER (não rejeitar) mesmo com o DB fora.
+  const res = await promoteQueuedMeetings(deps);
+  assert.deepEqual(res, { promoted: 0, expired: 0 }); // nada acumulado (falhou na 1ª query)
+  assert.equal(calls.length, 0); // sendBot nunca chamado
+  assert.equal(warns.length, 1); // logou o erro de DB via deps.log.warn
+});
+
 test('sendBot lança na 1ª: failed/vexa_send_failed e a PRÓXIMA é promovida no mesmo tick', async () => {
   const a = await createCollectedMeeting(pool, { meetCode: 'aaa-bbbb-ccc', workspaceId: null, requestedBy: 'u' });
   const b = await createCollectedMeeting(pool, { meetCode: 'ddd-eeee-fff', workspaceId: null, requestedBy: 'u' });
