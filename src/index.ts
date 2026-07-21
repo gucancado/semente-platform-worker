@@ -16,6 +16,7 @@ import { registerReadRoutes } from './whatsapp/read-routes.js';
 import { registerWriteRoutes } from './whatsapp/write-routes.js';
 import { registerMeetingsCollectRoutes } from './meetings-collect/routes.js';
 import { registerMeetingsReadRoutes } from './meetings-read/routes.js';
+import { registerAttributionRoutes } from './episodes/attribution-routes.js';
 import { startMeetingsCollectPoller } from './meetings-collect/poller.js';
 import { buildMeetingsCollectDeps } from './meetings-collect/runtime.js';
 import { pool } from './db.js';
@@ -166,6 +167,14 @@ async function main() {
   } else {
     app.log.info('meetings-read: rotas NÃO registradas (MEETINGS_READ_ENABLED != true)');
   }
+
+  // Atribuição de workspace (contrato attribution_v1): o sync de agenda do Bloquim
+  // resolve cliente por domínio/título antes da reunião existir. Auth X-Panel-Token.
+  // SEM gate de VEXA — atribuição não depende de coleta.
+  await app.register(async (scope) => {
+    registerAttributionRoutes(scope, { panelToken: config.PANEL_TOKEN });
+  });
+  app.log.info('attribution: rotas registradas');
 
   // Fail-fast ANTES de bindar/subir pollers: TRANSCRIBE_MODE≠off exige OPENAI + R2.
   // Se inválido, o processo sai limpo aqui (sem servidor no ar nem crons rodando).

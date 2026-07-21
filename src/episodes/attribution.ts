@@ -92,6 +92,17 @@ export async function upsertDomainRule(args: { domain: string; workspace_id: str
 
 export type TitleRule = { pattern: string; workspace_id: string; project_slug: string | null };
 
+/** Upsert de regra de título (espelha upsertDomainRule). Pattern normalizado lowercase. */
+export async function upsertTitleRule(args: { pattern: string; workspace_id: string; project_slug?: string | null; notes?: string | null }): Promise<void> {
+  const { pool } = await import('../db.js');
+  await pool.query(
+    `INSERT INTO workspace_title_rules (pattern, workspace_id, project_slug, notes)
+     VALUES (lower($1), $2, $3, $4)
+     ON CONFLICT (pattern) DO UPDATE SET workspace_id = $2, project_slug = $3, notes = $4`,
+    [args.pattern.trim(), args.workspace_id, args.project_slug ?? null, args.notes ?? null]
+  );
+}
+
 /** Carrega regras de título (tabela pequena — cache em memória por execução). */
 export async function loadTitleRules(): Promise<TitleRule[]> {
   const { pool } = await import('../db.js');
