@@ -15,6 +15,7 @@ import { registerProvisionRoutes } from './whatsapp/provision-routes.js';
 import { registerReadRoutes } from './whatsapp/read-routes.js';
 import { registerWriteRoutes } from './whatsapp/write-routes.js';
 import { registerOpportunityRoutes } from './whatsapp/opportunity-routes.js';
+import { registerTagRoutes } from './whatsapp/tag-routes.js';
 import { registerMeetingsCollectRoutes } from './meetings-collect/routes.js';
 import { registerMeetingsReadRoutes } from './meetings-read/routes.js';
 import { registerAttributionRoutes } from './episodes/attribution-routes.js';
@@ -142,6 +143,7 @@ async function main() {
   await app.register(async (scope) => {
     registerWriteRoutes(scope, { pool, panelToken: config.PANEL_TOKEN });
     registerOpportunityRoutes(scope, { pool, panelToken: config.PANEL_TOKEN });
+    registerTagRoutes(scope, { pool, panelToken: config.PANEL_TOKEN });
   });
 
   // Coleta de reuniões (Vexa): auth X-Panel-Token. Só registra se VEXA_* presentes.
