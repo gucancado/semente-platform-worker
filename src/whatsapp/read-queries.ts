@@ -14,9 +14,32 @@ export type Thread = {
   leadSource: string | null;
   disqualifyReason: string | null;
   tags: string[];
+  opportunities: OpportunitySummary;
   /** Present only when `includeFirstInboundText` was requested. Null if no inbound message exists. */
   firstInboundText?: string | null;
 };
+export type OpportunityTag = { id: number; name: string; color: string };
+export type OpportunitySummary = {
+  count: number;
+  latest: { id: number; status: string; qualification: string; title: string | null; tags: OpportunityTag[] } | null;
+};
+
+function mapOpportunitySummary(r: any): OpportunitySummary {
+  if (!r.opportunity_latest) return { count: Number(r.opportunity_count) || 0, latest: null };
+  const latest = typeof r.opportunity_latest === 'string'
+    ? JSON.parse(r.opportunity_latest)
+    : r.opportunity_latest;
+  return {
+    count: Number(r.opportunity_count) || 0,
+    latest: {
+      id: Number(latest.id),
+      status: latest.status,
+      qualification: latest.qualification,
+      title: latest.title ?? null,
+      tags: (latest.tags ?? []).map((t: any) => ({ id: Number(t.id), name: t.name, color: t.color })),
+    },
+  };
+}
 function encode(c: { key: string; identifier: string }) { return Buffer.from(JSON.stringify(c)).toString('base64'); }
 function decode(s: string): { key: string; identifier: string } { return JSON.parse(Buffer.from(s, 'base64').toString()); }
 
@@ -36,6 +59,10 @@ export async function listThreads(pool: Pool, p: {
   since?: string;
   until?: string;
   periodBasis?: 'arrival' | 'activity';
+  opp?: 'with' | 'without';
+  oppStatus?: string;
+  oppQualification?: string;
+  oppTagId?: string | number;
 }) {
   const cur = p.cursor ? decode(p.cursor) : null;
   const kind = p.kind ?? 'all';
@@ -85,6 +112,8 @@ export async function listThreads(pool: Pool, p: {
   params.push(p.until ?? null);
   // $13 = leadTemperature (filtro opcional; null = sem filtro)
   params.push(p.leadTemperature ?? null);
+  // $14=opp $15=oppStatus $16=oppQualification $17=oppTagId
+  params.push(p.opp ?? null, p.oppStatus ?? null, p.oppQualification ?? null, p.oppTagId ?? null);
 
   const { rows } = await pool.query(
     `WITH agg AS (
@@ -119,6 +148,8 @@ export async function listThreads(pool: Pool, p: {
                 WHERE t.whatsapp_number_id = $1 AND t.identifier = a.identifier),
               '{}'::text[]
             ) AS tags,
+            COALESCE(os.opportunity_count, 0)::int AS opportunity_count,
+            os.opportunity_latest,
             CASE WHEN $10::boolean THEN (
               SELECT mi.text
                 FROM messages mi
@@ -134,6 +165,27 @@ export async function listThreads(pool: Pool, p: {
          ON g.whatsapp_number_id = $1 AND g.jid = a.identifier
        LEFT JOIN whatsapp_thread_meta tm
          ON tm.whatsapp_number_id = $1 AND tm.identifier = a.identifier
+       -- EXPLAIN rationale: the lateral is evaluated only for the <=50 selected
+       -- thread candidates and probes idx_whatsapp_opportunities_number_identifier;
+       -- tags are aggregated inside the same set-based SQL, never queried per row.
+       LEFT JOIN LATERAL (
+         SELECT COUNT(*)::int AS opportunity_count,
+                (ARRAY_AGG(
+                  jsonb_build_object(
+                    'id', o.id, 'status', o.status, 'qualification', o.qualification,
+                    'title', o.title, 'tags', COALESCE(ot.tags, '[]'::jsonb)
+                  ) ORDER BY o.created_at DESC, o.id DESC
+                ))[1] AS opportunity_latest
+           FROM whatsapp_opportunities o
+           LEFT JOIN LATERAL (
+             SELECT jsonb_agg(jsonb_build_object('id', t.id, 'name', t.name, 'color', t.color)
+                              ORDER BY t.name, t.id) AS tags
+               FROM whatsapp_opportunity_tags x
+               JOIN whatsapp_tags t ON t.id = x.tag_id
+              WHERE x.opportunity_id = o.id
+           ) ot ON TRUE
+          WHERE o.whatsapp_number_id = $1 AND o.identifier = a.identifier
+       ) os ON TRUE
       WHERE ($3::timestamptz IS NULL
           OR date_trunc('milliseconds', ${orderCol}) < $3
           OR (date_trunc('milliseconds', ${orderCol}) = $3 AND a.identifier > $4))
@@ -150,6 +202,25 @@ export async function listThreads(pool: Pool, p: {
               SELECT 1 FROM whatsapp_thread_tags t
                WHERE t.whatsapp_number_id = $1 AND t.identifier = a.identifier AND t.tag = $9
             ))
+        AND ($14::text IS NULL
+             OR ($14 = 'with' AND COALESCE(os.opportunity_count, 0) > 0)
+             OR ($14 = 'without' AND COALESCE(os.opportunity_count, 0) = 0))
+        AND ($15::text IS NULL OR EXISTS (
+              SELECT 1 FROM whatsapp_opportunities oflt
+               WHERE oflt.whatsapp_number_id = $1 AND oflt.identifier = a.identifier
+                 AND oflt.status = $15
+            ))
+        AND ($16::text IS NULL OR EXISTS (
+              SELECT 1 FROM whatsapp_opportunities oflt
+               WHERE oflt.whatsapp_number_id = $1 AND oflt.identifier = a.identifier
+                 AND oflt.qualification = $16
+            ))
+        AND ($17::bigint IS NULL OR EXISTS (
+              SELECT 1 FROM whatsapp_opportunities oflt
+              JOIN whatsapp_opportunity_tags oft ON oft.opportunity_id = oflt.id
+               WHERE oflt.whatsapp_number_id = $1 AND oflt.identifier = a.identifier
+                 AND oft.tag_id = $17
+            ))
         ${periodFilterSql}
       ORDER BY date_trunc('milliseconds', ${orderCol}) DESC, a.identifier ASC
       LIMIT $5`,
@@ -164,6 +235,7 @@ export async function listThreads(pool: Pool, p: {
       leadSource: r.lead_source ?? null,
       disqualifyReason: r.disqualify_reason ?? null,
       tags: r.tags ?? [],
+      opportunities: mapOpportunitySummary(r),
     };
     if (includeFirstInbound) {
       t.firstInboundText = r.first_inbound_text ?? null;
@@ -218,6 +290,7 @@ export type SearchHit = {
   leadSource: string | null;
   disqualifyReason: string | null;
   tags: string[];
+  opportunities: OpportunitySummary;
 };
 
 export async function searchThreads(pool: Pool, p: {
@@ -232,6 +305,10 @@ export async function searchThreads(pool: Pool, p: {
   leadStage?: string;
   leadSource?: string;
   tag?: string;
+  opp?: 'with' | 'without';
+  oppStatus?: string;
+  oppQualification?: string;
+  oppTagId?: string | number;
 }) {
   const kind = p.kind ?? 'all';
   const leadStatus = p.leadStatus ?? 'all';
@@ -249,6 +326,10 @@ export async function searchThreads(pool: Pool, p: {
     p.leadStage ?? null,
     p.leadSource ?? null,
     p.tag ?? null,
+    p.opp ?? null,
+    p.oppStatus ?? null,
+    p.oppQualification ?? null,
+    p.oppTagId ?? null,
   ];
 
   const { rows } = await pool.query(
@@ -282,9 +363,29 @@ export async function searchThreads(pool: Pool, p: {
                 WHERE t.whatsapp_number_id = $1 AND t.identifier = h.identifier),
               '{}'::text[]
             ) AS tags
+            , COALESCE(os.opportunity_count, 0)::int AS opportunity_count
+            , os.opportunity_latest
        FROM hits h
        LEFT JOIN whatsapp_groups g ON g.whatsapp_number_id = $1 AND g.jid = h.identifier
        LEFT JOIN whatsapp_thread_meta tm ON tm.whatsapp_number_id = $1 AND tm.identifier = h.identifier
+       LEFT JOIN LATERAL (
+         SELECT COUNT(*)::int AS opportunity_count,
+                (ARRAY_AGG(
+                  jsonb_build_object(
+                    'id', o.id, 'status', o.status, 'qualification', o.qualification,
+                    'title', o.title, 'tags', COALESCE(ot.tags, '[]'::jsonb)
+                  ) ORDER BY o.created_at DESC, o.id DESC
+                ))[1] AS opportunity_latest
+           FROM whatsapp_opportunities o
+           LEFT JOIN LATERAL (
+             SELECT jsonb_agg(jsonb_build_object('id', t.id, 'name', t.name, 'color', t.color)
+                              ORDER BY t.name, t.id) AS tags
+               FROM whatsapp_opportunity_tags x
+               JOIN whatsapp_tags t ON t.id = x.tag_id
+              WHERE x.opportunity_id = o.id
+           ) ot ON TRUE
+          WHERE o.whatsapp_number_id = $1 AND o.identifier = h.identifier
+       ) os ON TRUE
       WHERE ($6 = 'all'
           OR ($6 = 'group' AND (h.has_author OR g.jid IS NOT NULL))
           OR ($6 = 'dm' AND NOT (h.has_author OR g.jid IS NOT NULL)))
@@ -296,6 +397,25 @@ export async function searchThreads(pool: Pool, p: {
         AND ($10::text IS NULL OR EXISTS (
               SELECT 1 FROM whatsapp_thread_tags t
                WHERE t.whatsapp_number_id = $1 AND t.identifier = h.identifier AND t.tag = $10
+            ))
+        AND ($11::text IS NULL
+             OR ($11 = 'with' AND COALESCE(os.opportunity_count, 0) > 0)
+             OR ($11 = 'without' AND COALESCE(os.opportunity_count, 0) = 0))
+        AND ($12::text IS NULL OR EXISTS (
+              SELECT 1 FROM whatsapp_opportunities oflt
+               WHERE oflt.whatsapp_number_id = $1 AND oflt.identifier = h.identifier
+                 AND oflt.status = $12
+            ))
+        AND ($13::text IS NULL OR EXISTS (
+              SELECT 1 FROM whatsapp_opportunities oflt
+               WHERE oflt.whatsapp_number_id = $1 AND oflt.identifier = h.identifier
+                 AND oflt.qualification = $13
+            ))
+        AND ($14::bigint IS NULL OR EXISTS (
+              SELECT 1 FROM whatsapp_opportunities oflt
+              JOIN whatsapp_opportunity_tags oft ON oft.opportunity_id = oflt.id
+               WHERE oflt.whatsapp_number_id = $1 AND oflt.identifier = h.identifier
+                 AND oft.tag_id = $14
             ))
       ORDER BY h.last_match_at DESC
       LIMIT $7`,
@@ -309,6 +429,7 @@ export async function searchThreads(pool: Pool, p: {
     leadSource: r.lead_source ?? null,
     disqualifyReason: r.disqualify_reason ?? null,
     tags: r.tags ?? [],
+    opportunities: mapOpportunitySummary(r),
   }));
   return { results };
 }

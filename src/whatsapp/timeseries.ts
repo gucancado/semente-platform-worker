@@ -26,14 +26,13 @@ import type { Pool } from 'pg';
 // Definido em stats.ts, de onde este módulo já herda a semântica de `leads`.
 import { WORKSPACE_NUMBERS } from './sql-scope.js';
 
-export type TimeseriesPoint = { bucketStart: string; total: number; leads: number; oportunidades: number };
+export type TimeseriesPoint = { bucketStart: string; total: number; leads: number; oportunidades: number; ganhas: number };
 
 /**
  * Oportunidade = thread com lead_stage em (qualificado, cliente) — mesma
  * definição do funil do painel (byStage.qualificado + byStage.cliente em
  * stats.ts). Alterar aqui exige alterar lá (e vice-versa).
  */
-const OPORT_FILTER = `COUNT(*) FILTER (WHERE tm.lead_stage IN ('qualificado', 'cliente'))::int AS oportunidades`;
 
 const KIND_PREDICATE = `($6 = 'all'
   OR ($6 = 'dm' AND NOT (tk.has_author OR g.jid IS NOT NULL))
@@ -52,6 +51,27 @@ const BUCKETS_CTE = `
              date_trunc($5::text, $4::timestamptz AT TIME ZONE 'America/Sao_Paulo'),
              ('1 ' || $5::text)::interval
            ) AS gs
+  )`;
+
+const OPPORTUNITY_CTES = `
+  opportunity_created AS (
+    SELECT to_char(date_trunc($5::text, o.created_at AT TIME ZONE 'America/Sao_Paulo'), 'YYYY-MM-DD') AS bucket,
+           COUNT(*)::int AS oportunidades
+      FROM whatsapp_opportunities o
+     WHERE o.workspace_id = $1
+       AND ($2::int IS NULL OR o.whatsapp_number_id = $2)
+       AND o.created_at >= $3::timestamptz AND o.created_at <= $4::timestamptz
+     GROUP BY 1
+  ),
+  opportunity_won AS (
+    SELECT to_char(date_trunc($5::text, o.closed_at AT TIME ZONE 'America/Sao_Paulo'), 'YYYY-MM-DD') AS bucket,
+           COUNT(*)::int AS ganhas
+      FROM whatsapp_opportunities o
+     WHERE o.workspace_id = $1
+       AND ($2::int IS NULL OR o.whatsapp_number_id = $2)
+       AND o.status = 'ganho'
+       AND o.closed_at >= $3::timestamptz AND o.closed_at <= $4::timestamptz
+     GROUP BY 1
   )`;
 
 export async function getTimeseries(
@@ -88,8 +108,7 @@ export async function getTimeseries(
       agg AS (
         SELECT to_char(date_trunc($5::text, tk.first_at AT TIME ZONE 'America/Sao_Paulo'), 'YYYY-MM-DD') AS bucket,
                COUNT(*)::int AS total,
-               COUNT(*) FILTER (WHERE tm.is_lead IS NULL OR tm.is_lead = TRUE)::int AS leads,
-               ${OPORT_FILTER}
+               COUNT(*) FILTER (WHERE tm.is_lead IS NULL OR tm.is_lead = TRUE)::int AS leads
           FROM threads tk
           LEFT JOIN LATERAL (
             SELECT g2.jid FROM whatsapp_groups g2
@@ -107,10 +126,14 @@ export async function getTimeseries(
          WHERE ${KIND_PREDICATE}
          GROUP BY 1
       ),
-      ${BUCKETS_CTE}
+      ${BUCKETS_CTE},
+      ${OPPORTUNITY_CTES}
       SELECT b.bucket, COALESCE(a.total, 0)::int AS total, COALESCE(a.leads, 0)::int AS leads,
-             COALESCE(a.oportunidades, 0)::int AS oportunidades
+             COALESCE(oc.oportunidades, 0)::int AS oportunidades,
+             COALESCE(ow.ganhas, 0)::int AS ganhas
         FROM buckets b LEFT JOIN agg a ON a.bucket = b.bucket
+        LEFT JOIN opportunity_created oc ON oc.bucket = b.bucket
+        LEFT JOIN opportunity_won ow ON ow.bucket = b.bucket
        ORDER BY b.bucket`
     : `
       WITH thread_kind AS (
@@ -128,8 +151,7 @@ export async function getTimeseries(
       agg AS (
         SELECT to_char(a.bucket_ts, 'YYYY-MM-DD') AS bucket,
                COUNT(*)::int AS total,
-               COUNT(*) FILTER (WHERE tm.is_lead IS NULL OR tm.is_lead = TRUE)::int AS leads,
-               ${OPORT_FILTER}
+               COUNT(*) FILTER (WHERE tm.is_lead IS NULL OR tm.is_lead = TRUE)::int AS leads
           FROM active a
           JOIN thread_kind tk ON tk.identifier = a.identifier
           LEFT JOIN LATERAL (
@@ -148,10 +170,14 @@ export async function getTimeseries(
          WHERE ${KIND_PREDICATE}
          GROUP BY 1
       ),
-      ${BUCKETS_CTE}
+      ${BUCKETS_CTE},
+      ${OPPORTUNITY_CTES}
       SELECT b.bucket, COALESCE(a.total, 0)::int AS total, COALESCE(a.leads, 0)::int AS leads,
-             COALESCE(a.oportunidades, 0)::int AS oportunidades
+             COALESCE(oc.oportunidades, 0)::int AS oportunidades,
+             COALESCE(ow.ganhas, 0)::int AS ganhas
         FROM buckets b LEFT JOIN agg a ON a.bucket = b.bucket
+        LEFT JOIN opportunity_created oc ON oc.bucket = b.bucket
+        LEFT JOIN opportunity_won ow ON ow.bucket = b.bucket
        ORDER BY b.bucket`;
 
   const res = await pool.query(sqlText, params);
@@ -163,6 +189,7 @@ export async function getTimeseries(
       total: Number(r.total),
       leads: Number(r.leads),
       oportunidades: Number(r.oportunidades),
+      ganhas: Number(r.ganhas),
     })),
   };
 }

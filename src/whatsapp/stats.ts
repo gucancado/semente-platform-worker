@@ -59,6 +59,12 @@ export type Stats = {
   byIngestSource: Record<string, number>;
   /** Thread count per tag. Threads with no tags are not included. */
   byTag: Record<string, number>;
+  /** Opportunity entity counts by status (created_at in the requested window). */
+  byOpportunityStatus: Record<string, number>;
+  /** Opportunity entity counts by qualification (created_at in the requested window). */
+  byQualification: Record<string, number>;
+  /** Distinct opportunity count per CRM tag. */
+  byOpportunityTag: Record<string, number>;
   /**
    * Métricas de TRIAGEM (aditivo — itens 4/5).
    * `queue`: fila real = conversas DM marcadas como lead e ainda SEM stage (kind=dm,
@@ -367,7 +373,44 @@ export async function getStats(
     params.slice(0, 5),
   );
 
-  const [mainRes, stageRes, temperatureRes, sourceRes, ingestRes, tagRes, hiddenRes] = await Promise.all([
+  // Entity-level aggregates intentionally do NOT reuse threads_in_period /
+  // threads_scoped: those CTEs collapse equal identifiers across numbers. Count
+  // opportunity rows directly, scoped by their authoritative workspace/number
+  // and their own created_at.
+  const opportunityStatusQuery = pool.query(
+    `SELECT o.status AS key, COUNT(*)::int AS cnt
+       FROM whatsapp_opportunities o
+      WHERE o.workspace_id = $1
+        AND ($2::int IS NULL OR o.whatsapp_number_id = $2)
+        AND ($3::timestamptz IS NULL OR o.created_at >= $3)
+        AND ($4::timestamptz IS NULL OR o.created_at <= $4)
+      GROUP BY o.status`,
+    params.slice(0, 4),
+  );
+  const qualificationQuery = pool.query(
+    `SELECT o.qualification AS key, COUNT(*)::int AS cnt
+       FROM whatsapp_opportunities o
+      WHERE o.workspace_id = $1
+        AND ($2::int IS NULL OR o.whatsapp_number_id = $2)
+        AND ($3::timestamptz IS NULL OR o.created_at >= $3)
+        AND ($4::timestamptz IS NULL OR o.created_at <= $4)
+      GROUP BY o.qualification`,
+    params.slice(0, 4),
+  );
+  const opportunityTagQuery = pool.query(
+    `SELECT t.name AS key, COUNT(DISTINCT o.id)::int AS cnt
+       FROM whatsapp_opportunities o
+       JOIN whatsapp_opportunity_tags ot ON ot.opportunity_id = o.id
+       JOIN whatsapp_tags t ON t.id = ot.tag_id
+      WHERE o.workspace_id = $1
+        AND ($2::int IS NULL OR o.whatsapp_number_id = $2)
+        AND ($3::timestamptz IS NULL OR o.created_at >= $3)
+        AND ($4::timestamptz IS NULL OR o.created_at <= $4)
+      GROUP BY t.id, t.name`,
+    params.slice(0, 4),
+  );
+
+  const [mainRes, stageRes, temperatureRes, sourceRes, ingestRes, tagRes, hiddenRes, opportunityStatusRes, qualificationRes, opportunityTagRes] = await Promise.all([
     mainQuery,
     stageQuery,
     temperatureQuery,
@@ -375,6 +418,9 @@ export async function getStats(
     ingestQuery,
     tagQuery,
     hiddenGroupsQuery,
+    opportunityStatusQuery,
+    qualificationQuery,
+    opportunityTagQuery,
   ]);
 
   // Empty workspace → mainRes still returns exactly one row of zeros (COALESCE above),
@@ -405,6 +451,9 @@ export async function getStats(
   for (const r of tagRes.rows) {
     byTag[r.tag as string] = Number(r.cnt);
   }
+  const toRecord = (rows: any[]): Record<string, number> => Object.fromEntries(
+    rows.map(r => [String(r.key), Number(r.cnt)]),
+  );
 
   return {
     total: Number(mainRow.total) || 0,
@@ -421,6 +470,9 @@ export async function getStats(
     },
     byIngestSource,
     byTag,
+    byOpportunityStatus: toRecord(opportunityStatusRes.rows),
+    byQualification: toRecord(qualificationRes.rows),
+    byOpportunityTag: toRecord(opportunityTagRes.rows),
     triage: {
       queue: Number(mainRow.triage_queue) || 0,
       hiddenGroups: Number(hiddenRes.rows[0]?.hidden_groups) || 0,

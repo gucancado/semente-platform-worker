@@ -70,7 +70,7 @@ export function registerReadRoutes(
   // ── GET /whatsapp/threads ────────────────────────────────────────────────────
   // workspace_id + number_id in query; listThreads IS workspace-scoped → authz before DB.
   app.get('/whatsapp/threads', { preHandler: auth }, async (req: any, reply) => {
-    const { workspace_id, number_id, limit, cursor, kind, lead_status, lead_stage, lead_source, tag, temperature, include_first_inbound, since, until, period_basis } = req.query;
+    const { workspace_id, number_id, limit, cursor, kind, lead_status, lead_stage, lead_source, tag, temperature, include_first_inbound, since, until, period_basis, opp, opp_status, opp_qualification, opp_tag_id } = req.query;
     if (!workspace_id || !number_id) return reply.code(400).send({ error: 'workspace_id and number_id required' });
     if (Number.isNaN(Number(number_id))) return reply.code(400).send({ error: 'number_id must be numeric' });
     const pb = emptyToUndefined(period_basis);
@@ -94,6 +94,10 @@ export function registerReadRoutes(
       since: emptyToUndefined(since),
       until: emptyToUndefined(until),
       periodBasis,
+      opp: opp === 'with' || opp === 'without' ? opp : undefined,
+      oppStatus: emptyToUndefined(opp_status),
+      oppQualification: emptyToUndefined(opp_qualification),
+      oppTagId: emptyToUndefined(opp_tag_id),
     });
     const numForCtx = await getNumber(deps.pool, Number(number_id));
     const ctx = numForCtx && numForCtx.workspaceId === workspace_id
@@ -248,7 +252,7 @@ export function registerReadRoutes(
   // ── GET /whatsapp/search ─────────────────────────────────────────────────────
   // workspace_id + number_id in query; searchThreads IS workspace-scoped → authz before DB.
   app.get('/whatsapp/search', { preHandler: auth }, async (req: any, reply) => {
-    const { workspace_id, number_id, query, since, until, kind, lead_status, limit, lead_stage, lead_source, tag } = req.query;
+    const { workspace_id, number_id, query, since, until, kind, lead_status, limit, lead_stage, lead_source, tag, opp, opp_status, opp_qualification, opp_tag_id } = req.query;
     if (!workspace_id || !number_id || !query) return reply.code(400).send({ error: 'workspace_id, number_id e query required' });
     if (Number.isNaN(Number(number_id))) return reply.code(400).send({ error: 'number_id must be numeric' });
     if (!await gateMember(req, reply, workspace_id, authz)) return;
@@ -260,6 +264,10 @@ export function registerReadRoutes(
       leadStage: emptyToUndefined(lead_stage),
       leadSource: emptyToUndefined(lead_source),
       tag: emptyToUndefined(tag),
+      opp: opp === 'with' || opp === 'without' ? opp : undefined,
+      oppStatus: emptyToUndefined(opp_status),
+      oppQualification: emptyToUndefined(opp_qualification),
+      oppTagId: emptyToUndefined(opp_tag_id),
     });
     const numForCtx = await getNumber(deps.pool, Number(number_id));
     const ctx = numForCtx && numForCtx.workspaceId === workspace_id
