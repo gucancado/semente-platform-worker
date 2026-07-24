@@ -36,7 +36,7 @@ for (const field of ['stage', 'temperature', 'tags'] as const) {
     const response = await postSingle({ [field]: value });
     assert.equal(response.statusCode, 400);
     assert.deepEqual(response.json(), {
-      error: 'campo descontinuado: use as rotas/tools de oportunidades',
+      error: `campo descontinuado '${field}': use as rotas/tools de oportunidades`,
     });
   });
 }

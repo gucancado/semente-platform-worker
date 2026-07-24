@@ -12,7 +12,6 @@ import { upsertDisqualifyReason, deactivateDisqualifyReason } from './disqualify
 import { upsertSourceSignal, deactivateSourceSignal } from './source-signals.js';
 import { tenantContext } from './tenant-context.js';
 
-const DEPRECATED_LEAD_FIELD_ERROR = 'campo descontinuado: use as rotas/tools de oportunidades';
 const hasOwn = (value: object, field: string) => Object.prototype.hasOwnProperty.call(value, field);
 
 /** Validação pura per-item do bulk. Retorna a mensagem de erro (mesma de hoje) ou null. */
@@ -54,8 +53,9 @@ export function registerWriteRoutes(
     if (Number.isNaN(Number(number_id))) return reply.code(400).send({ error: 'number_id must be numeric' });
     // Actor check first (before any DB call).
     if (!req.actingUser) return reply.code(400).send({ error: 'x-acting-user required' });
-    if (['stage', 'temperature', 'tags'].some((field) => hasOwn(body, field))) {
-      return reply.code(400).send({ error: DEPRECATED_LEAD_FIELD_ERROR });
+    const deprecated = ['stage', 'temperature', 'tags'].filter((field) => hasOwn(body, field));
+    if (deprecated.length > 0) {
+      return reply.code(400).send({ error: `campo descontinuado '${deprecated.join("', '")}': use as rotas/tools de oportunidades` });
     }
 
     // ── Pure (no-DB) validation — safe to run before the authz gate (cheap, no info leak).
