@@ -401,7 +401,7 @@ export async function getStats(
     `SELECT t.name AS key, COUNT(DISTINCT o.id)::int AS cnt
        FROM whatsapp_opportunities o
        JOIN whatsapp_opportunity_tags ot ON ot.opportunity_id = o.id
-       JOIN whatsapp_tags t ON t.id = ot.tag_id
+       JOIN whatsapp_tags t ON t.id = ot.tag_id AND t.workspace_id = $1
       WHERE o.workspace_id = $1
         AND ($2::int IS NULL OR o.whatsapp_number_id = $2)
         AND ($3::timestamptz IS NULL OR o.created_at >= $3)
