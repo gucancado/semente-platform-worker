@@ -1,4 +1,3 @@
-// tests/whatsapp/set-lead-derive.db.test.ts
 import { test, beforeEach, after } from 'node:test';
 import assert from 'node:assert/strict';
 import Fastify from 'fastify';
@@ -7,7 +6,11 @@ import { registerWriteRoutes } from '../../src/whatsapp/write-routes.js';
 
 const TOKEN = 'tkn';
 const passAuthz = { assertMember: async () => {}, assertAdmin: async () => {} };
-function buildApp() { const app = Fastify(); registerWriteRoutes(app, { pool, panelToken: TOKEN, authz: passAuthz }); return app; }
+function buildApp() {
+  const app = Fastify();
+  registerWriteRoutes(app, { pool, panelToken: TOKEN, authz: passAuthz });
+  return app;
+}
 
 beforeEach(async () => {
   await pool.query('TRUNCATE whatsapp_numbers, whatsapp_thread_meta RESTART IDENTITY CASCADE');
@@ -15,61 +18,60 @@ beforeEach(async () => {
 });
 after(() => pool.end());
 
-test('single: stage=desqualificado SEM status → is_lead=false (derivado)', async () => {
-  const app = buildApp();
-  const res = await app.inject({ method: 'POST', url: '/whatsapp/threads/c1/lead',
-    headers: { 'x-panel-token': TOKEN, 'x-acting-user': 'u1' },
-    payload: { number_id: 1, stage: 'desqualificado' } });
-  assert.equal(res.statusCode, 200);
-  assert.equal(res.json().leadStatus, 'not_lead');
-  const r = await pool.query(`SELECT is_lead, lead_stage FROM whatsapp_thread_meta WHERE whatsapp_number_id=1 AND identifier='c1'`);
-  assert.equal(r.rows[0].is_lead, false);
-  assert.equal(r.rows[0].lead_stage, 'desqualificado');
-  await app.close();
-});
+for (const [field, value] of [
+  ['stage', 'qualificado'],
+  ['temperature', 'quente'],
+  ['tags', ['vip']],
+] as const) {
+  test(`single: ${field} é descontinuado`, async () => {
+    const app = buildApp();
+    const res = await app.inject({
+      method: 'POST',
+      url: '/whatsapp/threads/c1/lead',
+      headers: { 'x-panel-token': TOKEN, 'x-acting-user': 'u1' },
+      payload: { number_id: 1, status: 'lead', [field]: value },
+    });
+    assert.equal(res.statusCode, 400);
+    assert.equal(res.json().error, 'campo descontinuado: use as rotas/tools de oportunidades');
+    await app.close();
+  });
+}
 
-test('single: stage=qualificado SEM status → is_lead=true (derivado)', async () => {
+test('single: sem status retorna 400', async () => {
   const app = buildApp();
-  const res = await app.inject({ method: 'POST', url: '/whatsapp/threads/c2/lead',
+  const res = await app.inject({
+    method: 'POST',
+    url: '/whatsapp/threads/c3/lead',
     headers: { 'x-panel-token': TOKEN, 'x-acting-user': 'u1' },
-    payload: { number_id: 1, stage: 'qualificado' } });
-  assert.equal(res.statusCode, 200);
-  assert.equal(res.json().leadStatus, 'lead');
-  await app.close();
-});
-
-test('single: sem status e sem stage → 400', async () => {
-  const app = buildApp();
-  const res = await app.inject({ method: 'POST', url: '/whatsapp/threads/c3/lead',
-    headers: { 'x-panel-token': TOKEN, 'x-acting-user': 'u1' },
-    payload: { number_id: 1, temperature: 'quente' } });
+    payload: { number_id: 1, notes: 'triagem' },
+  });
   assert.equal(res.statusCode, 400);
+  assert.match(res.json().error, /status/);
   await app.close();
 });
 
-test('single: status explícito continua valendo (compat)', async () => {
+test('single: status explícito continua valendo', async () => {
   const app = buildApp();
-  const res = await app.inject({ method: 'POST', url: '/whatsapp/threads/c4/lead',
+  const res = await app.inject({
+    method: 'POST',
+    url: '/whatsapp/threads/c4/lead',
     headers: { 'x-panel-token': TOKEN, 'x-acting-user': 'u1' },
-    payload: { number_id: 1, status: 'not_lead' } });
+    payload: { number_id: 1, status: 'not_lead' },
+  });
   assert.equal(res.statusCode, 200);
   assert.equal(res.json().leadStatus, 'not_lead');
   await app.close();
 });
 
-test('bulk: item com stage=desqualificado sem status → not_lead', async () => {
+test('bulk: item com stage é descontinuado', async () => {
   const app = buildApp();
-  const res = await app.inject({ method: 'POST', url: '/whatsapp/threads/bulk-lead',
+  const res = await app.inject({
+    method: 'POST',
+    url: '/whatsapp/threads/bulk-lead',
     headers: { 'x-panel-token': TOKEN, 'x-acting-user': 'u1' },
-    payload: { number_id: 1, updates: [{ identifier: 'c5', stage: 'desqualificado' }] } });
-  assert.equal(res.statusCode, 400, 'c5 não existe em messages/meta → identifiers not found (esperado)');
-  // cria o thread e repete
-  await pool.query(`INSERT INTO whatsapp_thread_meta (whatsapp_number_id, identifier, is_lead) VALUES (1,'c5',TRUE)`);
-  const res2 = await app.inject({ method: 'POST', url: '/whatsapp/threads/bulk-lead',
-    headers: { 'x-panel-token': TOKEN, 'x-acting-user': 'u1' },
-    payload: { number_id: 1, updates: [{ identifier: 'c5', stage: 'desqualificado' }] } });
-  assert.equal(res2.statusCode, 200);
-  const r = await pool.query(`SELECT is_lead FROM whatsapp_thread_meta WHERE whatsapp_number_id=1 AND identifier='c5'`);
-  assert.equal(r.rows[0].is_lead, false);
+    payload: { number_id: 1, updates: [{ identifier: 'c5', status: 'lead', stage: 'desqualificado' }] },
+  });
+  assert.equal(res.statusCode, 400);
+  assert.match(res.json().error, /stage/);
   await app.close();
 });

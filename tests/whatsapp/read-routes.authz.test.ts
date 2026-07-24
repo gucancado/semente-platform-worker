@@ -466,7 +466,7 @@ test('(#3) POST /whatsapp/threads/:id/lead — tags="x" (non-array) → 400, no 
     payload: { number_id: 1, status: 'lead', tags: 'vendas' },
   });
   assert.equal(res.statusCode, 400);
-  assert.equal(res.json().error, 'tags must be an array of strings');
+  assert.equal(res.json().error, 'campo descontinuado: use as rotas/tools de oportunidades');
   assert.equal(spy.adminCalls, 0, 'gate must not be reached on pure-validation failure');
   await app.close();
 });
@@ -482,7 +482,7 @@ test('(#3b) POST /whatsapp/threads/:id/lead — tags=[1,2] (array of non-strings
     payload: { number_id: 1, status: 'lead', tags: [1, 2] },
   });
   assert.equal(res.statusCode, 400);
-  assert.equal(res.json().error, 'tags must be an array of strings');
+  assert.equal(res.json().error, 'campo descontinuado: use as rotas/tools de oportunidades');
   assert.equal(spy.adminCalls, 0);
   await app.close();
 });
@@ -515,7 +515,7 @@ test('(#5) POST /whatsapp/threads/:id/lead — non-admin + disqualifyReason → 
     method: 'POST',
     url: '/whatsapp/threads/c-1/lead',
     headers: ACTOR_HEADERS,
-    payload: { number_id: 1, status: 'not_lead', stage: 'desqualificado', disqualifyReason: 'sem_fit' },
+    payload: { number_id: 1, status: 'not_lead', disqualifyReason: 'sem_fit' },
   });
   assert.equal(res.statusCode, 403);
   assert.equal(res.json().error, 'forbidden');

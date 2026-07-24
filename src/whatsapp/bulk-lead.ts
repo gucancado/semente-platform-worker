@@ -21,12 +21,12 @@ export const BULK_LEAD_MAX = 500;
 export interface BulkLeadUpdate {
   identifier: string;
   status: 'lead' | 'not_lead';
-  stage?: string | null;
-  temperature?: string | null;
   source?: string | null;
+  sourcePresent?: boolean;
   disqualifyReason?: string | null;
-  tags?: string[] | null;
+  disqualifyReasonPresent?: boolean;
   notes?: string | null;
+  notesPresent?: boolean;
 }
 
 export interface BulkLeadResult {
@@ -105,12 +105,12 @@ export async function bulkSetLeadStatus(
         identifier: upd.identifier,
         isLead: upd.status === 'lead',
         updatedBy: p.updatedBy,
-        stage: upd.stage,
-        temperature: upd.temperature,
         source: upd.source,
+        sourcePresent: upd.sourcePresent,
         disqualifyReason: upd.disqualifyReason,
-        tags: upd.tags,
+        disqualifyReasonPresent: upd.disqualifyReasonPresent,
         notes: upd.notes,
+        notesPresent: upd.notesPresent,
       });
     }
     await client.query('COMMIT');

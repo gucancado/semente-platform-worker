@@ -12,16 +12,21 @@ import { upsertDisqualifyReason, deactivateDisqualifyReason } from './disqualify
 import { upsertSourceSignal, deactivateSourceSignal } from './source-signals.js';
 import { tenantContext } from './tenant-context.js';
 
+const DEPRECATED_LEAD_FIELD_ERROR = 'campo descontinuado: use as rotas/tools de oportunidades';
+const hasOwn = (value: object, field: string) => Object.prototype.hasOwnProperty.call(value, field);
+
 /** Validação pura per-item do bulk. Retorna a mensagem de erro (mesma de hoje) ou null. */
 function bulkItemError(upd: any, i: number): string | null {
   if (!upd || typeof upd !== 'object') return `updates[${i}]: must be an object`;
   if (typeof upd.identifier !== 'string' || upd.identifier.trim() === '') return `updates[${i}]: identifier is required`;
-  const q = validateLeadQualifyFields({ status: upd.status, stage: upd.stage ?? null, disqualifyReason: upd.disqualifyReason ?? null });
+  for (const field of ['stage', 'temperature', 'tags']) {
+    if (hasOwn(upd, field)) return `updates[${i}] (${upd.identifier}): campo descontinuado '${field}': use as rotas/tools de oportunidades`;
+  }
+  const q = validateLeadQualifyFields({ status: upd.status, disqualifyReason: upd.disqualifyReason });
   if (q) return `updates[${i}] (${upd.identifier}): ${q}`;
-  // Item 6: status opcional — derivado do stage. Valida via resolveLeadStatus.
-  const st = resolveLeadStatus(upd.status, upd.stage ?? null);
+  // Without stage derivation, status is required for every item.
+  const st = resolveLeadStatus(upd.status);
   if ('error' in st) return `updates[${i}] (${upd.identifier}): ${st.error}`;
-  if (upd.tags !== undefined && !(Array.isArray(upd.tags) && upd.tags.every((t: unknown) => typeof t === 'string'))) return `updates[${i}] (${upd.identifier}): tags must be an array of strings`;
   return null;
 }
 
@@ -43,28 +48,25 @@ export function registerWriteRoutes(
   // ── POST /whatsapp/threads/:identifier/lead ──────────────────────────────────
   // NO workspace_id in body; derive workspace from number_id, then assertAdmin (fresh).
   app.post('/whatsapp/threads/:identifier/lead', { preHandler: auth }, async (req: any, reply) => {
-    const { number_id, status, stage, temperature, source, disqualifyReason, tags, notes } = req.body ?? {};
+    const body = req.body ?? {};
+    const { number_id, status, source, disqualifyReason, notes } = body;
     if (number_id === undefined || number_id === null) return reply.code(400).send({ error: 'number_id obrigatório' });
     if (Number.isNaN(Number(number_id))) return reply.code(400).send({ error: 'number_id must be numeric' });
     // Actor check first (before any DB call).
     if (!req.actingUser) return reply.code(400).send({ error: 'x-acting-user required' });
+    if (['stage', 'temperature', 'tags'].some((field) => hasOwn(body, field))) {
+      return reply.code(400).send({ error: DEPRECATED_LEAD_FIELD_ERROR });
+    }
 
     // ── Pure (no-DB) validation — safe to run before the authz gate (cheap, no info leak).
-    // Validate qualification fields (stage whitelist + coherence com status cru).
-    const qualifyErr = validateLeadQualifyFields({ status, stage: stage ?? null, disqualifyReason: disqualifyReason ?? null });
+    // Validate the remaining status/disqualification coherence.
+    const qualifyErr = validateLeadQualifyFields({ status, disqualifyReason });
     if (qualifyErr) return reply.code(400).send({ error: qualifyErr });
 
-    // Item 6: status é opcional; derivar do stage quando omitido.
-    const resolved = resolveLeadStatus(status, stage ?? null);
+    // Status remains accepted for compatibility and is now required.
+    const resolved = resolveLeadStatus(status);
     if ('error' in resolved) return reply.code(400).send({ error: resolved.error });
     const effectiveStatus = resolved.status;
-
-    // `tags`, when present, must be an array of strings. A genuinely omitted `tags`
-    // means "don't touch tags"; `[]` means "clear all tags". A non-array (e.g. the
-    // string "vendas") is a client error — fail loudly instead of silently ignoring.
-    if (tags !== undefined && !(Array.isArray(tags) && tags.every((t) => typeof t === 'string'))) {
-      return reply.code(400).send({ error: 'tags must be an array of strings' });
-    }
 
     // ── Number existence + authz gate. DB-backed validation MUST come AFTER the
     // admin gate so a non-admin panel-token holder can't probe reference tables.
@@ -83,19 +85,16 @@ export function registerWriteRoutes(
       identifier: req.params.identifier,
       isLead: effectiveStatus === 'lead',
       updatedBy: req.actingUser,
-      stage: stage ?? undefined,
-      temperature: temperature ?? undefined,
-      source: source ?? undefined,
-      disqualifyReason: disqualifyReason ?? undefined,
-      tags: Array.isArray(tags) ? tags : undefined,
-      notes: notes ?? undefined,
+      source,
+      sourcePresent: hasOwn(body, 'source'),
+      disqualifyReason,
+      disqualifyReasonPresent: hasOwn(body, 'disqualifyReason'),
+      notes,
+      notesPresent: hasOwn(body, 'notes'),
     });
 
-    // Observabilidade: logar os campos de qualificação efetivamente recebidos no body
-    // (temperature/stage/source/disqualifyReason/tags) torna diagnosticável, pela aba
-    // Auditoria, se um "não persistiu" futuro foi o cliente NÃO enviar o campo vs falha
-    // de gravação. `notes` fica de fora de propósito (texto livre/PII — minimização LGPD).
-    logAccess(deps.pool, { actor: req.actingUser, action: 'set_lead', workspaceId: num.workspaceId, numberId: Number(number_id), identifier: req.params.identifier, meta: { status: effectiveStatus, stage, source, temperature, disqualifyReason, tags } });
+    // Keep notes out of access-log metadata (free text/PII); log triage fields only.
+    logAccess(deps.pool, { actor: req.actingUser, action: 'set_lead', workspaceId: num.workspaceId, numberId: Number(number_id), identifier: req.params.identifier, meta: { status: effectiveStatus, source, disqualifyReason } });
     return reply.send({ schema: 'whatsapp_v1', context: tenantContext(num), ok: true, identifier: req.params.identifier, leadStatus: effectiveStatus });
   });
 
@@ -182,12 +181,13 @@ export function registerWriteRoutes(
       result = await bulkSetLeadStatus(deps.pool, {
         numberId: Number(number_id), workspaceId: num.workspaceId, updatedBy: req.actingUser, mode,
         updates: candidates.map((u: any) => {
-          const st = resolveLeadStatus(u.status, u.stage ?? null);
+          const st = resolveLeadStatus(u.status);
           return {
             identifier: u.identifier,
             status: ('status' in st ? st.status : u.status) as 'lead' | 'not_lead',
-            stage: u.stage, temperature: u.temperature, source: u.source,
-            disqualifyReason: u.disqualifyReason, tags: Array.isArray(u.tags) ? u.tags : undefined, notes: u.notes,
+            source: u.source, sourcePresent: hasOwn(u, 'source'),
+            disqualifyReason: u.disqualifyReason, disqualifyReasonPresent: hasOwn(u, 'disqualifyReason'),
+            notes: u.notes, notesPresent: hasOwn(u, 'notes'),
           };
         }),
       });

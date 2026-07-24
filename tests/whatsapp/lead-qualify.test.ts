@@ -1,11 +1,9 @@
-// tests/whatsapp/lead-qualify.test.ts  — DB-FREE (runs locally with node --test)
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { isValidStage, validateLeadQualifyFields, VALID_STAGES, resolveLeadStatus } from '../../src/whatsapp/lead-qualify.js';
+import { validateLeadQualifyFields, resolveLeadStatus } from '../../src/whatsapp/lead-qualify.js';
 import { emptyToUndefined } from '../../src/whatsapp/query-coerce.js';
 
-// ── emptyToUndefined (filter coercion) ───────────────────────────────────────
-test('emptyToUndefined: empty / whitespace-only string → undefined (no-filter)', () => {
+test('emptyToUndefined: empty / whitespace-only string → undefined', () => {
   assert.equal(emptyToUndefined(''), undefined);
   assert.equal(emptyToUndefined('   '), undefined);
   assert.equal(emptyToUndefined('\t\n'), undefined);
@@ -16,81 +14,43 @@ test('emptyToUndefined: absent value → undefined', () => {
   assert.equal(emptyToUndefined(null), undefined);
 });
 
-test('emptyToUndefined: real value passes through (trimmed)', () => {
+test('emptyToUndefined: real value passes through trimmed', () => {
   assert.equal(emptyToUndefined('qualificado'), 'qualificado');
   assert.equal(emptyToUndefined('  vip  '), 'vip');
 });
 
-// ── isValidStage ──────────────────────────────────────────────────────────────
-test('isValidStage: aceita todos os valores válidos', () => {
-  for (const s of VALID_STAGES) {
-    assert.ok(isValidStage(s), `esperava ${s} como válido`);
-  }
-});
-
-test('isValidStage: rejeita valor desconhecido', () => {
-  assert.equal(isValidStage('interessado'), false);
-  assert.equal(isValidStage(''), false);
-  assert.equal(isValidStage('QUALIFICADO'), false); // case-sensitive
-});
-
-// ── validateLeadQualifyFields ─────────────────────────────────────────────────
-test('validateLeadQualifyFields: retorna null quando campos ausentes', () => {
+test('validateLeadQualifyFields: accepts status without reason', () => {
   assert.equal(validateLeadQualifyFields({ status: 'lead' }), null);
   assert.equal(validateLeadQualifyFields({ status: 'not_lead' }), null);
-  assert.equal(validateLeadQualifyFields({}), null);
 });
 
-test('validateLeadQualifyFields: aceita stage=null', () => {
-  assert.equal(validateLeadQualifyFields({ status: 'lead', stage: null }), null);
+test('validateLeadQualifyFields: disqualifyReason requires not_lead', () => {
+  assert.match(
+    validateLeadQualifyFields({ status: 'lead', disqualifyReason: 'sem_fit' })!,
+    /not_lead/,
+  );
+  assert.equal(
+    validateLeadQualifyFields({ status: 'not_lead', disqualifyReason: 'sem_fit' }),
+    null,
+  );
+  assert.equal(
+    validateLeadQualifyFields({ status: 'lead', disqualifyReason: null }),
+    null,
+  );
 });
 
-test('validateLeadQualifyFields: aceita stage válido com status lead', () => {
-  assert.equal(validateLeadQualifyFields({ status: 'lead', stage: 'qualificado' }), null);
-  assert.equal(validateLeadQualifyFields({ status: 'lead', stage: 'cliente' }), null);
-  assert.equal(validateLeadQualifyFields({ status: 'lead', stage: 'perdido' }), null);
+test('resolveLeadStatus: accepts explicit compatible values', () => {
+  assert.deepEqual(resolveLeadStatus('lead'), { status: 'lead' });
+  assert.deepEqual(resolveLeadStatus('not_lead'), { status: 'not_lead' });
 });
 
-test('validateLeadQualifyFields: aceita stage=desqualificado com status not_lead', () => {
-  assert.equal(validateLeadQualifyFields({ status: 'not_lead', stage: 'desqualificado' }), null);
+test('resolveLeadStatus: missing status is an error', () => {
+  const result = resolveLeadStatus(undefined);
+  assert.ok('error' in result);
+  assert.match(result.error, /obrigatório/);
 });
 
-test('validateLeadQualifyFields: rejeita stage inválido', () => {
-  const err = validateLeadQualifyFields({ status: 'lead', stage: 'interessado' });
-  assert.ok(err !== null, 'deveria retornar erro');
-  assert.ok(err!.includes('stage inválido'));
-});
-
-test('validateLeadQualifyFields: rejeita stage=desqualificado com status=lead (CHECK coherence)', () => {
-  const err = validateLeadQualifyFields({ status: 'lead', stage: 'desqualificado' });
-  assert.ok(err !== null, 'deveria retornar erro');
-  assert.ok(err!.includes('desqualificado'));
-  assert.ok(err!.includes('lead'));
-});
-
-test('validateLeadQualifyFields: sem status, stage=desqualificado não causa erro puro', () => {
-  // Sem status a coerção de is_lead não pode ser checada — passa sem erro de coherência
-  assert.equal(validateLeadQualifyFields({ stage: 'desqualificado' }), null);
-});
-
-// ── resolveLeadStatus (Item 6: status opcional/derivado do stage) ─────────────
-test('status explícito vence', () => {
-  assert.deepEqual(resolveLeadStatus('lead', 'qualificado'), { status: 'lead' });
-  assert.deepEqual(resolveLeadStatus('not_lead', null), { status: 'not_lead' });
-});
-test('derivação: desqualificado → not_lead', () => {
-  assert.deepEqual(resolveLeadStatus(undefined, 'desqualificado'), { status: 'not_lead' });
-});
-test('derivação: qualificado/cliente/perdido → lead', () => {
-  assert.deepEqual(resolveLeadStatus(undefined, 'qualificado'), { status: 'lead' });
-  assert.deepEqual(resolveLeadStatus(undefined, 'cliente'), { status: 'lead' });
-  assert.deepEqual(resolveLeadStatus(undefined, 'perdido'), { status: 'lead' });
-});
-test('status e stage ambos omitidos → erro', () => {
-  const r = resolveLeadStatus(undefined, null);
-  assert.ok('error' in r);
-});
-test('status inválido → erro', () => {
-  const r = resolveLeadStatus('foo', 'qualificado');
-  assert.ok('error' in r);
+test('resolveLeadStatus: invalid status is an error', () => {
+  const result = resolveLeadStatus('foo');
+  assert.ok('error' in result);
 });

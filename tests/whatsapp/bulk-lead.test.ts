@@ -188,7 +188,7 @@ test('✓ bulk-lead: non-array tags in update → 400, no DB call', async () => 
   });
 
   assert.equal(res.statusCode, 400);
-  assert.ok(res.json().error.includes('tags must be an array of strings'));
+  assert.ok(res.json().error.includes("campo descontinuado 'tags'"));
   await app.close();
 });
 
@@ -205,7 +205,7 @@ test('✓ bulk-lead: tags=[1,2] (array of non-strings) → 400, no DB call', asy
   });
 
   assert.equal(res.statusCode, 400);
-  assert.ok(res.json().error.includes('tags must be an array of strings'));
+  assert.ok(res.json().error.includes("campo descontinuado 'tags'"));
   await app.close();
 });
 
@@ -278,7 +278,7 @@ test('✓ bulk-lead: stage=desqualificado with status=lead → 400 (coherence), 
   });
 
   assert.equal(res.statusCode, 400);
-  assert.ok(res.json().error.includes('desqualificado'));
+  assert.ok(res.json().error.includes("campo descontinuado 'stage'"));
   await app.close();
 });
 
@@ -295,7 +295,7 @@ test('✓ bulk-lead: invalid stage value → 400, no DB call', async () => {
   });
 
   assert.equal(res.statusCode, 400);
-  assert.ok(res.json().error.includes('stage inválido'));
+  assert.ok(res.json().error.includes("campo descontinuado 'stage'"));
   await app.close();
 });
 

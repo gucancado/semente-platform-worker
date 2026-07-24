@@ -15,7 +15,7 @@ test('partial: unknown identifier vira skipped; o existente é aplicado', async 
   const r = await bulkSetLeadStatus(pool, {
     numberId: 1, workspaceId: 'ws-1', updatedBy: 'u', mode: 'partial',
     updates: [
-      { identifier: '+ok', status: 'lead', stage: 'qualificado' },
+      { identifier: '+ok', status: 'lead', notes: 'triagem' },
       { identifier: '+ghost', status: 'lead' },
     ],
   });

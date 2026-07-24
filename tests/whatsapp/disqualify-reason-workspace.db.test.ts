@@ -131,7 +131,7 @@ test('⚠ single route: disqualifyReason ativo em wsA → 200 para número de ws
     method: 'POST',
     url: '/whatsapp/threads/anti-leak-jid/lead',
     headers: { 'x-panel-token': TOKEN, 'x-acting-user': 'tester' },
-    payload: { number_id: 10, status: 'not_lead', stage: 'desqualificado', disqualifyReason: CODE_WSA },
+    payload: { number_id: 10, status: 'not_lead', disqualifyReason: CODE_WSA },
   });
   assert.equal(res.statusCode, 200, `esperava 200, obteve ${res.statusCode}: ${res.body}`);
   await app.close();
@@ -170,7 +170,7 @@ test('⚠ bulk route: disqualifyReason ativo em wsA → 200 para número de wsA 
     payload: {
       number_id: 10,
       updates: [
-        { identifier: 'anti-leak-jid', status: 'not_lead', stage: 'desqualificado', disqualifyReason: CODE_WSA },
+        { identifier: 'anti-leak-jid', status: 'not_lead', disqualifyReason: CODE_WSA },
       ],
     },
   });
