@@ -147,7 +147,7 @@ export async function createOpportunity(pool: Pool, p: {
 
 export async function patchOpportunity(pool: Pool, current: ScopedOpportunity, patch: OppPatch, changedBy: string): Promise<Opportunity> {
   const transition = applyOppPatch(current, patch);
-  if (transition.events.length === 0) return current;
+  if (transition.events.length === 0) return withoutScope(current);
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
