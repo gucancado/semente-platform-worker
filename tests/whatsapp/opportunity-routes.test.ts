@@ -20,8 +20,10 @@ function makePool(opts: { conversation?: boolean; opportunities?: any[]; tags?: 
     conversation: opts.conversation ?? true,
     nextId: Math.max(0, ...(opts.opportunities ?? []).map(o => Number(o.id))) + 1,
     updated: 0,
+    queries: [] as { text: string; params: any[] }[],
   };
   const query = async (text: string, params: any[] = []) => {
+    state.queries.push({ text, params });
     if (/FROM whatsapp_numbers WHERE id/.test(text)) return { rows: params[0] === 1 ? [{
       id: 1, workspace_id: 'ws-1', phone: '+5511', evolution_instance: 'i', label: 'N',
       status: 'connected', mode: 'monitored', expose_groups_in_mcp: false, created_by: null,
@@ -43,7 +45,11 @@ function makePool(opts: { conversation?: boolean; opportunities?: any[]; tags?: 
     if (/UPDATE whatsapp_opportunities SET/.test(text)) {
       const o = state.opportunities.find(x => x.id === Number(params[0]));
       if (!o) return { rows: [], rowCount: 0 };
-      o.status = params[1]; o.qualification = params[2]; o.title = params[3]; o.updated_at = date(24);
+      for (const field of ['status', 'qualification', 'title'] as const) {
+        const match = text.match(new RegExp(`${field}=\\$(\\d+)`));
+        if (match) o[field] = params[Number(match[1]) - 1];
+      }
+      o.updated_at = date(24);
       if (/closed_at=NOW/.test(text)) o.closed_at = date(24);
       if (/closed_at=NULL/.test(text)) o.closed_at = null;
       state.updated++; return { rows: [{ id: o.id }], rowCount: 1 };
@@ -76,7 +82,7 @@ function makePool(opts: { conversation?: boolean; opportunities?: any[]; tags?: 
       if (/WHERE o.id = \$1/.test(text)) rows = rows.filter(o => o.id === Number(params[0]));
       else {
         const limit = Number(params.at(-1)); rows.sort((a, b) => +b.created_at - +a.created_at || b.id - a.id);
-        if (/\(o.created_at, o.id\) </.test(text)) {
+        if (/\(date_trunc\('milliseconds', o.created_at\), o.id\) </.test(text)) {
           const cursorId = Number(params.at(-2)); const cursorDate = +new Date(params.at(-3));
           rows = rows.filter(o => +o.created_at < cursorDate || (+o.created_at === cursorDate && o.id < cursorId));
         }
@@ -117,6 +123,7 @@ test('POST cria em_andamento e somente evento created', async () => {
   const res = await app.inject({ method: 'POST', url: '/whatsapp/opportunities', headers,
     payload: { number_id: 1, identifier: 'a', qualification: 'qualificado' } });
   assert.equal(res.statusCode, 200); assert.equal(res.json().opportunity.status, 'em_andamento');
+  assert.equal('numberId' in res.json().opportunity, false); assert.equal('workspaceId' in res.json().opportunity, false);
   assert.deepEqual(state.events.map(e => e.field), ['created']); await app.close();
 });
 
@@ -136,6 +143,15 @@ test('PATCH desqualificar ganho retorna 409', async () => {
   assert.equal(res.statusCode, 409); assert.deepEqual(res.json(), { error: 'desqualificar_ganho' }); await app.close();
 });
 
+test('PATCH somente title atualiza apenas o campo tocado', async () => {
+  const { pool, state } = makePool({ opportunities: [{ id: 1, identifier: 'a', created_at: date(1) }] }); const app = appFor(pool);
+  const res = await app.inject({ method: 'PATCH', url: '/whatsapp/opportunities/1', headers, payload: { title: 'Novo' } });
+  assert.equal(res.statusCode, 200);
+  const update = state.queries.find(q => /UPDATE whatsapp_opportunities SET/.test(q.text))!;
+  assert.match(update.text, /title=\$2/); assert.doesNotMatch(update.text, /status=/); assert.doesNotMatch(update.text, /qualification=/);
+  await app.close();
+});
+
 test('DELETE não-admin retorna 403', async () => {
   const { pool } = makePool({ opportunities: [{ id: 1, identifier: 'a', created_at: date(1) }] });
   const authz = { assertMember: async () => {}, assertAdmin: async () => { throw new AuthzError('forbidden', 'FORBIDDEN'); } };
@@ -145,11 +161,19 @@ test('DELETE não-admin retorna 403', async () => {
 
 test('GET pagina com cursor opaco', async () => {
   const opportunities = [1, 2, 3].map(id => ({ id, identifier: `i${id}`, created_at: date(id) }));
-  const { pool } = makePool({ opportunities }); const app = appFor(pool);
+  const { pool, state } = makePool({ opportunities }); const app = appFor(pool);
   const first = await app.inject({ method: 'GET', url: '/whatsapp/opportunities?number_id=1&status=em_andamento&identifier=i3&limit=2', headers });
   assert.equal(first.statusCode, 200); assert.equal(first.json().opportunities.length, 2); assert.ok(first.json().nextCursor);
   const second = await app.inject({ method: 'GET', url: `/whatsapp/opportunities?number_id=1&limit=2&cursor=${encodeURIComponent(first.json().nextCursor)}`, headers });
   assert.deepEqual(second.json().opportunities.map((o: any) => o.id), [1]); assert.equal(second.json().nextCursor, null); await app.close();
+  const cursorQuery = state.queries.find(q => /\(date_trunc\('milliseconds', o.created_at\), o.id\) </.test(q.text))!;
+  assert.match(cursorQuery.text, /ORDER BY date_trunc\('milliseconds', o.created_at\) DESC, o.id DESC/);
+});
+
+test('GET rejeita identifier repetido', async () => {
+  const { pool } = makePool(); const app = appFor(pool);
+  const res = await app.inject({ method: 'GET', url: '/whatsapp/opportunities?number_id=1&identifier=a&identifier=b', headers });
+  assert.equal(res.statusCode, 400); assert.deepEqual(res.json(), { error: 'identifier invalido' }); await app.close();
 });
 
 test('tags attach/detach gera eventos com nome', async () => {

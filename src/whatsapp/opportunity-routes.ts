@@ -33,6 +33,7 @@ export function registerOpportunityRoutes(app: FastifyInstance, deps: {
     if (!numberId) return reply.code(400).send({ error: 'number_id must be numeric' });
     if (q.status !== undefined && !statuses.has(q.status)) return reply.code(400).send({ error: 'invalid status' });
     if (q.qualification !== undefined && !qualifications.has(q.qualification)) return reply.code(400).send({ error: 'invalid qualification' });
+    if (q.identifier !== undefined && typeof q.identifier !== 'string') return reply.code(400).send({ error: 'identifier invalido' });
     const tagId = q.tag_id === undefined ? undefined : positiveInt(q.tag_id);
     if (q.tag_id !== undefined && !tagId) return reply.code(400).send({ error: 'tag_id must be numeric' });
     const rawLimit = q.limit === undefined || q.limit === '' ? 50 : Number(q.limit);
@@ -135,7 +136,8 @@ export function registerOpportunityRoutes(app: FastifyInstance, deps: {
     const opportunity = await getOpportunity(deps.pool, loaded.opp.id);
     logAccess(deps.pool, { actor: req.actingUser, action: action === 'add' ? 'add_opportunity_tag' : 'remove_opportunity_tag',
       workspaceId: loaded.num.workspaceId, numberId: loaded.num.id, identifier: loaded.opp.identifier });
-    return reply.send({ schema: 'whatsapp_v1', context: tenantContext(loaded.num), opportunity });
+    const { numberId: _numberId, workspaceId: _workspaceId, ...publicOpportunity } = opportunity!;
+    return reply.send({ schema: 'whatsapp_v1', context: tenantContext(loaded.num), opportunity: publicOpportunity });
   };
   app.post('/whatsapp/opportunities/:id/tags', { preHandler: auth }, tagRoute('add'));
   app.delete('/whatsapp/opportunities/:id/tags/:tagId', { preHandler: auth }, tagRoute('remove'));

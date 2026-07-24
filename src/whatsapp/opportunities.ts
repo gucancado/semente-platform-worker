@@ -32,13 +32,19 @@ export interface OpportunityEvent {
 type ScopedOpportunity = Opportunity & { numberId: number; workspaceId: string };
 const iso = (value: any): string => value?.toISOString?.() ?? value;
 const mapTag = (r: any): OpportunityTag => ({ id: Number(r.id), name: r.name, color: r.color });
-const mapOpportunity = (r: any): ScopedOpportunity => ({
-  id: Number(r.id), numberId: Number(r.whatsapp_number_id), workspaceId: r.workspace_id,
+const mapOpportunity = (r: any): Opportunity => ({
+  id: Number(r.id),
   identifier: r.identifier, title: r.title, status: r.status, qualification: r.qualification,
   createdAt: iso(r.created_at), updatedAt: iso(r.updated_at),
   closedAt: r.closed_at ? iso(r.closed_at) : null, createdBy: r.created_by,
   tags: Array.isArray(r.tags) ? r.tags.map(mapTag) : [],
 });
+const mapScopedOpportunity = (r: any): ScopedOpportunity => ({
+  ...mapOpportunity(r),
+  numberId: Number(r.whatsapp_number_id),
+  workspaceId: r.workspace_id,
+});
+const withoutScope = ({ numberId: _numberId, workspaceId: _workspaceId, ...opportunity }: ScopedOpportunity): Opportunity => opportunity;
 
 const OPP_SELECT = `SELECT o.*,
   COALESCE((SELECT json_agg(json_build_object('id', t.id, 'name', t.name, 'color', t.color) ORDER BY t.name, t.id)
@@ -73,11 +79,11 @@ export async function listOpportunities(pool: Pool, p: {
   if (p.tagId !== undefined) add(`EXISTS (SELECT 1 FROM whatsapp_opportunity_tags f WHERE f.opportunity_id=o.id AND f.tag_id=?)`, p.tagId);
   if (p.cursor) {
     values.push(p.cursor.createdAt, p.cursor.id);
-    where.push(`(o.created_at, o.id) < ($${values.length - 1}::timestamptz, $${values.length}::bigint)`);
+    where.push(`(date_trunc('milliseconds', o.created_at), o.id) < ($${values.length - 1}::timestamptz, $${values.length}::bigint)`);
   }
   values.push(p.limit + 1);
   const { rows } = await pool.query(`${OPP_SELECT} WHERE ${where.join(' AND ')}
-    ORDER BY o.created_at DESC, o.id DESC LIMIT $${values.length}`, values);
+    ORDER BY date_trunc('milliseconds', o.created_at) DESC, o.id DESC LIMIT $${values.length}`, values);
   const mapped = rows.map(mapOpportunity);
   const hasMore = mapped.length > p.limit;
   const opportunities = mapped.slice(0, p.limit);
@@ -87,7 +93,7 @@ export async function listOpportunities(pool: Pool, p: {
 
 export async function getOpportunity(pool: Pool, id: number): Promise<ScopedOpportunity | null> {
   const { rows } = await pool.query(`${OPP_SELECT} WHERE o.id = $1`, [id]);
-  return rows[0] ? mapOpportunity(rows[0]) : null;
+  return rows[0] ? mapScopedOpportunity(rows[0]) : null;
 }
 
 export async function conversationExists(pool: Pool, p: { numberId: number; workspaceId: string; identifier: string }): Promise<boolean> {
@@ -131,7 +137,8 @@ export async function createOpportunity(pool: Pool, p: {
       await client.query(`INSERT INTO whatsapp_opportunity_tags (opportunity_id, tag_id) VALUES ($1,$2)`, [id, tagId]);
     }
     await client.query('COMMIT');
-    return await getOpportunity(pool, id);
+    const created = await getOpportunity(pool, id);
+    return created ? withoutScope(created) : null;
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {});
     throw err;
@@ -144,11 +151,17 @@ export async function patchOpportunity(pool: Pool, current: ScopedOpportunity, p
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    const closedSql = transition.closedAtAction === 'set_now' ? 'NOW()'
-      : transition.closedAtAction === 'clear' ? 'NULL' : 'closed_at';
+    const values: unknown[] = [current.id];
+    const set = transition.events.map(event => {
+      values.push(transition.next[event.field as 'status' | 'qualification' | 'title']);
+      return `${event.field}=$${values.length}`;
+    });
+    if (transition.closedAtAction === 'set_now') set.push('closed_at=NOW()');
+    if (transition.closedAtAction === 'clear') set.push('closed_at=NULL');
+    set.push('updated_at=NOW()');
     const { rows } = await client.query(`UPDATE whatsapp_opportunities SET
-      status=$2, qualification=$3, title=$4, closed_at=${closedSql}, updated_at=NOW()
-      WHERE id=$1 RETURNING id`, [current.id, transition.next.status, transition.next.qualification, transition.next.title]);
+      ${set.join(', ')}
+      WHERE id=$1 RETURNING id`, values);
     if (!rows[0]) throw new Error('opportunity disappeared during patch');
     for (const event of transition.events) {
       await insertEvent(client, { opportunityId: current.id, field: event.field, oldValue: event.oldValue, newValue: event.newValue, changedBy });
@@ -156,7 +169,7 @@ export async function patchOpportunity(pool: Pool, current: ScopedOpportunity, p
     await client.query('COMMIT');
     const updated = await getOpportunity(pool, current.id);
     if (!updated) throw new Error('opportunity disappeared after patch');
-    return updated;
+    return withoutScope(updated);
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {});
     throw err;
