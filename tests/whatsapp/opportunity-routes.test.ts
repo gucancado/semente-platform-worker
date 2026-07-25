@@ -62,7 +62,7 @@ function makePool(opts: { conversation?: boolean; opportunities?: any[]; tags?: 
       const t = state.tags.find(x => x.id === Number(params[0]) && x.workspace_id === params[1]);
       return { rows: t ? [{ name: t.name }] : [], rowCount: t ? 1 : 0 };
     }
-    if (/SELECT id FROM whatsapp_tags/.test(text)) {
+    if (/SELECT id, name FROM whatsapp_tags/.test(text)) {
       const ids = params[1] as number[]; const rows = state.tags.filter(t => t.workspace_id === params[0] && ids.includes(t.id));
       return { rows, rowCount: rows.length };
     }
@@ -125,6 +125,15 @@ test('POST cria em_andamento e somente evento created', async () => {
   assert.equal(res.statusCode, 200); assert.equal(res.json().opportunity.status, 'em_andamento');
   assert.equal('numberId' in res.json().opportunity, false); assert.equal('workspaceId' in res.json().opportunity, false);
   assert.deepEqual(state.events.map(e => e.field), ['created']); await app.close();
+});
+
+test('POST com tag_ids gera created + tag_added com nome (paridade com attach e CLI)', async () => {
+  const { pool, state } = makePool(); const app = appFor(pool);
+  const res = await app.inject({ method: 'POST', url: '/whatsapp/opportunities', headers,
+    payload: { number_id: 1, identifier: 'a', tag_ids: [10] } });
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(state.events.map(e => [e.field, e.new_value]), [['created', null], ['tag_added', 'VIP']]);
+  await app.close();
 });
 
 test('PATCH ganho qualifica, fecha e gera dois eventos; no-op não atualiza', async () => {

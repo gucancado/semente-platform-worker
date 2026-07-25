@@ -123,9 +123,11 @@ export async function createOpportunity(pool: Pool, p: {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+    const tagNames = new Map<number, string>();
     if (p.tagIds?.length) {
-      const tags = await client.query(`SELECT id FROM whatsapp_tags WHERE workspace_id=$1 AND id=ANY($2::bigint[])`, [p.workspaceId, p.tagIds]);
+      const tags = await client.query(`SELECT id, name FROM whatsapp_tags WHERE workspace_id=$1 AND id=ANY($2::bigint[])`, [p.workspaceId, p.tagIds]);
       if (tags.rows.length !== new Set(p.tagIds).size) { await client.query('ROLLBACK'); return null; }
+      for (const row of tags.rows) tagNames.set(Number(row.id), String(row.name));
     }
     const { rows } = await client.query(`INSERT INTO whatsapp_opportunities
       (whatsapp_number_id, workspace_id, identifier, title, status, qualification, created_by)
@@ -135,6 +137,8 @@ export async function createOpportunity(pool: Pool, p: {
     await insertEvent(client, { opportunityId: id, field: 'created', oldValue: null, newValue: null, changedBy: p.createdBy });
     for (const tagId of new Set(p.tagIds ?? [])) {
       await client.query(`INSERT INTO whatsapp_opportunity_tags (opportunity_id, tag_id) VALUES ($1,$2)`, [id, tagId]);
+      // Timeline canônica: etiqueta inicial também é tag_added (paridade com attach avulso e com o CLI de migração).
+      await insertEvent(client, { opportunityId: id, field: 'tag_added', oldValue: null, newValue: tagNames.get(tagId) ?? null, changedBy: p.createdBy });
     }
     await client.query('COMMIT');
     const created = await getOpportunity(pool, id);
