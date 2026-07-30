@@ -62,6 +62,13 @@ export interface JudgmentLossReason {
   description: string | null;
 }
 
+/** Motivo de não-lead: o prompt mostra o `label`, mas a decisão/persistência (D4)
+ *  usa o `code` (write-routes/lead-qualify validam disqualify_reason por code). */
+export interface JudgmentNotLeadReason {
+  code: string;
+  label: string;
+}
+
 export interface JudgmentTag {
   id: number;
   name: string;
@@ -74,15 +81,15 @@ export interface JudgmentContext {
   workspaceId: string;
   /** max input_last_message_at do julgamento anterior (null = nunca julgado). */
   watermark: string | null;
-  /** max created_at das mensagens consideradas — o novo watermark do input. */
-  lastMessageAt: string;
+  /** max created_at REAL da conversa (novo watermark do input); null = sem mensagens. */
+  lastMessageAt: string | null;
   messages: JudgmentMessage[];
   triage: JudgmentTriage;
   openOpp: OppSnapshot | null;
   lastClosedOpp: OppSnapshot | null;
   settings: JudgmentSettings;
   lossReasons: JudgmentLossReason[];
-  notLeadReasons: string[];
+  notLeadReasons: JudgmentNotLeadReason[];
   tags: JudgmentTag[];
   sticky: StickyFlags;
 }
@@ -124,9 +131,11 @@ const MSG_BASE = `SELECT direction, text, created_at, id FROM messages
   WHERE whatsapp_number_id = $1 AND identifier = $2 AND workspace_id = $3`;
 
 /**
- * Mensagens do contexto: novas desde o watermark (chronological) + cauda das
- * TAIL_LIMIT anteriores, com teto MAX_MESSAGES (mantém as mais recentes). Sem
- * watermark (nunca julgado) → as MAX_MESSAGES mais recentes contam todas como novas.
+ * Mensagens do contexto: novas desde o watermark + cauda das TAIL_LIMIT anteriores,
+ * com teto MAX_MESSAGES mantendo SEMPRE as MAIS RECENTES (novas e cauda buscadas
+ * DESC LIMIT + revertidas pra ASC — com >MAX_MESSAGES novas, fica com as recentes,
+ * não com as antigas). `lastMessageAt` = created_at REAL da última mensagem da
+ * conversa (não o fim da janela truncada); null se a conversa não tem mensagem.
  */
 async function fetchMessages(
   pool: Pool,
@@ -134,30 +143,36 @@ async function fetchMessages(
   identifier: string,
   workspaceId: string,
   watermark: string | null,
-): Promise<JudgmentMessage[]> {
-  let tail: any[] = [];
-  let fresh: any[] = [];
+): Promise<{ messages: JudgmentMessage[]; lastMessageAt: string | null }> {
+  let tailAsc: any[] = [];
+  let freshDesc: any[] = [];
   if (watermark != null) {
     const newRes = await pool.query(
-      `/* ctx:messages:new */ ${MSG_BASE} AND created_at > $4 ORDER BY created_at ASC, id ASC LIMIT $5`,
+      `/* ctx:messages:new */ ${MSG_BASE} AND created_at > $4 ORDER BY created_at DESC, id DESC LIMIT $5`,
       [numberId, identifier, workspaceId, watermark, MAX_MESSAGES],
     );
-    fresh = newRes.rows;
+    freshDesc = newRes.rows;
     const tailRes = await pool.query(
       `/* ctx:messages:tail */ ${MSG_BASE} AND created_at <= $4 ORDER BY created_at DESC, id DESC LIMIT $5`,
       [numberId, identifier, workspaceId, watermark, TAIL_LIMIT],
     );
-    tail = tailRes.rows.slice().reverse();
+    tailAsc = tailRes.rows.slice().reverse();
   } else {
     const allRes = await pool.query(
       `/* ctx:messages:new */ ${MSG_BASE} ORDER BY created_at DESC, id DESC LIMIT $4`,
       [numberId, identifier, workspaceId, MAX_MESSAGES],
     );
-    fresh = allRes.rows.slice().reverse();
+    freshDesc = allRes.rows;
   }
-  let combined = [...tail, ...fresh];
+  const freshAsc = freshDesc.slice().reverse();
+  let combined = [...tailAsc, ...freshAsc];
   if (combined.length > MAX_MESSAGES) combined = combined.slice(combined.length - MAX_MESSAGES);
-  return combined.map(mapMessage);
+
+  // Última mensagem REAL: topo do DESC das novas; sem novas, a mais recente da cauda.
+  const newestRow = freshDesc[0] ?? tailAsc[tailAsc.length - 1] ?? null;
+  const lastMessageAt = newestRow ? toISO(newestRow.created_at) : null;
+
+  return { messages: combined.map(mapMessage), lastMessageAt };
 }
 
 async function fetchTriage(pool: Pool, numberId: number, identifier: string): Promise<JudgmentTriage> {
@@ -235,7 +250,7 @@ export async function buildJudgmentContext(
     watermark: string | null;
   },
 ): Promise<JudgmentContext> {
-  const [messages, triage, opps, settings, tags, lossReasonsRaw, notLeadRaw] = await Promise.all([
+  const [msgResult, triage, opps, settings, tags, lossReasonsRaw, notLeadRaw] = await Promise.all([
     fetchMessages(pool, numberId, identifier, workspaceId, watermark),
     fetchTriage(pool, numberId, identifier),
     fetchOpps(pool, numberId, identifier, workspaceId),
@@ -244,6 +259,7 @@ export async function buildJudgmentContext(
     listLossReasons(pool, workspaceId),
     listDisqualifyReasons(pool, { workspaceId }),
   ]);
+  const { messages, lastMessageAt } = msgResult;
 
   const openOpp = opps.find((o) => o.status === 'em_andamento') ?? null;
   const lastClosedOpp = opps.find((o) => o.status === 'ganho' || o.status === 'perdido') ?? null;
@@ -260,10 +276,7 @@ export async function buildJudgmentContext(
   const lossReasons: JudgmentLossReason[] = lossReasonsRaw
     .filter((r) => r.active)
     .map((r) => ({ code: r.code, label: r.label, description: r.description }));
-  const notLeadReasons = notLeadRaw.map((r) => r.label);
-
-  const last = messages[messages.length - 1];
-  const lastMessageAt = last ? last.createdAt : watermark ?? '';
+  const notLeadReasons: JudgmentNotLeadReason[] = notLeadRaw.map((r) => ({ code: r.code, label: r.label }));
 
   return {
     numberId,

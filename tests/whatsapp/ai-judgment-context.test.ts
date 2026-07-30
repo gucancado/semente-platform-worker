@@ -80,9 +80,9 @@ test('com watermark: cauda (<=wm) + novas (>wm), cauda antes das novas', async (
       { direction: 'inbound', text: 'cauda-a', created_at: new Date('2026-07-30T09:40:00Z'), id: 10 },
     ],
     'messages:new': [
-      // ASC do banco
-      { direction: 'outbound', text: 'nova-1', created_at: new Date('2026-07-30T10:10:00Z'), id: 20 },
+      // DESC do banco (novas): módulo reverte pra ASC
       { direction: 'inbound', text: 'nova-2', created_at: new Date('2026-07-30T10:20:00Z'), id: 21 },
+      { direction: 'outbound', text: 'nova-1', created_at: new Date('2026-07-30T10:10:00Z'), id: 20 },
     ],
     settings: [{ new_opp_after_days: 30, ai_lead_guidance: null, ai_qualified_guidance: null }],
   });
@@ -100,6 +100,38 @@ test('com watermark: cauda (<=wm) + novas (>wm), cauda antes das novas', async (
   );
   assert.equal(ctx.lastMessageAt, '2026-07-30T10:20:00.000Z');
   assert.equal(ctx.watermark, '2026-07-30T10:00:00.000Z');
+});
+
+test('janela com >80 novas: mantém as MAIS RECENTES; lastMessageAt = max real', async () => {
+  const base = Date.UTC(2026, 6, 30, 0, 0, 0);
+  // 90 novas, entregues DESC (mais nova primeiro, i=90) como o banco faria
+  const freshDesc = [];
+  for (let i = 90; i >= 1; i--) {
+    freshDesc.push({
+      direction: 'inbound',
+      text: `m${i}`,
+      created_at: new Date(base + i * 60_000),
+      id: i,
+    });
+  }
+  const pool = fakePool({
+    ...NO_STICKY,
+    'messages:tail': [],
+    'messages:new': freshDesc,
+    settings: [{ new_opp_after_days: 30, ai_lead_guidance: null, ai_qualified_guidance: null }],
+  });
+
+  const ctx = await buildJudgmentContext(pool, {
+    numberId: 1,
+    identifier: 'c',
+    workspaceId: 'ws',
+    watermark: '2026-07-29T00:00:00.000Z',
+  });
+
+  assert.equal(ctx.messages.length, 80);
+  assert.equal(ctx.messages[0]!.text, 'm11'); // dropou as antigas m1..m10, não as recentes
+  assert.equal(ctx.messages[79]!.text, 'm90');
+  assert.equal(ctx.lastMessageAt, new Date(base + 90 * 60_000).toISOString());
 });
 
 test('opps: escolhe aberta e última fechada; sticky delega à aberta', async () => {
@@ -225,14 +257,17 @@ test('catálogos: loss reasons ativos filtrados; não-lead vira labels; tags com
   });
 
   assert.deepEqual(ctx.lossReasons, [{ code: 'preco', label: 'Preço', description: 'achou caro' }]);
-  assert.deepEqual(ctx.notLeadReasons, ['Spam', 'Fornecedor']);
+  assert.deepEqual(ctx.notLeadReasons, [
+    { code: 'spam', label: 'Spam' },
+    { code: 'fornecedor', label: 'Fornecedor' },
+  ]);
   assert.deepEqual(ctx.tags, [
     { id: 10, name: 'Bairro X', description: 'região sul' },
     { id: 11, name: 'Plano saúde', description: null },
   ]);
 });
 
-test('thread sem meta e sem opp: triagem toda null, settings default, lastMessageAt cai no watermark', async () => {
+test('thread sem meta e sem opp: triagem toda null, settings default, lastMessageAt null', async () => {
   const pool = fakePool({
     'messages:tail': [],
     'messages:new': [],
@@ -252,6 +287,6 @@ test('thread sem meta e sem opp: triagem toda null, settings default, lastMessag
   assert.equal(ctx.openOpp, null);
   assert.equal(ctx.lastClosedOpp, null);
   assert.equal(ctx.settings.newOppAfterDays, 30);
-  assert.equal(ctx.lastMessageAt, '2026-07-30T00:00:00.000Z');
+  assert.equal(ctx.lastMessageAt, null); // sem mensagens → null defensivo (D5 guarda)
   assert.equal(ctx.sticky.isLead, false);
 });
