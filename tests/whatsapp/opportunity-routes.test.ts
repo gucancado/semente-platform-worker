@@ -9,15 +9,28 @@ const headers = { 'x-panel-token': TOKEN, 'x-acting-user': 'user-1' };
 const passAuthz = { assertMember: async () => {}, assertAdmin: async () => {} };
 const date = (n: number) => new Date(`2026-07-${String(n).padStart(2, '0')}T12:00:00.000Z`);
 
-function makePool(opts: { conversation?: boolean; opportunities?: any[]; tags?: any[] } = {}) {
+// ── Mock v3-aware ────────────────────────────────────────────────────────────
+// As rotas migraram pro data layer v3 (withConversationLock + createOpportunityV3
+// /patchOpportunityV3), então o stub cobre o advisory lock, o INSERT/UPDATE com
+// colunas is_qualified/qualification/loss_reason, o side-effect em whatsapp_thread_meta
+// (+ _log), o probe de grupo (isGroupThread) e o de motivo de perda (isValidLossReason).
+function makePool(opts: {
+  conversation?: boolean; group?: boolean; opportunities?: any[]; tags?: any[];
+  lossReasons?: { workspace_id: string; code: string; active: boolean }[];
+  threadMeta?: Record<string, boolean | null>;
+} = {}) {
   const state = {
     opportunities: (opts.opportunities ?? []).map(o => ({ whatsapp_number_id: 1, workspace_id: 'ws-1',
-      title: null, status: 'em_andamento', qualification: 'indefinido', created_by: 'user-1',
-      updated_at: o.created_at, closed_at: null, tags: [], ...o })),
+      title: null, status: 'em_andamento', is_qualified: null, qualification: 'indefinido',
+      loss_reason: null, created_by: 'user-1', updated_at: o.created_at, closed_at: null, tags: [], ...o })),
     events: [] as any[],
     tags: opts.tags ?? [{ id: 10, workspace_id: 'ws-1', name: 'VIP', color: 'warn' }],
+    lossReasons: opts.lossReasons ?? [],
     links: [] as { opportunity_id: number; tag_id: number }[],
     conversation: opts.conversation ?? true,
+    group: opts.group ?? false,
+    threadMeta: { ...(opts.threadMeta ?? {}) } as Record<string, boolean | null>,
+    threadLog: [] as { number_id: number; identifier: string; old_value: string | null; actor: string }[],
     nextId: Math.max(0, ...(opts.opportunities ?? []).map(o => Number(o.id))) + 1,
     updated: 0,
     queries: [] as { text: string; params: any[] }[],
@@ -29,12 +42,30 @@ function makePool(opts: { conversation?: boolean; opportunities?: any[]; tags?: 
       status: 'connected', mode: 'monitored', expose_groups_in_mcp: false, created_by: null,
       created_at: date(1), updated_at: date(1), removed_at: null,
     }] : [], rowCount: params[0] === 1 ? 1 : 0 };
+    if (/pg_advisory_xact_lock/.test(text)) return { rows: [], rowCount: null };
+    if (/AS is_group/.test(text)) return { rows: [{ is_group: state.group }], rowCount: 1 };
     if (/SELECT EXISTS/.test(text)) return { rows: [{ exists: state.conversation }], rowCount: 1 };
+    if (/SELECT 1 FROM whatsapp_loss_reasons/.test(text)) {
+      const found = state.lossReasons.some(r => r.workspace_id === params[0] && r.code === params[1] && r.active);
+      return { rows: found ? [{ ok: 1 }] : [], rowCount: found ? 1 : 0 };
+    }
+    if (/SELECT is_lead FROM whatsapp_thread_meta/.test(text)) {
+      const key = `${params[0]}:${params[1]}`;
+      return { rows: key in state.threadMeta ? [{ is_lead: state.threadMeta[key] }] : [], rowCount: 0 };
+    }
+    if (/INSERT INTO whatsapp_thread_meta_log/.test(text)) {
+      state.threadLog.push({ number_id: params[0], identifier: params[1], old_value: params[2], actor: params[3] });
+      return { rows: [], rowCount: 1 };
+    }
+    if (/INSERT INTO whatsapp_thread_meta\b/.test(text)) {
+      state.threadMeta[`${params[0]}:${params[1]}`] = true; // applyThreadLeadTrue sempre grava TRUE
+      return { rows: [], rowCount: 1 };
+    }
     if (/INSERT INTO whatsapp_opportunities/.test(text)) {
       const row = { id: state.nextId++, whatsapp_number_id: params[0], workspace_id: params[1],
-        identifier: params[2], title: params[3], status: 'em_andamento', qualification: params[4],
-        created_by: params[5], created_at: date(state.nextId), updated_at: date(state.nextId),
-        closed_at: null, tags: [] };
+        identifier: params[2], title: params[3], status: 'em_andamento', is_qualified: params[4],
+        qualification: params[5], loss_reason: null, created_by: params[6],
+        created_at: date(state.nextId), updated_at: date(state.nextId), closed_at: null, tags: [] };
       state.opportunities.push(row); return { rows: [{ id: row.id }], rowCount: 1 };
     }
     if (/INSERT INTO whatsapp_opportunity_events/.test(text)) {
@@ -42,16 +73,18 @@ function makePool(opts: { conversation?: boolean; opportunities?: any[]; tags?: 
         old_value: params[2], new_value: params[3], changed_by: params[4], changed_at: date(state.events.length + 1) });
       return { rows: [], rowCount: 1 };
     }
+    if (/SELECT whatsapp_number_id, identifier FROM whatsapp_opportunities WHERE id/.test(text)) {
+      const o = state.opportunities.find(x => x.id === Number(params[0]));
+      return { rows: o ? [{ whatsapp_number_id: o.whatsapp_number_id, identifier: o.identifier }] : [], rowCount: o ? 1 : 0 };
+    }
     if (/UPDATE whatsapp_opportunities SET/.test(text)) {
       const o = state.opportunities.find(x => x.id === Number(params[0]));
       if (!o) return { rows: [], rowCount: 0 };
-      for (const field of ['status', 'qualification', 'title'] as const) {
-        const match = text.match(new RegExp(`${field}=\\$(\\d+)`));
-        if (match) o[field] = params[Number(match[1]) - 1];
-      }
-      o.updated_at = date(24);
-      if (/closed_at=NOW/.test(text)) o.closed_at = date(24);
-      if (/closed_at=NULL/.test(text)) o.closed_at = null;
+      // v3: SET status=$2, is_qualified=$3, qualification=$4, title=$5, loss_reason=$6, closed_at=...
+      o.status = params[1]; o.is_qualified = params[2]; o.qualification = params[3];
+      o.title = params[4]; o.loss_reason = params[5]; o.updated_at = date(24);
+      if (/closed_at\s*=\s*NOW/.test(text)) o.closed_at = date(24);
+      else if (/closed_at\s*=\s*NULL/.test(text)) o.closed_at = null;
       state.updated++; return { rows: [{ id: o.id }], rowCount: 1 };
     }
     if (/DELETE FROM whatsapp_opportunities /.test(text)) {
@@ -104,6 +137,13 @@ function appFor(pool: any, authz: any = passAuthz) {
   return app;
 }
 
+// helper: acha a query de LISTAGEM (o SELECT com ORDER BY do listOpportunities)
+const listQuery = (state: any) => state.queries.find((q: any) => /ORDER BY date_trunc/.test(q.text))!;
+
+// =============================================================================
+// Contrato preservado (semântica das rotas, agora sobre o data layer v3)
+// =============================================================================
+
 test('401 sem token e 400 sem x-acting-user em escrita', async () => {
   const { pool } = makePool(); const app = appFor(pool);
   assert.equal((await app.inject({ method: 'GET', url: '/whatsapp/opportunities?number_id=1' })).statusCode, 401);
@@ -147,18 +187,23 @@ test('PATCH ganho qualifica, fecha e gera dois eventos; no-op não atualiza', as
 });
 
 test('PATCH desqualificar ganho retorna 409', async () => {
-  const { pool } = makePool({ opportunities: [{ id: 1, identifier: 'a', created_at: date(1), status: 'ganho', qualification: 'qualificado' }] });
+  const { pool } = makePool({ opportunities: [{ id: 1, identifier: 'a', created_at: date(1), status: 'ganho', is_qualified: true, qualification: 'qualificado' }] });
   const app = appFor(pool); const res = await app.inject({ method: 'PATCH', url: '/whatsapp/opportunities/1', headers, payload: { qualification: 'desqualificado' } });
   assert.equal(res.statusCode, 409); assert.deepEqual(res.json(), { error: 'desqualificar_ganho' }); await app.close();
 });
 
-test('PATCH somente title atualiza apenas o campo tocado', async () => {
+test('PATCH somente title gera só evento title (não toca status/qualification)', async () => {
   const { pool, state } = makePool({ opportunities: [{ id: 1, identifier: 'a', created_at: date(1) }] }); const app = appFor(pool);
   const res = await app.inject({ method: 'PATCH', url: '/whatsapp/opportunities/1', headers, payload: { title: 'Novo' } });
-  assert.equal(res.statusCode, 200);
-  const update = state.queries.find(q => /UPDATE whatsapp_opportunities SET/.test(q.text))!;
-  assert.match(update.text, /title=\$2/); assert.doesNotMatch(update.text, /status=/); assert.doesNotMatch(update.text, /qualification=/);
+  assert.equal(res.statusCode, 200); assert.equal(res.json().opportunity.title, 'Novo');
+  assert.deepEqual(state.events.map(e => e.field), ['title']);
   await app.close();
+});
+
+test('PATCH rejeita chave desconhecida (inclui number_id no body)', async () => {
+  const { pool } = makePool({ opportunities: [{ id: 1, identifier: 'a', created_at: date(1) }] }); const app = appFor(pool);
+  const res = await app.inject({ method: 'PATCH', url: '/whatsapp/opportunities/1', headers, payload: { number_id: 1, title: 'x' } });
+  assert.equal(res.statusCode, 400); assert.deepEqual(res.json(), { error: 'invalid patch' }); await app.close();
 });
 
 test('DELETE não-admin retorna 403', async () => {
@@ -190,4 +235,165 @@ test('tags attach/detach gera eventos com nome', async () => {
   assert.equal((await app.inject({ method: 'POST', url: '/whatsapp/opportunities/1/tags', headers, payload: { tag_id: 10 } })).statusCode, 200);
   assert.equal((await app.inject({ method: 'DELETE', url: '/whatsapp/opportunities/1/tags/10', headers })).statusCode, 200);
   assert.deepEqual(state.events.map(e => [e.field, e.new_value]), [['tag_added', 'VIP'], ['tag_removed', 'VIP']]); await app.close();
+});
+
+// =============================================================================
+// v3 — aliases completos is_qualified/qualification + loss_reason + grupo (§10)
+// =============================================================================
+
+test('POST alias qualification → is_qualified (qualificado cascateia is_lead=TRUE na thread)', async () => {
+  const { pool, state } = makePool(); const app = appFor(pool);
+  const res = await app.inject({ method: 'POST', url: '/whatsapp/opportunities', headers,
+    payload: { number_id: 1, identifier: 'a', qualification: 'qualificado' } });
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.json().opportunity.isQualified, true);
+  assert.equal(res.json().opportunity.qualification, 'qualificado');
+  assert.equal(state.threadMeta['1:a'], true, 'is_lead cascateado na thread');
+  await app.close();
+});
+
+test('POST aceita is_qualified booleano direto (true)', async () => {
+  const { pool } = makePool(); const app = appFor(pool);
+  const res = await app.inject({ method: 'POST', url: '/whatsapp/opportunities', headers,
+    payload: { number_id: 1, identifier: 'a', is_qualified: true } });
+  assert.equal(res.statusCode, 200); assert.equal(res.json().opportunity.isQualified, true); await app.close();
+});
+
+test('POST is_qualified=false → 400 invalid_value (desqualificar é patch, não create)', async () => {
+  const { pool } = makePool(); const app = appFor(pool);
+  const res = await app.inject({ method: 'POST', url: '/whatsapp/opportunities', headers,
+    payload: { number_id: 1, identifier: 'a', is_qualified: false } });
+  assert.equal(res.statusCode, 400); assert.deepEqual(res.json(), { error: 'invalid_value' }); await app.close();
+});
+
+test('POST alias qualification=desqualificado → 400 invalid_value (mesma regra do false)', async () => {
+  const { pool } = makePool(); const app = appFor(pool);
+  const res = await app.inject({ method: 'POST', url: '/whatsapp/opportunities', headers,
+    payload: { number_id: 1, identifier: 'a', qualification: 'desqualificado' } });
+  assert.equal(res.statusCode, 400); assert.deepEqual(res.json(), { error: 'invalid_value' }); await app.close();
+});
+
+test('POST is_qualified + qualification divergentes → 400 campos_divergentes', async () => {
+  const { pool } = makePool(); const app = appFor(pool);
+  const res = await app.inject({ method: 'POST', url: '/whatsapp/opportunities', headers,
+    payload: { number_id: 1, identifier: 'a', is_qualified: false, qualification: 'qualificado' } });
+  assert.equal(res.statusCode, 400); assert.deepEqual(res.json(), { error: 'campos_divergentes' }); await app.close();
+});
+
+test('POST is_qualified + qualification consistentes → ok', async () => {
+  const { pool } = makePool(); const app = appFor(pool);
+  const res = await app.inject({ method: 'POST', url: '/whatsapp/opportunities', headers,
+    payload: { number_id: 1, identifier: 'a', is_qualified: true, qualification: 'qualificado' } });
+  assert.equal(res.statusCode, 200); assert.equal(res.json().opportunity.isQualified, true); await app.close();
+});
+
+test('POST em thread de GRUPO → 400 grupo_nao_tem_oportunidade', async () => {
+  const { pool } = makePool({ group: true }); const app = appFor(pool);
+  const res = await app.inject({ method: 'POST', url: '/whatsapp/opportunities', headers,
+    payload: { number_id: 1, identifier: 'grp@g.us' } });
+  assert.equal(res.statusCode, 400); assert.deepEqual(res.json(), { error: 'grupo_nao_tem_oportunidade' }); await app.close();
+});
+
+test('PATCH alias qualification=desqualificado → is_qualified=false (fecha como perdido)', async () => {
+  const { pool } = makePool({ opportunities: [{ id: 1, identifier: 'a', created_at: date(1) }] }); const app = appFor(pool);
+  const res = await app.inject({ method: 'PATCH', url: '/whatsapp/opportunities/1', headers, payload: { qualification: 'desqualificado' } });
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.json().opportunity.isQualified, false);
+  assert.equal(res.json().opportunity.status, 'perdido');
+  await app.close();
+});
+
+test('PATCH is_qualified + qualification divergentes → 400 campos_divergentes', async () => {
+  const { pool } = makePool({ opportunities: [{ id: 1, identifier: 'a', created_at: date(1) }] }); const app = appFor(pool);
+  const res = await app.inject({ method: 'PATCH', url: '/whatsapp/opportunities/1', headers,
+    payload: { is_qualified: true, qualification: 'desqualificado' } });
+  assert.equal(res.statusCode, 400); assert.deepEqual(res.json(), { error: 'campos_divergentes' }); await app.close();
+});
+
+test('PATCH is_qualified=false num ganho → 409 desqualificar_ganho (repassa erro do kernel)', async () => {
+  const { pool } = makePool({ opportunities: [{ id: 1, identifier: 'a', created_at: date(1), status: 'ganho', is_qualified: true, qualification: 'qualificado' }] });
+  const app = appFor(pool);
+  const res = await app.inject({ method: 'PATCH', url: '/whatsapp/opportunities/1', headers, payload: { is_qualified: false } });
+  assert.equal(res.statusCode, 409); assert.deepEqual(res.json(), { error: 'desqualificar_ganho' }); await app.close();
+});
+
+test('PATCH loss_reason inválido → 400 nomeando o código', async () => {
+  const { pool } = makePool({ opportunities: [{ id: 1, identifier: 'a', created_at: date(1) }] }); const app = appFor(pool);
+  const res = await app.inject({ method: 'PATCH', url: '/whatsapp/opportunities/1', headers,
+    payload: { status: 'perdido', loss_reason: 'motivo_inexistente' } });
+  assert.equal(res.statusCode, 400); assert.deepEqual(res.json(), { error: 'loss_reason_invalido', code: 'motivo_inexistente' }); await app.close();
+});
+
+test('PATCH loss_reason=nao_lead (cascata) → 400 (nunca aceito de fora)', async () => {
+  const { pool } = makePool({ opportunities: [{ id: 1, identifier: 'a', created_at: date(1) }] }); const app = appFor(pool);
+  const res = await app.inject({ method: 'PATCH', url: '/whatsapp/opportunities/1', headers,
+    payload: { status: 'perdido', loss_reason: 'nao_lead' } });
+  assert.equal(res.statusCode, 400); assert.deepEqual(res.json(), { error: 'loss_reason_invalido', code: 'nao_lead' }); await app.close();
+});
+
+test('PATCH loss_reason de sistema válido → 200 grava o motivo', async () => {
+  const { pool } = makePool({ opportunities: [{ id: 1, identifier: 'a', created_at: date(1) }] }); const app = appFor(pool);
+  const res = await app.inject({ method: 'PATCH', url: '/whatsapp/opportunities/1', headers,
+    payload: { status: 'perdido', loss_reason: 'lead_nao_respondeu' } });
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.json().opportunity.status, 'perdido');
+  assert.equal(res.json().opportunity.lossReason, 'lead_nao_respondeu');
+  await app.close();
+});
+
+test('PATCH loss_reason custom ATIVO do workspace → 200', async () => {
+  const { pool } = makePool({
+    opportunities: [{ id: 1, identifier: 'a', created_at: date(1) }],
+    lossReasons: [{ workspace_id: 'ws-1', code: 'sem_orcamento', active: true }],
+  });
+  const app = appFor(pool);
+  const res = await app.inject({ method: 'PATCH', url: '/whatsapp/opportunities/1', headers,
+    payload: { status: 'perdido', loss_reason: 'sem_orcamento' } });
+  assert.equal(res.statusCode, 200); assert.equal(res.json().opportunity.lossReason, 'sem_orcamento'); await app.close();
+});
+
+// =============================================================================
+// v3 — GET: filtro is_qualified (string) + alias qualification, resposta dual
+// =============================================================================
+
+test('GET filtro is_qualified=true vira o.is_qualified = $ com param true', async () => {
+  const { pool, state } = makePool(); const app = appFor(pool);
+  const res = await app.inject({ method: 'GET', url: '/whatsapp/opportunities?number_id=1&is_qualified=true', headers });
+  assert.equal(res.statusCode, 200);
+  const q = listQuery(state);
+  assert.match(q.text, /o\.is_qualified = \$/); assert.ok(q.params.includes(true)); await app.close();
+});
+
+test('GET filtro is_qualified=null vira o.is_qualified IS NULL', async () => {
+  const { pool, state } = makePool(); const app = appFor(pool);
+  const res = await app.inject({ method: 'GET', url: '/whatsapp/opportunities?number_id=1&is_qualified=null', headers });
+  assert.equal(res.statusCode, 200);
+  assert.match(listQuery(state).text, /o\.is_qualified IS NULL/); await app.close();
+});
+
+test('GET alias qualification=desqualificado vira o.is_qualified = $ com param false', async () => {
+  const { pool, state } = makePool(); const app = appFor(pool);
+  const res = await app.inject({ method: 'GET', url: '/whatsapp/opportunities?number_id=1&qualification=desqualificado', headers });
+  assert.equal(res.statusCode, 200);
+  const q = listQuery(state);
+  assert.match(q.text, /o\.is_qualified = \$/); assert.ok(q.params.includes(false)); await app.close();
+});
+
+test('GET is_qualified inválido → 400', async () => {
+  const { pool } = makePool(); const app = appFor(pool);
+  const res = await app.inject({ method: 'GET', url: '/whatsapp/opportunities?number_id=1&is_qualified=talvez', headers });
+  assert.equal(res.statusCode, 400); await app.close();
+});
+
+test('GET resposta expõe isQualified, lossReason e qualification derivada', async () => {
+  const { pool } = makePool({ opportunities: [{ id: 1, identifier: 'a', created_at: date(1),
+    status: 'perdido', is_qualified: false, qualification: 'desqualificado', loss_reason: 'nao_lead' }] });
+  const app = appFor(pool);
+  const res = await app.inject({ method: 'GET', url: '/whatsapp/opportunities?number_id=1', headers });
+  assert.equal(res.statusCode, 200);
+  const opp = res.json().opportunities[0];
+  assert.equal(opp.isQualified, false);
+  assert.equal(opp.lossReason, 'nao_lead');
+  assert.equal(opp.qualification, 'desqualificado');
+  await app.close();
 });

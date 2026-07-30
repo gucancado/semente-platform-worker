@@ -1,10 +1,8 @@
 import type { Pool, PoolClient } from 'pg';
 import {
-  applyOppPatch,
   applyOppPatchV3,
   OppInvariantError,
   qualificationLabel,
-  type OppPatch,
   type OppPatchV3,
   type OppQualification,
   type OppStateV3,
@@ -59,7 +57,6 @@ const mapScopedOpportunity = (r: any): ScopedOpportunity => ({
   numberId: Number(r.whatsapp_number_id),
   workspaceId: r.workspace_id,
 });
-const withoutScope = ({ numberId: _numberId, workspaceId: _workspaceId, ...opportunity }: ScopedOpportunity): Opportunity => opportunity;
 
 // SELECT o.* já traz as colunas v3 (is_qualified, loss_reason) desde a migration 051.
 const OPP_SELECT = `SELECT o.*,
@@ -154,74 +151,10 @@ async function insertEvent(client: Pick<PoolClient, 'query'>, p: {
   [p.opportunityId, p.field, p.oldValue, p.newValue, p.changedBy]);
 }
 
-export async function createOpportunity(pool: Pool, p: {
-  numberId: number; workspaceId: string; identifier: string; title?: string | null;
-  qualification?: OppQualification; tagIds?: number[]; createdBy: string;
-}): Promise<Opportunity | null> {
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-    const tagNames = new Map<number, string>();
-    if (p.tagIds?.length) {
-      const tags = await client.query(`SELECT id, name FROM whatsapp_tags WHERE workspace_id=$1 AND id=ANY($2::bigint[])`, [p.workspaceId, p.tagIds]);
-      if (tags.rows.length !== new Set(p.tagIds).size) { await client.query('ROLLBACK'); return null; }
-      for (const row of tags.rows) tagNames.set(Number(row.id), String(row.name));
-    }
-    const { rows } = await client.query(`INSERT INTO whatsapp_opportunities
-      (whatsapp_number_id, workspace_id, identifier, title, status, qualification, created_by)
-      VALUES ($1,$2,$3,$4,'em_andamento',$5,$6) RETURNING id`,
-    [p.numberId, p.workspaceId, p.identifier, p.title ?? null, p.qualification ?? 'indefinido', p.createdBy]);
-    const id = Number(rows[0].id);
-    await insertEvent(client, { opportunityId: id, field: 'created', oldValue: null, newValue: null, changedBy: p.createdBy });
-    for (const tagId of new Set(p.tagIds ?? [])) {
-      await client.query(`INSERT INTO whatsapp_opportunity_tags (opportunity_id, tag_id) VALUES ($1,$2)`, [id, tagId]);
-      // Timeline canônica: etiqueta inicial também é tag_added (paridade com attach avulso e com o CLI de migração).
-      await insertEvent(client, { opportunityId: id, field: 'tag_added', oldValue: null, newValue: tagNames.get(tagId) ?? null, changedBy: p.createdBy });
-    }
-    await client.query('COMMIT');
-    const created = await getOpportunity(pool, id);
-    return created ? withoutScope(created) : null;
-  } catch (err) {
-    await client.query('ROLLBACK').catch(() => {});
-    throw err;
-  } finally { client.release(); }
-}
-
-export async function patchOpportunity(pool: Pool, current: ScopedOpportunity, patch: OppPatch, changedBy: string): Promise<Opportunity> {
-  const transition = applyOppPatch(current, patch);
-  if (transition.events.length === 0) return withoutScope(current);
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-    const values: unknown[] = [current.id];
-    const set = transition.events.map(event => {
-      values.push(transition.next[event.field as 'status' | 'qualification' | 'title']);
-      return `${event.field}=$${values.length}`;
-    });
-    if (transition.closedAtAction === 'set_now') set.push('closed_at=NOW()');
-    if (transition.closedAtAction === 'clear') set.push('closed_at=NULL');
-    set.push('updated_at=NOW()');
-    const { rows } = await client.query(`UPDATE whatsapp_opportunities SET
-      ${set.join(', ')}
-      WHERE id=$1 RETURNING id`, values);
-    if (!rows[0]) throw new Error('opportunity disappeared during patch');
-    for (const event of transition.events) {
-      await insertEvent(client, { opportunityId: current.id, field: event.field, oldValue: event.oldValue, newValue: event.newValue, changedBy });
-    }
-    await client.query('COMMIT');
-    const updated = await getOpportunity(pool, current.id);
-    if (!updated) throw new Error('opportunity disappeared after patch');
-    return withoutScope(updated);
-  } catch (err) {
-    await client.query('ROLLBACK').catch(() => {});
-    throw err;
-  } finally { client.release(); }
-}
-
 // ---------------------------------------------------------------------------
 // Data layer v3 — lock por conversa, dual-write is_qualified/qualification,
-// side-effect na thread (spec §4.11 + §4.1-4.2). Convive com o v2 acima; as
-// rotas migram na Task 8 (aí patchOpportunity/createOpportunity v2 saem).
+// side-effect na thread (spec §4.11 + §4.1-4.2). É o ÚNICO caminho de escrita
+// das rotas desde a Task 8 (o createOpportunity/patchOpportunity v2 saíram).
 // ---------------------------------------------------------------------------
 
 /**
@@ -267,7 +200,8 @@ export async function applyThreadLeadTrue(
     await client.query(
       `INSERT INTO whatsapp_thread_meta_log (whatsapp_number_id, identifier, field, old_value, new_value, actor)
        VALUES ($1, $2, 'is_lead', $3, 'true', $4)`,
-      [p.numberId, p.identifier, prevRow != null ? String(prevRow.is_lead) : null, p.actor]);
+      // is_lead NULL (não-triado) grava old_value NULL — não a string 'null'.
+      [p.numberId, p.identifier, prevRow == null || prevRow.is_lead == null ? null : String(prevRow.is_lead), p.actor]);
   }
 }
 
