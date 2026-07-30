@@ -242,8 +242,11 @@ export async function countOpenOpportunities(client: PoolClient, numberId: numbe
  * a thread vira lead. Faz upsert incondicional de is_lead=TRUE, mas grava no
  * whatsapp_thread_meta_log SÓ SE o valor anterior era diferente de TRUE (sem row
  * anterior conta como diferente). Log incondicional travaria o sticky da IA (§6)
- * num mero title-edit de opp já ganha. Roda dentro da transação do lock (client).
- * Exportada pro teste puro da invariante do log.
+ * num mero title-edit de opp já ganha. Exportada pro teste puro da invariante do log.
+ *
+ * CONTRATO: DEVE ser chamada DENTRO de withConversationLock (mesma transação) — o
+ * upsert e o log são 2 statements e exigem atomicidade: sem a transação, um crash
+ * entre eles deixa is_lead=TRUE sem log (ou uma corrida duplica o log).
  */
 export async function applyThreadLeadTrue(
   client: Pick<PoolClient, 'query'>,
@@ -273,11 +276,21 @@ export async function applyThreadLeadTrue(
  * qualificação (is_qualified + qualification derivada, DUAL WRITE até a Fase D)
  * e mantém os eventos `created` + `tag_added` (paridade v2). Tag inexistente no
  * workspace → null (nada é inserido; a transação do lock commita vazia).
+ *
+ * `isQualified` aceita SÓ {null/undefined, true}:
+ *  - `false` → OppInvariantError('invalid_value') ANTES de qualquer escrita. Regra v1:
+ *    não se cria oportunidade já fechada, e desqualificada-ao-nascer seria
+ *    em_andamento+FALSE (viola o CHECK opp_v3_desqualificado_perdido) ou uma perda
+ *    sem razão. Desqualificar é sempre um patch sobre opp existente.
+ *  - `true` → cascateia is_lead=TRUE na thread (§4.2) na MESMA transação sob o lock,
+ *    com o mesmo dedupe de log; senão nasceria em_andamento+TRUE+is_lead NULL, estado
+ *    que a spec §5 declara inalcançável (cairia em novas_conversas, não negociacoes).
  */
 export async function createOpportunityV3(pool: Pool, p: {
   numberId: number; workspaceId: string; identifier: string; title?: string | null;
   isQualified?: boolean | null; tagIds?: number[]; createdBy: string;
 }): Promise<Opportunity | null> {
+  if (p.isQualified === false) throw new OppInvariantError('invalid_value');
   return withConversationLock(pool, p.numberId, p.identifier, async (client) => {
     const isQ = p.isQualified ?? null;
     const tagNames = new Map<number, string>();
@@ -296,6 +309,10 @@ export async function createOpportunityV3(pool: Pool, p: {
       await client.query(`INSERT INTO whatsapp_opportunity_tags (opportunity_id, tag_id) VALUES ($1,$2)`, [id, tagId]);
       // Timeline canônica: etiqueta inicial também é tag_added (paridade com o v2).
       await insertEvent(client, { opportunityId: id, field: 'tag_added', oldValue: null, newValue: tagNames.get(tagId) ?? null, changedBy: p.createdBy });
+    }
+    // §4.2: criada já qualificada ⇒ a thread é lead. Mesma transação, mesmo dedupe.
+    if (isQ === true) {
+      await applyThreadLeadTrue(client, { numberId: p.numberId, identifier: p.identifier, actor: p.createdBy });
     }
     const { rows: after } = await client.query(`${OPP_SELECT} WHERE o.id = $1`, [id]);
     return after[0] ? mapOpportunity(after[0]) : null;

@@ -21,7 +21,9 @@ import {
   resolveIsQualifiedFilter,
   countOpenOpportunities,
   applyThreadLeadTrue,
+  createOpportunityV3,
 } from '../src/whatsapp/opportunities.js';
+import { OppInvariantError } from '../src/whatsapp/opportunity-core.js';
 
 // ── client fake: devolve `rows` do handler, grava cada chamada (text+params) ────
 function fakeClient(handler: (text: string, params: any[]) => any[]) {
@@ -152,4 +154,29 @@ test('applyThreadLeadTrue: prev is_lead=FALSE loga false→true', async () => {
   const logs = calls.filter((c) => isMetaLog(c.text));
   assert.equal(logs.length, 1);
   assert.deepEqual(logs[0]!.params, [2, 'x', 'false', 'u9']);
+});
+
+// =============================================================================
+// createOpportunityV3 — isQualified=false é rejeitado ANTES de qualquer escrita
+// =============================================================================
+
+test('createOpportunityV3: isQualified=false lança invalid_value sem tocar o banco', async () => {
+  let connected = false;
+  const calls: { text: string; params: any[] }[] = [];
+  const fakePool = {
+    connect() {
+      connected = true;
+      return Promise.resolve({
+        query(text: string, params: any[] = []) { calls.push({ text, params }); return Promise.resolve({ rows: [], rowCount: 0 }); },
+        release() {},
+      });
+    },
+  } as any;
+
+  await assert.rejects(
+    () => createOpportunityV3(fakePool, { numberId: 1, workspaceId: 'ws', identifier: 'c', isQualified: false, createdBy: 'u1' }),
+    (err) => err instanceof OppInvariantError && err.code === 'invalid_value',
+  );
+  assert.equal(connected, false, 'não deve nem abrir conexão (throw antes do lock)');
+  assert.equal(calls.length, 0, 'nenhuma query — nenhum INSERT');
 });

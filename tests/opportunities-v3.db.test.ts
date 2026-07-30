@@ -92,6 +92,31 @@ test('re-patch idêntico não loga a thread de novo', async () => {
   assert.equal(Number(log.rows[0].n), 1, 'is_lead já era TRUE → 2ª chamada não loga');
 });
 
+test('createOpportunityV3 com isQualified=true cascateia is_lead=TRUE + 1 log', async () => {
+  const opp = await createOpportunityV3(pool, { numberId: 1, workspaceId: 'ws', identifier: 'c', isQualified: true, createdBy: 'u1' });
+  assert.ok(opp);
+  assert.equal(opp!.isQualified, true);
+
+  const meta = await pool.query(`SELECT is_lead FROM whatsapp_thread_meta WHERE whatsapp_number_id=1 AND identifier='c'`);
+  assert.equal(meta.rows[0].is_lead, true);
+
+  const log = await pool.query(
+    `SELECT old_value, new_value FROM whatsapp_thread_meta_log WHERE whatsapp_number_id=1 AND identifier='c' AND field='is_lead'`);
+  assert.equal(log.rows.length, 1);
+  assert.equal(log.rows[0].old_value, null);
+  assert.equal(log.rows[0].new_value, 'true');
+});
+
+test('createOpportunityV3 com isQualified=true em thread já lead não loga de novo', async () => {
+  await pool.query(`INSERT INTO whatsapp_thread_meta (whatsapp_number_id, identifier, is_lead, updated_by) VALUES (1,'c',TRUE,'seed')`);
+  const opp = await createOpportunityV3(pool, { numberId: 1, workspaceId: 'ws', identifier: 'c', isQualified: true, createdBy: 'u1' });
+  assert.ok(opp);
+
+  const log = await pool.query(
+    `SELECT COUNT(*)::int AS n FROM whatsapp_thread_meta_log WHERE whatsapp_number_id=1 AND identifier='c' AND field='is_lead'`);
+  assert.equal(Number(log.rows[0].n), 0, 'is_lead já era TRUE → create não loga');
+});
+
 test('patch em opp inexistente devolve not_found', async () => {
   const res = await patchOpportunityV3(pool, 999999, { status: 'ganho' }, 'u1');
   assert.deepEqual(res, { ok: false, error: 'not_found' });
