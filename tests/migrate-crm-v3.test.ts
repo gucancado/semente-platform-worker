@@ -7,7 +7,9 @@ import {
   readCandidates,
   readNumberWorkspaces,
   readExistingSettingsWorkspaces,
+  applyWorkspacePromotions,
   type CutoverInput,
+  type WorkspaceCutoverPlan,
 } from '../src/cli/migrate-crm-v3.js';
 
 // ── readCandidates: SQL de seleção da promoção ──────────────────────────────
@@ -249,4 +251,96 @@ test('formatReport: modo APPLY + --workspace aparece no cabeçalho', () => {
   assert.match(text, /APPLY/);
   assert.match(text, /workspace=ws-9/);
   assert.match(text, /total: 0 pares a promover · 1 workspace\(s\) sem settings/);
+});
+
+// ── applyWorkspacePromotions: transação por workspace (fix round 1) ────────
+// Fake client capturando a sequência de queries (BEGIN/UPSERT/log/COMMIT ou
+// ROLLBACK), mesmo estilo dos SQL-shape asserts acima — sem DATABASE_URL.
+
+const UPSERT_RE = /INSERT INTO whatsapp_thread_meta \(/; // não casa com whatsapp_thread_meta_log (sem espaço antes do "_log")
+const LOG_RE = /INSERT INTO whatsapp_thread_meta_log/;
+
+/**
+ * Fake client cujo UPSERT devolve rowCount conforme `rowCounts` (1 por par, na
+ * ordem de chamada) — simula promoção efetiva (1) vs já-promovido/no-op (0).
+ * `failOnCallIndex`, se setado, faz a N-ésima chamada (0-based, contando TODAS
+ * as queries incl. BEGIN) lançar, simulando um crash a meio da transação.
+ */
+function makeFakeClient(rowCounts: number[], failOnCallIndex?: number) {
+  const calls: string[] = [];
+  let upsertIndex = 0;
+  const client = {
+    query: async (sql: string) => {
+      const callIndex = calls.length;
+      calls.push(sql);
+      if (failOnCallIndex !== undefined && callIndex === failOnCallIndex) {
+        throw new Error('boom');
+      }
+      if (UPSERT_RE.test(sql)) {
+        const rowCount = rowCounts[upsertIndex] ?? 0;
+        upsertIndex += 1;
+        return { rows: rowCount > 0 ? [{ whatsapp_number_id: 1 }] : [], rowCount };
+      }
+      return { rows: [], rowCount: 0 };
+    },
+  };
+  return { client: client as any, calls };
+}
+
+const wsPlan = (pairs: WorkspaceCutoverPlan['pairs']): WorkspaceCutoverPlan => ({
+  workspaceId: 'ws-a',
+  pairs,
+  needsSettings: false,
+});
+
+test('applyWorkspacePromotions: BEGIN antes do 1º UPSERT, 1 log por par promovido, COMMIT no fim', async () => {
+  const { client, calls } = makeFakeClient([1, 1]);
+  const ws = wsPlan([
+    { numberId: 1, identifier: 'a', workspaceId: 'ws-a' },
+    { numberId: 1, identifier: 'b', workspaceId: 'ws-a' },
+  ]);
+
+  const promoted = await applyWorkspacePromotions(client, ws);
+
+  assert.equal(promoted, 2);
+  assert.equal(calls[0], 'BEGIN');
+  assert.equal(calls[calls.length - 1], 'COMMIT');
+  assert.equal(calls.filter((c) => UPSERT_RE.test(c)).length, 2);
+  assert.equal(calls.filter((c) => LOG_RE.test(c)).length, 2);
+  // ordem: BEGIN, upsert(a), log(a), upsert(b), log(b), COMMIT
+  assert.equal(calls.length, 6);
+  assert.match(calls[1]!, UPSERT_RE);
+  assert.match(calls[2]!, LOG_RE);
+  assert.match(calls[3]!, UPSERT_RE);
+  assert.match(calls[4]!, LOG_RE);
+});
+
+test('applyWorkspacePromotions: par já promovido (rowCount 0) não gera log — idempotência dentro da transação', async () => {
+  const { client, calls } = makeFakeClient([0]);
+  const ws = wsPlan([{ numberId: 1, identifier: 'a', workspaceId: 'ws-a' }]);
+
+  const promoted = await applyWorkspacePromotions(client, ws);
+
+  assert.equal(promoted, 0);
+  assert.deepEqual(
+    calls.map((c) => (c === 'BEGIN' || c === 'COMMIT' ? c : UPSERT_RE.test(c) ? 'UPSERT' : 'OTHER')),
+    ['BEGIN', 'UPSERT', 'COMMIT'],
+  );
+});
+
+test('applyWorkspacePromotions: erro a meio da transação → ROLLBACK e relança (nada fica meio-promovido)', async () => {
+  // callIndex 0=BEGIN, 1=upsert(a) ok, 2=log(a) FALHA aqui
+  const { client, calls } = makeFakeClient([1, 1], 2);
+  const ws = wsPlan([
+    { numberId: 1, identifier: 'a', workspaceId: 'ws-a' },
+    { numberId: 1, identifier: 'b', workspaceId: 'ws-a' },
+  ]);
+
+  await assert.rejects(() => applyWorkspacePromotions(client, ws), /boom/);
+
+  assert.equal(calls[0], 'BEGIN');
+  assert.equal(calls[calls.length - 1], 'ROLLBACK');
+  assert.ok(!calls.includes('COMMIT'));
+  // não chegou a tentar o 2º par (a exceção interrompeu o loop)
+  assert.equal(calls.filter((c) => UPSERT_RE.test(c)).length, 1);
 });

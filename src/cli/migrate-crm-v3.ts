@@ -1,5 +1,5 @@
 import { pathToFileURL } from 'node:url';
-import type { Pool } from 'pg';
+import type { Pool, PoolClient } from 'pg';
 import { getOrCreateSettings } from '../whatsapp/workspace-settings.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -21,6 +21,16 @@ import { getOrCreateSettings } from '../whatsapp/workspace-settings.js';
 // --workspace=<id> restringe os dois passos, relatório com contagens por
 // workspace. Idempotente: re-rodar promove 0 pares (is_lead já TRUE) e o seed
 // é ON CONFLICT DO NOTHING (no-op).
+//
+// Transação por workspace (mesmo padrão de applyWorkspacePlan no molde): as
+// promoções de um workspace rodam sob 1 client dedicado com BEGIN/COMMIT —
+// UPSERT+log de cada par ficam atômicos entre si E com os pares irmãos do
+// mesmo workspace, então um crash a meio caminho nunca deixa is_lead=TRUE sem
+// o log correspondente (o que seria uma lacuna de auditoria permanente e
+// silenciosa, já que readCandidates só re-seleciona pares com is_lead NULL).
+// Isolamento de falha em main(): 1 workspace que falha (ROLLBACK) não aborta
+// os demais nem pula o seed de settings — cada passo é contado e reportado
+// separadamente, seed roda sempre.
 // ─────────────────────────────────────────────────────────────────────────────
 
 // ── Tipos de entrada (rows já mapeadas) ─────────────────────────────────────
@@ -190,14 +200,15 @@ export async function readCutoverInput(pool: Pool, workspace: string | null): Pr
 // ── Escrita (apply) ──────────────────────────────────────────────────────────
 
 /**
- * Promove um par: UPSERT direto e simples (NÃO é applyLeadUpdate — sem lock,
- * sem cascata, sem exigir updatedBy humano). O `WHERE ... is_lead IS NULL` no
- * braço de UPDATE garante que só promove quando o valor atual ainda é NULL
- * (idempotência + nunca sobrescreve FALSE, mesmo sob corrida). Devolve true
- * só quando a row foi de fato promovida (pra decidir se loga a transição).
+ * Promove um par DENTRO da transação já aberta pelo caller (client, não pool):
+ * UPSERT direto e simples (NÃO é applyLeadUpdate — sem lock, sem cascata, sem
+ * exigir updatedBy humano). O `WHERE ... is_lead IS NULL` no braço de UPDATE
+ * garante que só promove quando o valor atual ainda é NULL (idempotência +
+ * nunca sobrescreve FALSE, mesmo sob corrida). Devolve true só quando a row
+ * foi de fato promovida (pra decidir se loga a transição).
  */
-async function promotePair(pool: Pool, pair: PromotionCandidateRow): Promise<boolean> {
-  const res = await pool.query(
+async function promotePair(client: PoolClient, pair: PromotionCandidateRow): Promise<boolean> {
+  const res = await client.query(
     `INSERT INTO whatsapp_thread_meta (whatsapp_number_id, identifier, is_lead, updated_at, updated_by)
      VALUES ($1, $2, TRUE, NOW(), 'migration')
      ON CONFLICT (whatsapp_number_id, identifier)
@@ -208,7 +219,7 @@ async function promotePair(pool: Pool, pair: PromotionCandidateRow): Promise<boo
   );
   const promoted = (res.rowCount ?? 0) > 0;
   if (promoted) {
-    await pool.query(
+    await client.query(
       `INSERT INTO whatsapp_thread_meta_log (whatsapp_number_id, identifier, field, old_value, new_value, actor)
        VALUES ($1, $2, 'is_lead', NULL, 'true', 'migration')`,
       [pair.numberId, pair.identifier],
@@ -217,18 +228,46 @@ async function promotePair(pool: Pool, pair: PromotionCandidateRow): Promise<boo
   return promoted;
 }
 
-async function applyWorkspacePromotions(pool: Pool, ws: WorkspaceCutoverPlan): Promise<number> {
-  let promoted = 0;
-  for (const pair of ws.pairs) {
-    if (await promotePair(pool, pair)) promoted += 1;
+/**
+ * Aplica TODOS os pares de um workspace sob uma única transação (BEGIN...COMMIT,
+ * padrão de applyWorkspacePlan no molde): UPSERT+log de cada par ficam atômicos
+ * entre si — nunca sobra is_lead=TRUE sem o log correspondente, mesmo se o
+ * processo cair a meio caminho. Erro em qualquer par faz ROLLBACK de TODOS os
+ * pares do workspace (nada meio-promovido) e relança pro caller decidir o que
+ * fazer (main() isola por workspace — ver abaixo).
+ */
+export async function applyWorkspacePromotions(client: PoolClient, ws: WorkspaceCutoverPlan): Promise<number> {
+  await client.query('BEGIN');
+  try {
+    let promoted = 0;
+    for (const pair of ws.pairs) {
+      if (await promotePair(client, pair)) promoted += 1;
+    }
+    await client.query('COMMIT');
+    return promoted;
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw err;
   }
-  return promoted;
 }
 
-async function seedSettingsForWorkspaces(pool: Pool, workspaceIds: string[]): Promise<void> {
+/**
+ * Seed de settings, workspace por workspace, com isolamento de falha (um
+ * workspace problemático não impede os demais). Devolve a contagem de falhas
+ * pro report final — chamado incondicionalmente em main(), mesmo se a etapa
+ * de promoção teve falhas.
+ */
+async function seedSettingsForWorkspaces(pool: Pool, workspaceIds: string[]): Promise<number> {
+  let failures = 0;
   for (const workspaceId of workspaceIds) {
-    await getOrCreateSettings(pool, workspaceId);
+    try {
+      await getOrCreateSettings(pool, workspaceId);
+    } catch (err) {
+      failures += 1;
+      console.error(`[apply] FALHOU seed de settings ${workspaceId}: ${(err as Error).message}`);
+    }
   }
+  return failures;
 }
 
 async function main(): Promise<void> {
@@ -240,16 +279,34 @@ async function main(): Promise<void> {
 
   if (args.apply) {
     let totalPromoted = 0;
+    let promotionFailures = 0;
+    // Isolamento por workspace: client dedicado + BEGIN/COMMIT dentro de
+    // applyWorkspacePromotions. Um workspace que falha (ROLLBACK) não aborta
+    // os demais nem impede o seed de settings logo abaixo.
     for (const ws of plan.workspaces) {
       if (ws.pairs.length === 0) continue;
-      const promoted = await applyWorkspacePromotions(pool, ws);
-      totalPromoted += promoted;
-      console.log(`[apply] ${ws.workspaceId}: ${promoted}/${ws.pairs.length} par(es) promovido(s)`);
+      const client = await pool.connect();
+      try {
+        const promoted = await applyWorkspacePromotions(client, ws);
+        totalPromoted += promoted;
+        console.log(`[apply] ${ws.workspaceId}: ${promoted}/${ws.pairs.length} par(es) promovido(s)`);
+      } catch (err) {
+        promotionFailures += 1;
+        console.error(`[apply] FALHOU promoção ${ws.workspaceId}: ${(err as Error).message}`);
+      } finally {
+        client.release();
+      }
     }
-    await seedSettingsForWorkspaces(pool, input.numberWorkspaces);
+
+    // Roda SEMPRE, mesmo com falhas de promoção acima — settings não depende
+    // do resultado da triagem.
+    const settingsFailures = await seedSettingsForWorkspaces(pool, input.numberWorkspaces);
+
     console.log(
-      `[apply] concluído: ${totalPromoted} par(es) promovido(s) · ${input.numberWorkspaces.length} workspace(s) com settings garantidas`,
+      `[apply] concluído: ${totalPromoted} par(es) promovido(s) (${promotionFailures} workspace(s) com falha) · ` +
+        `${input.numberWorkspaces.length} workspace(s) alvo de settings (${settingsFailures} falha(s))`,
     );
+    if (promotionFailures > 0 || settingsFailures > 0) process.exitCode = 1;
   }
 
   await pool.end();
