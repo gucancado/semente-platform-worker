@@ -81,7 +81,8 @@ export function registerReadRoutes(
     const periodBasis = pb as 'arrival' | 'activity' | undefined;
     if (!await gateMember(req, reply, workspace_id, authz)) return;
     const k = kind === 'dm' || kind === 'group' ? kind : 'all';
-    const ls = lead_status === 'lead' || lead_status === 'not_lead' ? lead_status : 'all';
+    // Tri-state v3: 'indefinido' aceito além de lead/not_lead; qualquer outro valor → 'all'.
+    const ls = lead_status === 'lead' || lead_status === 'not_lead' || lead_status === 'indefinido' ? lead_status : 'all';
     const fib = typeof include_first_inbound === 'string' ? include_first_inbound.toLowerCase() : '';
     const includeFirstInbound = fib === 'true' || fib === '1' || fib === 'yes';
     const result = await listThreads(deps.pool, {
@@ -259,7 +260,8 @@ export function registerReadRoutes(
     if (opp_tag_id !== undefined && opp_tag_id !== '' && Number.isNaN(Number(opp_tag_id))) return reply.code(400).send({ error: 'opp_tag_id must be numeric' });
     if (!await gateMember(req, reply, workspace_id, authz)) return;
     const k = kind === 'dm' || kind === 'group' ? kind : 'all';
-    const ls = lead_status === 'lead' || lead_status === 'not_lead' ? lead_status : 'all';
+    // Tri-state v3: 'indefinido' aceito além de lead/not_lead; qualquer outro valor → 'all'.
+    const ls = lead_status === 'lead' || lead_status === 'not_lead' || lead_status === 'indefinido' ? lead_status : 'all';
     const result = await searchThreads(deps.pool, {
       workspaceId: workspace_id, numberId: Number(number_id), query, since, until,
       kind: k, leadStatus: ls, limit: limit ? Number(limit) : undefined,

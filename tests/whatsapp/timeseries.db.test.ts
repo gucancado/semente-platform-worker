@@ -40,7 +40,7 @@ test('arrival: thread ancora no bucket da 1ª mensagem; zero-fill preenche bucke
   assert.equal(r.series[1].total, 0); // 02: zero-fill
   assert.equal(r.series[2].total, 1); // thread b
   assert.equal(r.series.reduce((s, x) => s + x.total, 0), 2);
-  assert.equal(r.series[0].leads, 1); // sem thread_meta ⇒ lead por default
+  assert.equal(r.series[0].leads, 0); // v3 tri-state: sem thread_meta ⇒ indefinido, NÃO conta em leads
 });
 
 test('activity: thread conta em cada bucket com mensagem', async () => {
@@ -104,7 +104,12 @@ test('leads: thread_meta de OUTRO workspace não vaza (mesmo identifier)', async
   // Mesmo identifier nos dois workspaces (mesmo JID de telefone).
   await insertMsg({ numberId: 6, workspaceId: 'ws-leak-a', identifier: 'shared-jid', createdAt: '2026-06-02T12:00:00Z' });
   await insertMsg({ numberId: 7, workspaceId: 'ws-leak-b', identifier: 'shared-jid', createdAt: '2026-06-02T12:00:00Z' });
-  // Só o ws-leak-b marca a thread como NÃO-lead.
+  // ws-leak-a marca a thread como LEAD (is_lead=TRUE); ws-leak-b marca a MESMA jid como NÃO-lead.
+  // Com o tri-state v3, só is_lead=TRUE conta em `leads` — então a discriminação de vazamento
+  // exige que ws-leak-a seja TRUE (senão indefinido e FALSE dariam ambos leads=0).
+  await pool.query(
+    `INSERT INTO whatsapp_thread_meta (whatsapp_number_id, identifier, is_lead) VALUES (6, 'shared-jid', TRUE)`,
+  );
   await pool.query(
     `INSERT INTO whatsapp_thread_meta (whatsapp_number_id, identifier, is_lead) VALUES (7, 'shared-jid', FALSE)`,
   );
@@ -117,7 +122,7 @@ test('leads: thread_meta de OUTRO workspace não vaza (mesmo identifier)', async
   });
 
   assert.equal(r.series[0].total, 1);
-  assert.equal(r.series[0].leads, 1, 'ws-leak-a não tem meta → lead por default; is_lead=FALSE do ws-leak-b não pode vazar');
+  assert.equal(r.series[0].leads, 1, 'ws-leak-a é lead (is_lead=TRUE); is_lead=FALSE do ws-leak-b não pode vazar e zerar');
 });
 
 test('kind=dm exclui grupo (author preenchido)', async () => {

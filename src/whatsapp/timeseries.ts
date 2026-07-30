@@ -18,7 +18,8 @@
  * Não introduza uma segunda noção de "que dia SP é este" fora deste SQL.
  *
  * Payload agregado: sem identifier e sem texto (minimização LGPD).
- * leads segue a semântica de stats.ts: sem thread_meta OU is_lead=TRUE ⇒ lead.
+ * leads segue a semântica TRI-STATE de stats.ts (v3 §2/§10): lead = is_lead=TRUE
+ * APENAS. is_lead NULL (não triado / sem thread_meta) NÃO conta mais como lead.
  */
 import type { Pool } from 'pg';
 // Autoridade única do escopo de workspace nos laterais de metadado (thread_meta /
@@ -60,6 +61,8 @@ const OPPORTUNITY_CTES = `
       FROM whatsapp_opportunities o
      WHERE o.workspace_id = $1
        AND ($2::int IS NULL OR o.whatsapp_number_id = $2)
+       -- EXCLUI perdas de cascata não-lead (loss_reason='nao_lead') dos relatórios (spec §5/§10).
+       AND (o.loss_reason IS DISTINCT FROM 'nao_lead')
        AND o.created_at >= $3::timestamptz AND o.created_at <= $4::timestamptz
      GROUP BY 1
   ),
@@ -70,6 +73,8 @@ const OPPORTUNITY_CTES = `
      WHERE o.workspace_id = $1
        AND ($2::int IS NULL OR o.whatsapp_number_id = $2)
        AND o.status = 'ganho'
+       -- Consistência com os demais agregados (ganho nunca tem loss_reason; no-op defensivo).
+       AND (o.loss_reason IS DISTINCT FROM 'nao_lead')
        AND o.closed_at >= $3::timestamptz AND o.closed_at <= $4::timestamptz
      GROUP BY 1
   )`;
@@ -108,7 +113,7 @@ export async function getTimeseries(
       agg AS (
         SELECT to_char(date_trunc($5::text, tk.first_at AT TIME ZONE 'America/Sao_Paulo'), 'YYYY-MM-DD') AS bucket,
                COUNT(*)::int AS total,
-               COUNT(*) FILTER (WHERE tm.is_lead IS NULL OR tm.is_lead = TRUE)::int AS leads
+               COUNT(*) FILTER (WHERE tm.is_lead = TRUE)::int AS leads
           FROM threads tk
           LEFT JOIN LATERAL (
             SELECT g2.jid FROM whatsapp_groups g2
@@ -151,7 +156,7 @@ export async function getTimeseries(
       agg AS (
         SELECT to_char(a.bucket_ts, 'YYYY-MM-DD') AS bucket,
                COUNT(*)::int AS total,
-               COUNT(*) FILTER (WHERE tm.is_lead IS NULL OR tm.is_lead = TRUE)::int AS leads
+               COUNT(*) FILTER (WHERE tm.is_lead = TRUE)::int AS leads
           FROM active a
           JOIN thread_kind tk ON tk.identifier = a.identifier
           LEFT JOIN LATERAL (

@@ -45,7 +45,7 @@ function threadRow(over: Record<string, any> = {}) {
     last_text: 'oi',
     is_group: false,
     name: 'Contato',
-    not_lead: false,
+    is_lead: true,
     lead_stage: null,
     lead_temperature: null,
     lead_source: null,
@@ -67,7 +67,7 @@ function hitRow(over: Record<string, any> = {}) {
     snippet: 'contexto do match',
     is_group: false,
     name: 'Contato',
-    not_lead: false,
+    is_lead: true,
     lead_stage: null,
     lead_temperature: null,
     lead_source: null,
@@ -82,6 +82,8 @@ function hitRow(over: Record<string, any> = {}) {
 const LATEST = {
   id: 5,
   status: 'ganho',
+  is_qualified: true,   // v3: fonte da verdade; qualification string é derivada
+  loss_reason: null,
   qualification: 'qualificado',
   title: 'Negócio X',
   tags: [{ id: 1, name: 'VIP', color: 'warn' }],
@@ -97,7 +99,7 @@ test('listThreads: thread com 2 opps → count=2 + latest mapeado (objeto jsonb)
   assert.equal(threads.length, 1);
   assert.deepEqual(threads[0].opportunities, {
     count: 2,
-    latest: { id: 5, status: 'ganho', qualification: 'qualificado', title: 'Negócio X', tags: [{ id: 1, name: 'VIP', color: 'warn' }] },
+    latest: { id: 5, status: 'ganho', isQualified: true, lossReason: null, qualification: 'qualificado', title: 'Negócio X', tags: [{ id: 1, name: 'VIP', color: 'warn' }] },
   });
 });
 
@@ -148,8 +150,10 @@ test('listThreads: opp_status / opp_qualification / opp_tag_id repassados em $15
   });
   const { params, text } = calls[0];
   assert.equal(params[14], 'em_andamento'); // $15
-  assert.equal(params[15], 'qualificado');  // $16
+  assert.equal(params[15], 'true');         // $16 = token de is_qualified (alias 'qualificado' convertido)
   assert.equal(params[16], 42);             // $17
+  // filtro de qualificação agora é sobre is_qualified (fonte v3), não a coluna legada
+  assert.match(text, /oflt\.is_qualified IS NOT DISTINCT FROM/);
   // o filtro por tag junta opportunity_tags e casa o índice por número/identifier
   assert.match(text, /\$17::bigint IS NULL OR EXISTS[\s\S]*JOIN whatsapp_opportunity_tags oft/);
 });
@@ -164,7 +168,7 @@ test('searchThreads: hit carrega o mesmo resumo opportunities', async () => {
   assert.equal(results.length, 1);
   assert.deepEqual(results[0].opportunities, {
     count: 2,
-    latest: { id: 5, status: 'ganho', qualification: 'qualificado', title: 'Negócio X', tags: [{ id: 1, name: 'VIP', color: 'warn' }] },
+    latest: { id: 5, status: 'ganho', isQualified: true, lossReason: null, qualification: 'qualificado', title: 'Negócio X', tags: [{ id: 1, name: 'VIP', color: 'warn' }] },
   });
 });
 
@@ -177,8 +181,9 @@ test('searchThreads: filtros opp/status/qualification/tag em $11..$14', async ()
   const { params, text } = calls[0];
   assert.equal(params[10], 'without');       // $11
   assert.equal(params[11], 'perdido');       // $12
-  assert.equal(params[12], 'desqualificado'); // $13
+  assert.equal(params[12], 'false');         // $13 = token de is_qualified (alias 'desqualificado' convertido)
   assert.equal(params[13], 7);               // $14
+  assert.match(text, /oflt\.is_qualified IS NOT DISTINCT FROM/);
   assert.match(text, /FROM whatsapp_opportunities o/);
   assert.match(text, /ORDER BY o\.created_at DESC, o\.id DESC/);
 });
@@ -187,46 +192,54 @@ test('searchThreads: filtros opp/status/qualification/tag em $11..$14', async ()
 // getStats — agregados de ENTIDADE (nunca reusam os CTEs de thread)
 // =============================================================================
 
-test('getStats: byOpportunityStatus / byQualification / byOpportunityTag contam linhas da entidade', async () => {
+test('getStats: byOpportunityStatus / byQualification / byOpportunityTag / byLossReason contam linhas da entidade', async () => {
   const { pool, calls } = fakePool((text) => {
     if (/SELECT o\.status AS key/.test(text)) return [{ key: 'em_andamento', cnt: 3 }, { key: 'ganho', cnt: 1 }];
-    if (/SELECT o\.qualification AS key/.test(text)) return [{ key: 'qualificado', cnt: 2 }, { key: 'indefinido', cnt: 1 }];
+    if (/o\.is_qualified IS NULL THEN 'indefinido'/.test(text)) return [{ key: 'qualificado', cnt: 2 }, { key: 'indefinido', cnt: 1 }];
     if (/JOIN whatsapp_opportunity_tags ot/.test(text)) return [{ key: 'VIP', cnt: 4 }];
-    return []; // main/stage/temperature/source/ingest/tag/hidden → zerados por default
+    if (/COALESCE\(o\.loss_reason, 'null'\) AS key/.test(text)) return [{ key: 'preco', cnt: 2 }];
+    return []; // main/stage/temperature/source/ingest/tag/hidden/triage → zerados por default
   });
 
   const stats = await getStats(pool, { workspaceId: 'ws-1', numberId: 1, since: '2026-07-01T00:00:00Z', until: '2026-07-31T23:59:59Z' });
   assert.deepEqual(stats.byOpportunityStatus, { em_andamento: 3, ganho: 1 });
+  // byQualification deriva de is_qualified mas mantém CHAVES STRING.
   assert.deepEqual(stats.byQualification, { qualificado: 2, indefinido: 1 });
   assert.deepEqual(stats.byOpportunityTag, { VIP: 4 });
+  assert.deepEqual(stats.byLossReason, { preco: 2 });
 
-  // REGRA CRÍTICA da spec §5.1: os 3 agregados NÃO podem reusar threads_in_period/
+  // REGRA CRÍTICA da spec §5.1: os agregados NÃO podem reusar threads_in_period/
   // threads_scoped (colapsam identifier entre números). Devem varrer a entidade direto.
   const entityCalls = calls.filter(c =>
     /SELECT o\.status AS key/.test(c.text) ||
-    /SELECT o\.qualification AS key/.test(c.text) ||
-    /JOIN whatsapp_opportunity_tags ot/.test(c.text));
-  assert.equal(entityCalls.length, 3);
+    /o\.is_qualified IS NULL THEN 'indefinido'/.test(c.text) ||
+    /JOIN whatsapp_opportunity_tags ot/.test(c.text) ||
+    /COALESCE\(o\.loss_reason, 'null'\) AS key/.test(c.text));
+  assert.equal(entityCalls.length, 4);
   for (const c of entityCalls) {
     assert.doesNotMatch(c.text, /threads_in_period|threads_scoped/, 'agregado de opp não pode reusar CTE de thread');
     assert.match(c.text, /FROM whatsapp_opportunities o/);
     // escopo autoritativo: workspace + número + janela por created_at da própria opp
     assert.match(c.text, /o\.workspace_id = \$1/);
     assert.match(c.text, /o\.created_at >= \$3/);
+    // exclusão nao_lead em TODOS os agregados de relatório (spec §5/§10)
+    assert.match(c.text, /o\.loss_reason IS DISTINCT FROM 'nao_lead'/);
     // params = slice(0,4) = [workspaceId, numberId, since, until]
     assert.deepEqual(c.params, ['ws-1', 1, '2026-07-01T00:00:00Z', '2026-07-31T23:59:59Z']);
   }
 });
 
-test('getStats: sem opps → os 3 records vêm vazios (aditivo, não quebra o shape)', async () => {
+test('getStats: sem opps → os 4 records de opp vêm vazios (aditivo, não quebra o shape)', async () => {
   const { pool } = fakePool(() => []);
   const stats = await getStats(pool, { workspaceId: 'ws-1' });
   assert.deepEqual(stats.byOpportunityStatus, {});
   assert.deepEqual(stats.byQualification, {});
   assert.deepEqual(stats.byOpportunityTag, {});
+  assert.deepEqual(stats.byLossReason, {});
   // campos pré-existentes seguem presentes
   assert.equal(stats.total, 0);
   assert.deepEqual(stats.byKind, { dm: 0, group: 0 });
+  assert.deepEqual(stats.byLeadStatus, { lead: 0, not_lead: 0, indefinido: 0 });
 });
 
 // =============================================================================

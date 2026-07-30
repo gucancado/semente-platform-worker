@@ -282,6 +282,26 @@ test('threads-fib-4: include_first_inbound absent → $10 bound false', async ()
   await app.close();
 });
 
+// threads-lead-indefinido: lead=indefinido (novo valor v3) chega ao SQL como
+// leadFilterSql('indefinido') = 'tm.is_lead IS NULL' (antes caía em 'all' → TRUE).
+test('threads-lead-indefinido: GET /whatsapp/threads?lead_status=indefinido → SQL filtra tm.is_lead IS NULL', async () => {
+  const { pool, calls } = makeStubPool();
+  const app = Fastify({ logger: false });
+  registerReadRoutes(app, { pool, panelToken: PANEL_TOKEN, authz: makeMemberAllowed(), logAccess: () => {} });
+
+  const res = await app.inject({
+    method: 'GET',
+    url: '/whatsapp/threads?workspace_id=ws-1&number_id=1&lead_status=indefinido',
+    headers: ACTOR_HEADERS,
+  });
+
+  assert.equal(res.statusCode, 200);
+  const threadsCall = calls.find(c => /FROM agg a/.test(c.text));
+  assert.ok(threadsCall, 'listThreads query must have run');
+  assert.match(threadsCall!.text, /tm\.is_lead IS NULL/, 'lead=indefinido → filtro tm.is_lead IS NULL');
+  await app.close();
+});
+
 // stats-kind-1: kind=dm → mainQuery $6 bound to 'dm'
 test('stats-kind-1: GET /whatsapp/stats?kind=dm → mainQuery $6 = "dm"', async () => {
   const { pool, calls } = makeStubPool();
@@ -400,7 +420,8 @@ test('stats-7: GET /whatsapp/stats — logAccess called without meta', async () 
 // ⚠ NEEDS POSTGRES: stats happy-path
 //   Setup: insert whatsapp_number, messages for 2 DM + 1 group thread, thread_meta for 1 (is_lead=false).
 //   GET /whatsapp/stats?workspace_id=ws&number_id=n
-//   Expect: { total:3, byLeadStatus:{lead:2,not_lead:1}, byKind:{dm:2,group:1}, ... }
+//   Expect (v3 tri-state, 2 threads sem meta → indefinido):
+//     { total:3, byLeadStatus:{lead:0,not_lead:1,indefinido:2}, byKind:{dm:2,group:1}, ... }
 
 // ⚠ NEEDS POSTGRES: stats byStage null-bucket
 //   Setup: 2 threads, 1 with lead_stage='qualificado', 1 with no meta row.

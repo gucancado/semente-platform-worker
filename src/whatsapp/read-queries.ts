@@ -1,5 +1,21 @@
 import type { Pool } from 'pg';
 import { leadFilterSql, type LeadStatus } from './lead-filter.js';
+import { qualificationLabel } from './opportunity-core.js';
+import { resolveIsQualifiedFilter } from './opportunities.js';
+
+/**
+ * Converte o alias string `opp_qualification` (qualificado/desqualificado/indefinido)
+ * num TOKEN de texto pro predicado SQL sobre is_qualified (fonte v3):
+ *   'true' → is_qualified=TRUE · 'false' → FALSE · 'null' → IS NULL (indefinido).
+ * `null` (retorno) = sem filtro. Reusa `resolveIsQualifiedFilter` (mesma conversão do
+ * data layer) — string inválida cai no default undefined → sem filtro. Exportada p/
+ * teste puro da conversão.
+ */
+export function oppQualificationToken(qualification: string | undefined): string | null {
+  const isQ = resolveIsQualifiedFilter({ qualification });
+  if (isQ === undefined) return null;
+  return isQ === null ? 'null' : String(isQ); // true→'true' · false→'false' · null→'null'
+}
 
 export type Thread = {
   identifier: string;
@@ -8,7 +24,8 @@ export type Thread = {
   count: number;
   kind: 'dm' | 'group';
   name: string | null;
-  leadStatus: 'lead' | 'not_lead';
+  /** Tri-state v3: 'lead' (is_lead=TRUE) · 'not_lead' (FALSE) · 'indefinido' (NULL/sem meta). */
+  leadStatus: 'lead' | 'not_lead' | 'indefinido';
   leadStage: string | null;
   leadTemperature: string | null;
   leadSource: string | null;
@@ -21,20 +38,44 @@ export type Thread = {
 export type OpportunityTag = { id: number; name: string; color: string };
 export type OpportunitySummary = {
   count: number;
-  latest: { id: number; status: string; qualification: string; title: string | null; tags: OpportunityTag[] } | null;
+  /**
+   * Resumo da opp mais recente. v3: expõe `isQualified` (boolean|null, fonte da verdade)
+   * e `lossReason`; `qualification` (string) mantida por 1 release, derivada de is_qualified.
+   */
+  latest: {
+    id: number;
+    status: string;
+    isQualified: boolean | null;
+    lossReason: string | null;
+    qualification: string;
+    title: string | null;
+    tags: OpportunityTag[];
+  } | null;
 };
+
+/** Deriva o tri-state de leadStatus a partir de is_lead (true/false/null|sem row). */
+function deriveLeadStatus(isLead: boolean | null | undefined): 'lead' | 'not_lead' | 'indefinido' {
+  if (isLead === true) return 'lead';
+  if (isLead === false) return 'not_lead';
+  return 'indefinido';
+}
 
 function mapOpportunitySummary(r: any): OpportunitySummary {
   if (!r.opportunity_latest) return { count: Number(r.opportunity_count) || 0, latest: null };
   const latest = typeof r.opportunity_latest === 'string'
     ? JSON.parse(r.opportunity_latest)
     : r.opportunity_latest;
+  // Deriva a string `qualification` de is_qualified quando presente (inclui NULL→indefinido);
+  // só cai no legado `qualification` do jsonb se is_qualified não veio (compat de deploy).
+  const isQualified = latest.is_qualified === undefined ? null : latest.is_qualified;
   return {
     count: Number(r.opportunity_count) || 0,
     latest: {
       id: Number(latest.id),
       status: latest.status,
-      qualification: latest.qualification,
+      isQualified,
+      lossReason: latest.loss_reason ?? null,
+      qualification: latest.is_qualified !== undefined ? qualificationLabel(latest.is_qualified) : latest.qualification,
       title: latest.title ?? null,
       tags: (latest.tags ?? []).map((t: any) => ({ id: Number(t.id), name: t.name, color: t.color })),
     },
@@ -112,8 +153,9 @@ export async function listThreads(pool: Pool, p: {
   params.push(p.until ?? null);
   // $13 = leadTemperature (filtro opcional; null = sem filtro)
   params.push(p.leadTemperature ?? null);
-  // $14=opp $15=oppStatus $16=oppQualification $17=oppTagId
-  params.push(p.opp ?? null, p.oppStatus ?? null, p.oppQualification ?? null, p.oppTagId ?? null);
+  // $14=opp $15=oppStatus $16=oppQualification(token is_qualified) $17=oppTagId
+  // oppQualification (alias string) é convertido pro token do predicado sobre is_qualified.
+  params.push(p.opp ?? null, p.oppStatus ?? null, oppQualificationToken(p.oppQualification), p.oppTagId ?? null);
 
   const { rows } = await pool.query(
     `WITH agg AS (
@@ -130,7 +172,7 @@ export async function listThreads(pool: Pool, p: {
      )
      SELECT a.identifier, a.last_at, a.min_created, a.count, a.last_text,
             (a.has_author OR g.jid IS NOT NULL) AS is_group,
-            (tm.is_lead = FALSE) AS not_lead,
+            tm.is_lead,
             tm.lead_stage, tm.lead_temperature, tm.lead_source, tm.disqualify_reason,
             CASE WHEN (a.has_author OR g.jid IS NOT NULL) THEN g.subject
                  -- push_name de evento fromMe é o dono do número, não o contato —
@@ -172,7 +214,9 @@ export async function listThreads(pool: Pool, p: {
          SELECT COUNT(*)::int AS opportunity_count,
                 (ARRAY_AGG(
                   jsonb_build_object(
-                    'id', o.id, 'status', o.status, 'qualification', o.qualification,
+                    'id', o.id, 'status', o.status,
+                    'is_qualified', o.is_qualified, 'loss_reason', o.loss_reason,
+                    'qualification', o.qualification,
                     'title', o.title, 'tags', COALESCE(ot.tags, '[]'::jsonb)
                   ) ORDER BY o.created_at DESC, o.id DESC
                 ))[1] AS opportunity_latest
@@ -213,7 +257,8 @@ export async function listThreads(pool: Pool, p: {
         AND ($16::text IS NULL OR EXISTS (
               SELECT 1 FROM whatsapp_opportunities oflt
                WHERE oflt.whatsapp_number_id = $1 AND oflt.identifier = a.identifier
-                 AND oflt.qualification = $16
+                 AND oflt.is_qualified IS NOT DISTINCT FROM
+                     (CASE $16 WHEN 'true' THEN TRUE WHEN 'false' THEN FALSE ELSE NULL END)
             ))
         AND ($17::bigint IS NULL OR EXISTS (
               SELECT 1 FROM whatsapp_opportunities oflt
@@ -229,7 +274,7 @@ export async function listThreads(pool: Pool, p: {
     const t: Thread = {
       identifier: r.identifier, lastAt: r.last_at.toISOString(), lastText: r.last_text, count: r.count,
       kind: r.is_group ? 'group' : 'dm', name: r.name ?? null,
-      leadStatus: r.not_lead ? 'not_lead' : 'lead',
+      leadStatus: deriveLeadStatus(r.is_lead),
       leadStage: r.lead_stage ?? null,
       leadTemperature: r.lead_temperature ?? null,
       leadSource: r.lead_source ?? null,
@@ -284,7 +329,8 @@ export type SearchHit = {
   matchCount: number;
   lastMatchAt: string;
   snippet: string;
-  leadStatus: 'lead' | 'not_lead';
+  /** Tri-state v3: 'lead' (is_lead=TRUE) · 'not_lead' (FALSE) · 'indefinido' (NULL/sem meta). */
+  leadStatus: 'lead' | 'not_lead' | 'indefinido';
   leadStage: string | null;
   leadTemperature: string | null;
   leadSource: string | null;
@@ -328,7 +374,8 @@ export async function searchThreads(pool: Pool, p: {
     p.tag ?? null,
     p.opp ?? null,
     p.oppStatus ?? null,
-    p.oppQualification ?? null,
+    // $13 = token do predicado sobre is_qualified (alias string opp_qualification convertido).
+    oppQualificationToken(p.oppQualification),
     p.oppTagId ?? null,
   ];
 
@@ -348,7 +395,7 @@ export async function searchThreads(pool: Pool, p: {
      )
      SELECT h.identifier, h.match_count, h.last_match_at, h.snippet,
             (h.has_author OR g.jid IS NOT NULL) AS is_group,
-            (tm.is_lead = FALSE) AS not_lead,
+            tm.is_lead,
             tm.lead_stage, tm.lead_temperature, tm.lead_source, tm.disqualify_reason,
             CASE WHEN (h.has_author OR g.jid IS NOT NULL) THEN g.subject
                  ELSE (SELECT w.push_name FROM webhook_logs w
@@ -372,7 +419,9 @@ export async function searchThreads(pool: Pool, p: {
          SELECT COUNT(*)::int AS opportunity_count,
                 (ARRAY_AGG(
                   jsonb_build_object(
-                    'id', o.id, 'status', o.status, 'qualification', o.qualification,
+                    'id', o.id, 'status', o.status,
+                    'is_qualified', o.is_qualified, 'loss_reason', o.loss_reason,
+                    'qualification', o.qualification,
                     'title', o.title, 'tags', COALESCE(ot.tags, '[]'::jsonb)
                   ) ORDER BY o.created_at DESC, o.id DESC
                 ))[1] AS opportunity_latest
@@ -409,7 +458,8 @@ export async function searchThreads(pool: Pool, p: {
         AND ($13::text IS NULL OR EXISTS (
               SELECT 1 FROM whatsapp_opportunities oflt
                WHERE oflt.whatsapp_number_id = $1 AND oflt.identifier = h.identifier
-                 AND oflt.qualification = $13
+                 AND oflt.is_qualified IS NOT DISTINCT FROM
+                     (CASE $13 WHEN 'true' THEN TRUE WHEN 'false' THEN FALSE ELSE NULL END)
             ))
         AND ($14::bigint IS NULL OR EXISTS (
               SELECT 1 FROM whatsapp_opportunities oflt
@@ -423,7 +473,7 @@ export async function searchThreads(pool: Pool, p: {
   const results: SearchHit[] = rows.map(r => ({
     identifier: r.identifier, kind: r.is_group ? 'group' : 'dm', name: r.name ?? null,
     matchCount: r.match_count, lastMatchAt: r.last_match_at.toISOString(), snippet: r.snippet,
-    leadStatus: r.not_lead ? 'not_lead' : 'lead',
+    leadStatus: deriveLeadStatus(r.is_lead),
     leadStage: r.lead_stage ?? null,
     leadTemperature: r.lead_temperature ?? null,
     leadSource: r.lead_source ?? null,

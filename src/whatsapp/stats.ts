@@ -26,8 +26,14 @@ import { WORKSPACE_NUMBERS } from './sql-scope.js';
 export type Stats = {
   /** Total distinct thread identifiers in scope. */
   total: number;
-  /** Lead vs not-lead thread counts (same semantics as lead-filter.ts). */
-  byLeadStatus: { lead: number; not_lead: number };
+  /**
+   * Tri-state de triagem por thread (mesma semântica de lead-filter.ts, spec v3 §2/§10):
+   *   - `lead`       = is_lead = TRUE APENAS
+   *   - `not_lead`   = is_lead = FALSE
+   *   - `indefinido` = is_lead IS NULL (não triado) OU sem row de thread_meta
+   * MUDANÇA v3: is_lead NULL NÃO conta mais como lead — virou o bucket `indefinido`.
+   */
+  byLeadStatus: { lead: number; not_lead: number; indefinido: number };
   /**
    * Threads per lead_stage value.
    * Key "null" = no stage set (IS NULL in DB).
@@ -59,16 +65,31 @@ export type Stats = {
   byIngestSource: Record<string, number>;
   /** Thread count per tag. Threads with no tags are not included. */
   byTag: Record<string, number>;
-  /** Opportunity entity counts by status (created_at in the requested window). */
+  /**
+   * Opportunity entity counts by status (created_at in the requested window).
+   * EXCLUI opps com loss_reason='nao_lead' (fora de relatórios, spec §5/§10).
+   */
   byOpportunityStatus: Record<string, number>;
-  /** Opportunity entity counts by qualification (created_at in the requested window). */
+  /**
+   * Opportunity entity counts by qualification (created_at in the requested window).
+   * CHAVES STRING derivadas de is_qualified (fonte v3): NULL→'indefinido',
+   * TRUE→'qualificado', FALSE→'desqualificado' (zero quebra nos charts). EXCLUI nao_lead.
+   */
   byQualification: Record<string, number>;
-  /** Distinct opportunity count per CRM tag. */
+  /** Distinct opportunity count per CRM tag. EXCLUI opps com loss_reason='nao_lead'. */
   byOpportunityTag: Record<string, number>;
   /**
+   * Opportunity entity counts por motivo de PERDA (status='perdido'), na janela por
+   * created_at (spec §10). Chave "null" = perda sem motivo registrado. EXCLUI o motivo
+   * de sistema 'nao_lead' (perda de cascata não-lead, fora de relatórios — spec §5/§10).
+   */
+  byLossReason: Record<string, number>;
+  /**
    * Métricas de TRIAGEM (aditivo — itens 4/5).
-   * `queue`: fila real = conversas DM marcadas como lead e ainda SEM stage (kind=dm,
-   *   is_lead NULL|TRUE, lead_stage IS NULL). Independe do filtro `kind`.
+   * `queue`: REDEFINIDA na v3 (spec §5/§10) = tamanho da coluna `novas_conversas` do board
+   *   = opps `em_andamento` de threads DM cujo is_lead IS NULL (ainda não triadas). Contada
+   *   direto em whatsapp_opportunities (grupos nunca têm opp por invariante), independe de
+   *   `kind` e da janela de período (é um snapshot vivo do board).
    * `hiddenGroups`: threads de grupo em números com expose_groups_in_mcp=FALSE — não
    *   qualificáveis, ficam FORA da fila; contadas aqui para transparência (elas inflam
    *   byStage.null e byKind.group).
@@ -180,8 +201,10 @@ export async function getStats(
   // A thread is a "group" if any message has author IS NOT NULL OR a whatsapp_groups row exists.
   //
   // byLeadStatus semantics MUST stay in sync with `leadFilterSql` in lead-filter.ts
-  // (MINOR #5): lead = no meta row (is_lead IS NULL) OR is_lead = TRUE;
-  //             not_lead = is_lead = FALSE. A change to one MUST update the other.
+  // (MINOR #5): TRI-STATE v3 — lead = is_lead = TRUE APENAS; not_lead = is_lead = FALSE;
+  //             indefinido = is_lead IS NULL (inclui thread sem meta row). A change to
+  //             one MUST update the other. (triage.queue saiu daqui na v3 — é uma query
+  //             própria em whatsapp_opportunities, ver triageQueueQuery abaixo.)
   //
   // Empty workspace → the inner subquery returns 0 rows → COUNT(*) = 0 but bare
   // SUM(...) would be NULL; COALESCE(...,0) keeps every field a number (IMPORTANT #1).
@@ -191,9 +214,9 @@ export async function getStats(
        COUNT(*) FILTER (WHERE kind_match)::int AS total,
        COALESCE(SUM(CASE WHEN is_group THEN 1 ELSE 0 END), 0)::int AS group_count,
        COALESCE(SUM(CASE WHEN NOT is_group THEN 1 ELSE 0 END), 0)::int AS dm_count,
-       COUNT(*) FILTER (WHERE kind_match AND (tm_is_lead IS NULL OR tm_is_lead = TRUE))::int AS lead_count,
+       COUNT(*) FILTER (WHERE kind_match AND tm_is_lead = TRUE)::int AS lead_count,
        COUNT(*) FILTER (WHERE kind_match AND tm_is_lead = FALSE)::int AS not_lead_count,
-       COUNT(*) FILTER (WHERE NOT is_group AND (tm_is_lead IS NULL OR tm_is_lead = TRUE) AND tm_lead_stage IS NULL)::int AS triage_queue
+       COUNT(*) FILTER (WHERE kind_match AND tm_is_lead IS NULL)::int AS indefinido_count
      FROM (
        SELECT
          a.identifier,
@@ -201,8 +224,7 @@ export async function getStats(
          ($6 = 'all'
            OR ($6 = 'dm' AND NOT (a.has_author OR g.jid IS NOT NULL))
            OR ($6 = 'group' AND (a.has_author OR g.jid IS NOT NULL))) AS kind_match,
-         tm.is_lead                           AS tm_is_lead,
-         tm.lead_stage                        AS tm_lead_stage
+         tm.is_lead                           AS tm_is_lead
          FROM (
            SELECT m.identifier,
                   bool_or(m.author IS NOT NULL) AS has_author
@@ -220,7 +242,7 @@ export async function getStats(
             LIMIT 1
          ) g ON TRUE
          LEFT JOIN LATERAL (
-           SELECT tm2.is_lead, tm2.lead_stage
+           SELECT tm2.is_lead
              FROM whatsapp_thread_meta tm2
             WHERE tm2.identifier = a.identifier
               AND tm2.whatsapp_number_id IN ${WORKSPACE_NUMBERS}
@@ -230,6 +252,31 @@ export async function getStats(
          ) tm ON TRUE
      ) sub`,
     params,
+  );
+
+  // ── (1b) triage.queue — coluna `novas_conversas` do board (spec §5/§10) ───────
+  // REDEFINIDA na v3: opps `em_andamento` de threads DM cujo is_lead IS NULL (não
+  // triadas). Query PRÓPRIA em whatsapp_opportunities — NÃO reusa threads_in_period/
+  // threads_scoped (colapsam identifier entre números). Grupos nunca têm opp por
+  // invariante, então não é preciso filtrar kind. Snapshot vivo do board: NÃO aplica
+  // a janela de período (usa só $1/$2). O LATERAL sobre thread_meta é um lookup pela
+  // PK (whatsapp_number_id, identifier) — is_lead IS NULL cobre "sem row" (LEFT JOIN
+  // devolve NULL) e is_lead explicitamente NULL.
+  const triageQueueQuery = pool.query(
+    `SELECT COUNT(*)::int AS triage_queue
+       FROM whatsapp_opportunities o
+       LEFT JOIN LATERAL (
+         SELECT tm.is_lead
+           FROM whatsapp_thread_meta tm
+          WHERE tm.whatsapp_number_id = o.whatsapp_number_id
+            AND tm.identifier = o.identifier
+          LIMIT 1
+       ) tm ON TRUE
+      WHERE o.workspace_id = $1
+        AND ($2::int IS NULL OR o.whatsapp_number_id = $2)
+        AND o.status = 'em_andamento'
+        AND tm.is_lead IS NULL`,
+    params.slice(0, 2),
   );
 
   // ── (2) byStage — per thread ──────────────────────────────────────────────
@@ -377,24 +424,35 @@ export async function getStats(
   // threads_scoped: those CTEs collapse equal identifiers across numbers. Count
   // opportunity rows directly, scoped by their authoritative workspace/number
   // and their own created_at.
+  //
+  // EXCLUSÃO nao_lead (spec §5/§10): opps perdidas por cascata não-lead
+  // (loss_reason='nao_lead') ficam FORA de todos os agregados de relatório. Filtramos
+  // com `IS DISTINCT FROM 'nao_lead'` (loss_reason NULL passa — só existe em perdas).
   const opportunityStatusQuery = pool.query(
     `SELECT o.status AS key, COUNT(*)::int AS cnt
        FROM whatsapp_opportunities o
       WHERE o.workspace_id = $1
         AND ($2::int IS NULL OR o.whatsapp_number_id = $2)
+        AND (o.loss_reason IS DISTINCT FROM 'nao_lead')
         AND ($3::timestamptz IS NULL OR o.created_at >= $3)
         AND ($4::timestamptz IS NULL OR o.created_at <= $4)
       GROUP BY o.status`,
     params.slice(0, 4),
   );
+  // byQualification deriva de is_qualified (fonte v3), MAS mantém as chaves STRING
+  // (indefinido/qualificado/desqualificado) — zero quebra nos charts da Fase 3.
   const qualificationQuery = pool.query(
-    `SELECT o.qualification AS key, COUNT(*)::int AS cnt
+    `SELECT CASE WHEN o.is_qualified IS NULL THEN 'indefinido'
+                 WHEN o.is_qualified THEN 'qualificado'
+                 ELSE 'desqualificado' END AS key,
+            COUNT(*)::int AS cnt
        FROM whatsapp_opportunities o
       WHERE o.workspace_id = $1
         AND ($2::int IS NULL OR o.whatsapp_number_id = $2)
+        AND (o.loss_reason IS DISTINCT FROM 'nao_lead')
         AND ($3::timestamptz IS NULL OR o.created_at >= $3)
         AND ($4::timestamptz IS NULL OR o.created_at <= $4)
-      GROUP BY o.qualification`,
+      GROUP BY 1`,
     params.slice(0, 4),
   );
   const opportunityTagQuery = pool.query(
@@ -404,13 +462,29 @@ export async function getStats(
        JOIN whatsapp_tags t ON t.id = ot.tag_id AND t.workspace_id = $1
       WHERE o.workspace_id = $1
         AND ($2::int IS NULL OR o.whatsapp_number_id = $2)
+        AND (o.loss_reason IS DISTINCT FROM 'nao_lead')
         AND ($3::timestamptz IS NULL OR o.created_at >= $3)
         AND ($4::timestamptz IS NULL OR o.created_at <= $4)
       GROUP BY t.id, t.name`,
     params.slice(0, 4),
   );
+  // byLossReason (novo, spec §10): distribuição das PERDAS por motivo, na janela por
+  // created_at. Chave "null" = perda sem motivo. Exclui o motivo de sistema 'nao_lead'
+  // (perda de cascata, fora de relatórios) — pelo MESMO predicado dos demais agregados.
+  const lossReasonQuery = pool.query(
+    `SELECT COALESCE(o.loss_reason, 'null') AS key, COUNT(*)::int AS cnt
+       FROM whatsapp_opportunities o
+      WHERE o.workspace_id = $1
+        AND ($2::int IS NULL OR o.whatsapp_number_id = $2)
+        AND o.status = 'perdido'
+        AND (o.loss_reason IS DISTINCT FROM 'nao_lead')
+        AND ($3::timestamptz IS NULL OR o.created_at >= $3)
+        AND ($4::timestamptz IS NULL OR o.created_at <= $4)
+      GROUP BY 1`,
+    params.slice(0, 4),
+  );
 
-  const [mainRes, stageRes, temperatureRes, sourceRes, ingestRes, tagRes, hiddenRes, opportunityStatusRes, qualificationRes, opportunityTagRes] = await Promise.all([
+  const [mainRes, stageRes, temperatureRes, sourceRes, ingestRes, tagRes, hiddenRes, triageRes, opportunityStatusRes, qualificationRes, opportunityTagRes, lossReasonRes] = await Promise.all([
     mainQuery,
     stageQuery,
     temperatureQuery,
@@ -418,14 +492,16 @@ export async function getStats(
     ingestQuery,
     tagQuery,
     hiddenGroupsQuery,
+    triageQueueQuery,
     opportunityStatusQuery,
     qualificationQuery,
     opportunityTagQuery,
+    lossReasonQuery,
   ]);
 
   // Empty workspace → mainRes still returns exactly one row of zeros (COALESCE above),
   // but guard the no-row case defensively so every field stays a number.
-  const mainRow = mainRes.rows[0] ?? { total: 0, group_count: 0, dm_count: 0, lead_count: 0, not_lead_count: 0, triage_queue: 0 };
+  const mainRow = mainRes.rows[0] ?? { total: 0, group_count: 0, dm_count: 0, lead_count: 0, not_lead_count: 0, indefinido_count: 0 };
 
   const byStage: Record<string, number> = {};
   for (const r of stageRes.rows) {
@@ -460,6 +536,7 @@ export async function getStats(
     byLeadStatus: {
       lead: Number(mainRow.lead_count) || 0,
       not_lead: Number(mainRow.not_lead_count) || 0,
+      indefinido: Number(mainRow.indefinido_count) || 0,
     },
     byStage,
     byTemperature,
@@ -473,10 +550,11 @@ export async function getStats(
     byOpportunityStatus: toRecord(opportunityStatusRes.rows),
     byQualification: toRecord(qualificationRes.rows),
     byOpportunityTag: toRecord(opportunityTagRes.rows),
+    byLossReason: toRecord(lossReasonRes.rows),
     triage: {
-      queue: Number(mainRow.triage_queue) || 0,
+      queue: Number(triageRes.rows[0]?.triage_queue) || 0,
       hiddenGroups: Number(hiddenRes.rows[0]?.hidden_groups) || 0,
-      note: "triage.queue = DMs marcadas como lead e ainda sem stage (fila real de triagem). byStage.null e byKind.group incluem grupos e não-leads — não use como tamanho de fila. hiddenGroups = grupos de números com exposição desligada (não qualificáveis, fora da fila).",
+      note: "triage.queue = coluna 'novas_conversas' do board = opps em_andamento de DMs ainda não triadas (is_lead indefinido); snapshot vivo, ignora o período. byStage.null e byKind.group incluem grupos e não-leads — não use como tamanho de fila. hiddenGroups = grupos de números com exposição desligada (não qualificáveis, fora da fila).",
     },
   };
 }

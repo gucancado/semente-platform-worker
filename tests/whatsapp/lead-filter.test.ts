@@ -6,9 +6,13 @@ import { leadFilterSql } from '../../src/whatsapp/lead-filter.js';
 test('leadFilterSql: all não filtra', () => {
   assert.equal(leadFilterSql('all'), 'TRUE');
 });
-test('leadFilterSql: lead inclui sem-linha e is_lead=true', () => {
-  assert.equal(leadFilterSql('lead'), '(tm.is_lead IS NULL OR tm.is_lead = TRUE)');
+// Tri-state v3: NULL deixou de contar como lead — lead = is_lead=TRUE APENAS.
+test('leadFilterSql: lead só is_lead=TRUE', () => {
+  assert.equal(leadFilterSql('lead'), 'tm.is_lead = TRUE');
 });
 test('leadFilterSql: not_lead só is_lead=false', () => {
   assert.equal(leadFilterSql('not_lead'), 'tm.is_lead = FALSE');
+});
+test('leadFilterSql: indefinido = sem-linha ou is_lead IS NULL', () => {
+  assert.equal(leadFilterSql('indefinido'), 'tm.is_lead IS NULL');
 });

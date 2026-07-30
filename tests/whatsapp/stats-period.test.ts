@@ -70,8 +70,10 @@ test('arrival: thread whose first msg is outside window is excluded', async () =
 
   // Only thread-B qualifies (first msg in window); thread-A's first msg is before window
   assert.equal(stats.total, 1, 'arrival: only thread-B counted');
-  assert.equal(stats.byLeadStatus.lead, 1);
+  // v3 tri-state: thread-B não tem thread_meta → is_lead NULL → 'indefinido', NÃO 'lead'.
+  assert.equal(stats.byLeadStatus.lead, 0);
   assert.equal(stats.byLeadStatus.not_lead, 0);
+  assert.equal(stats.byLeadStatus.indefinido, 1);
   assert.equal(stats.byKind.dm, 1);
 });
 
