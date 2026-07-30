@@ -171,6 +171,21 @@ export async function countOpenOpportunities(client: PoolClient, numberId: numbe
 }
 
 /**
+ * Conta oportunidades do par (número, identifier) em QUALQUER status (diferente
+ * de countOpenOpportunities, que só conta em_andamento). Recebe um PoolClient pra
+ * rodar DENTRO do lock — é a re-checagem atômica do poller de criação (Fase B):
+ * "este par nunca teve oportunidade" só é seguro de afirmar DENTRO da transação
+ * que vai inserir, senão uma corrida entre o SELECT do sweep e o lock duplicaria.
+ */
+export async function countAnyOpportunities(client: PoolClient, numberId: number, identifier: string): Promise<number> {
+  const { rows } = await client.query(
+    `SELECT COUNT(*)::int AS n FROM whatsapp_opportunities
+      WHERE whatsapp_number_id = $1 AND identifier = $2`,
+    [numberId, identifier]);
+  return Number(rows[0]?.n ?? 0);
+}
+
+/**
  * Side-effect §4.1-4.2: quando o resultado da opp é ganho/qualificado/desqualificado,
  * a thread vira lead. Faz upsert incondicional de is_lead=TRUE, mas grava no
  * whatsapp_thread_meta_log SÓ SE o valor anterior era diferente de TRUE (sem row
@@ -223,9 +238,32 @@ export async function applyThreadLeadTrue(
 export async function createOpportunityV3(pool: Pool, p: {
   numberId: number; workspaceId: string; identifier: string; title?: string | null;
   isQualified?: boolean | null; tagIds?: number[]; createdBy: string;
-}): Promise<Opportunity | null> {
+}): Promise<Opportunity | null>;
+/**
+ * Sobrecarga usada SÓ pelo poller de criação (Fase B, `opportunity-pipeline.ts`):
+ * `skipIfAnyOpportunity: true` faz o create RE-CHECAR, dentro da mesma transação/
+ * lock, se o par (número, identifier) já tem QUALQUER oportunidade (não só
+ * em_andamento — `countAnyOpportunities`) ANTES do INSERT. Se >0, devolve
+ * `{ skipped: true }` sem inserir — cobre a corrida entre o SELECT de candidatos
+ * do sweep (fora do lock) e o momento em que este create toma o lock (outro sweep,
+ * ou um humano criando manualmente, pode ter criado a opp nesse intervalo). Fora
+ * do poller NUNCA passar esta flag — um create manual (rota) pode coexistir com
+ * opps fechadas do mesmo par (reabertura é um fluxo válido).
+ */
+export async function createOpportunityV3(pool: Pool, p: {
+  numberId: number; workspaceId: string; identifier: string; title?: string | null;
+  isQualified?: boolean | null; tagIds?: number[]; createdBy: string; skipIfAnyOpportunity: true;
+}): Promise<Opportunity | null | { skipped: true }>;
+export async function createOpportunityV3(pool: Pool, p: {
+  numberId: number; workspaceId: string; identifier: string; title?: string | null;
+  isQualified?: boolean | null; tagIds?: number[]; createdBy: string; skipIfAnyOpportunity?: boolean;
+}): Promise<Opportunity | null | { skipped: true }> {
   if (p.isQualified === false) throw new OppInvariantError('invalid_value');
   return withConversationLock(pool, p.numberId, p.identifier, async (client) => {
+    if (p.skipIfAnyOpportunity) {
+      const anyCount = await countAnyOpportunities(client, p.numberId, p.identifier);
+      if (anyCount > 0) return { skipped: true };
+    }
     const isQ = p.isQualified ?? null;
     const tagNames = new Map<number, string>();
     if (p.tagIds?.length) {

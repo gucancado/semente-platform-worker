@@ -6,9 +6,14 @@
  *     qualification derivada (com fallback pra coluna legada quando is_qualified some).
  *   - resolveIsQualifiedFilter: alias tri-state qualification↔isQualified do filtro.
  *   - countOpenOpportunities: SQL shape via client fake (só em_andamento do par).
+ *   - countAnyOpportunities: idem, mas SEM filtro de status (qualquer opp do par) —
+ *     usada pela re-checagem do poller (Fase B, skipIfAnyOpportunity).
  *   - applyThreadLeadTrue: side-effect da thread — upsert is_lead=TRUE sempre, log
  *     em whatsapp_thread_meta_log SÓ SE o valor anterior era diferente de TRUE
  *     (cross-task OBRIGATÓRIA: log incondicional travaria o sticky da IA num title-edit).
+ *   - createOpportunityV3 com skipIfAnyOpportunity: a re-checagem "zero opps do par"
+ *     roda DENTRO da tx, ANTES do INSERT (Fase B, Task B1); sem a flag, comportamento
+ *     pré-existente intocado (nunca conta nada).
  *
  * opportunities.ts só importa TIPOS de 'pg' + módulos puros (opportunity-core /
  * conversation-lock), então não carrega o env do servidor — roda localmente.
@@ -20,6 +25,7 @@ import {
   mapOpportunity,
   resolveIsQualifiedFilter,
   countOpenOpportunities,
+  countAnyOpportunities,
   applyThreadLeadTrue,
   createOpportunityV3,
   deleteOpportunityV3,
@@ -122,6 +128,26 @@ test('countOpenOpportunities: sem rows → 0', async () => {
 });
 
 // =============================================================================
+// countAnyOpportunities — SQL shape (client fake), SEM filtro de status
+// =============================================================================
+
+test('countAnyOpportunities: conta QUALQUER status do par (sem filtro em status) e devolve inteiro', async () => {
+  const { client, calls } = fakeClient(() => [{ n: 4 }]);
+  const n = await countAnyOpportunities(client, 9, '+5511');
+  assert.equal(n, 4);
+  const first = calls[0]!;
+  assert.match(first.text, /FROM whatsapp_opportunities/);
+  assert.doesNotMatch(first.text, /status\s*=/, 'não filtra por status — conta em_andamento/ganho/perdido');
+  assert.match(first.text, /whatsapp_number_id = \$1 AND identifier = \$2/);
+  assert.deepEqual(first.params, [9, '+5511']);
+});
+
+test('countAnyOpportunities: sem rows → 0', async () => {
+  const { client } = fakeClient(() => []);
+  assert.equal(await countAnyOpportunities(client, 1, 'c'), 0);
+});
+
+// =============================================================================
 // applyThreadLeadTrue — upsert sempre, log só quando mudou (cross-task obrigatório)
 // =============================================================================
 
@@ -180,6 +206,77 @@ test('createOpportunityV3: isQualified=false lança invalid_value sem tocar o ba
   );
   assert.equal(connected, false, 'não deve nem abrir conexão (throw antes do lock)');
   assert.equal(calls.length, 0, 'nenhuma query — nenhum INSERT');
+});
+
+// =============================================================================
+// createOpportunityV3 com skipIfAnyOpportunity — re-checagem atômica (Fase B)
+// =============================================================================
+
+// fakePoolForCreate: connect() devolve um client cujo SELECT COUNT responde
+// `anyCount`; INSERT devolve id fixo; o SELECT final (OPP_SELECT) devolve uma row
+// mínima válida. Grava a sequência de queries do client (BEGIN/lock/count/INSERT/...).
+function fakePoolForCreate(opts: { anyCount: number }) {
+  const calls: { text: string; params: any[] }[] = [];
+  let connected = false;
+  const client = {
+    query(text: string, params: any[] = []) {
+      calls.push({ text, params });
+      if (/SELECT COUNT\(\*\)::int AS n FROM whatsapp_opportunities/.test(text)) {
+        return Promise.resolve({ rows: [{ n: opts.anyCount }], rowCount: 1 });
+      }
+      if (/INSERT INTO whatsapp_opportunities/.test(text)) {
+        return Promise.resolve({ rows: [{ id: 42 }], rowCount: 1 });
+      }
+      if (/^SELECT o\.\*/.test(text)) {
+        return Promise.resolve({
+          rows: [{
+            id: 42, identifier: 'c', title: null, status: 'em_andamento',
+            is_qualified: null, loss_reason: null, created_at: new Date(), updated_at: new Date(),
+            closed_at: null, created_by: 'system', tags: [],
+          }],
+          rowCount: 1,
+        });
+      }
+      return Promise.resolve({ rows: [], rowCount: 0 }); // BEGIN / lock / COMMIT
+    },
+    release() {},
+  };
+  const pool = { connect() { connected = true; return Promise.resolve(client); } } as any;
+  return { pool, calls, wasConnected: () => connected };
+}
+
+test('createOpportunityV3 skipIfAnyOpportunity: par já tem opportunity (qualquer status) → skip sem INSERT', async () => {
+  const { pool, calls } = fakePoolForCreate({ anyCount: 1 });
+  const result = await createOpportunityV3(pool, {
+    numberId: 9, workspaceId: 'ws', identifier: 'c', createdBy: 'system', skipIfAnyOpportunity: true,
+  });
+  assert.deepEqual(result, { skipped: true });
+  const texts = calls.map((c) => c.text);
+  assert.equal(texts.some((t) => /INSERT INTO whatsapp_opportunities/.test(t)), false,
+    'não insere quando já existe opp do par (qualquer status)');
+  const lockIdx = texts.findIndex((t) => /pg_advisory_xact_lock/.test(t));
+  const countIdx = texts.findIndex((t) => /SELECT COUNT\(\*\)::int AS n FROM whatsapp_opportunities/.test(t));
+  assert.ok(lockIdx >= 0 && lockIdx < countIdx, 'a contagem roda DEPOIS do lock, dentro da mesma tx');
+});
+
+test('createOpportunityV3 skipIfAnyOpportunity: par sem opportunity (anyCount=0) → segue e insere normalmente', async () => {
+  const { pool, calls } = fakePoolForCreate({ anyCount: 0 });
+  const result = await createOpportunityV3(pool, {
+    numberId: 9, workspaceId: 'ws', identifier: 'c', createdBy: 'system', skipIfAnyOpportunity: true,
+  });
+  assert.ok(result, 'deve devolver a opportunity criada, não null');
+  assert.equal('skipped' in result, false, 'não deve ser o retorno de skip');
+  assert.equal((result as { id: number }).id, 42);
+  assert.equal(calls.some((c) => /INSERT INTO whatsapp_opportunities/.test(c.text)), true);
+});
+
+test('createOpportunityV3 SEM skipIfAnyOpportunity: nunca conta nada, sempre insere (comportamento pré-existente intocado)', async () => {
+  const { pool, calls } = fakePoolForCreate({ anyCount: 5 }); // mesmo com opps existentes no fake
+  const result = await createOpportunityV3(pool, { numberId: 9, workspaceId: 'ws', identifier: 'c', createdBy: 'u1' });
+  assert.ok(result && !('skipped' in result));
+  assert.equal(calls.some((c) => /SELECT COUNT\(\*\)::int AS n FROM whatsapp_opportunities/.test(c.text)), false,
+    'sem a flag (uso por rota humana), a re-checagem de contagem não roda');
+  assert.equal(calls.some((c) => /INSERT INTO whatsapp_opportunities/.test(c.text)), true);
 });
 
 // =============================================================================
