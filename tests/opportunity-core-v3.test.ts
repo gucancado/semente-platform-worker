@@ -195,6 +195,131 @@ test('no-op nao gera eventos e mantem closed_at', () => {
   });
 });
 
+test('no-op status perdido numa perdida retem lossReason (ramo cur.lossReason)', () => {
+  const current: OppStateV3 = {
+    status: 'perdido',
+    isQualified: true,
+    closedAt: '2026-07-24T12:00:00.000Z',
+    title: null,
+    lossReason: 'sem_orcamento',
+  };
+
+  const result = applyOppPatchV3(current, { status: 'perdido' });
+
+  assert.deepEqual(result.events, []);
+  assert.equal(result.closedAtAction, 'keep');
+  assert.equal(result.next.lossReason, 'sem_orcamento');
+  assert.equal(result.threadLeadAction, 'keep');
+});
+
+test('marcar perdido com lossReason numa aberta (DnD para perdas)', () => {
+  const result = applyOppPatchV3(openOpportunity, {
+    status: 'perdido',
+    lossReason: 'sem_orcamento',
+  });
+
+  assert.deepEqual(result.events, [
+    { field: 'status', oldValue: 'em_andamento', newValue: 'perdido' },
+    { field: 'loss_reason', oldValue: null, newValue: 'sem_orcamento' },
+  ]);
+  assert.equal(result.closedAtAction, 'set_now');
+  assert.equal(result.threadLeadAction, 'keep');
+  assert.equal(result.next.isQualified, null);
+  assert.equal(result.next.lossReason, 'sem_orcamento');
+});
+
+test('qualificar uma perdida (sem status) mantem perdido e cascateia lead', () => {
+  const current: OppStateV3 = {
+    status: 'perdido',
+    isQualified: null,
+    closedAt: '2026-07-24T12:00:00.000Z',
+    title: null,
+    lossReason: 'sem_orcamento',
+  };
+
+  const result = applyOppPatchV3(current, { isQualified: true });
+
+  assert.equal(result.next.status, 'perdido');
+  assert.equal(result.next.isQualified, true);
+  assert.equal(result.next.lossReason, 'sem_orcamento');
+  assert.deepEqual(result.events, [
+    { field: 'qualification', oldValue: 'indefinido', newValue: 'qualificado' },
+  ]);
+  assert.equal(result.closedAtAction, 'keep');
+  assert.equal(result.threadLeadAction, 'set_true');
+});
+
+test('reabrir qualificando (status+isQualified true) nao e contraditorio', () => {
+  const current: OppStateV3 = {
+    status: 'perdido',
+    isQualified: false,
+    closedAt: '2026-07-24T12:00:00.000Z',
+    title: null,
+    lossReason: 'nao_lead',
+  };
+
+  const result = applyOppPatchV3(current, {
+    status: 'em_andamento',
+    isQualified: true,
+  });
+
+  assert.equal(result.next.status, 'em_andamento');
+  assert.equal(result.next.isQualified, true);
+  assert.equal(result.next.lossReason, null);
+  assert.equal(result.closedAtAction, 'clear');
+  assert.deepEqual(result.events, [
+    { field: 'status', oldValue: 'perdido', newValue: 'em_andamento' },
+    { field: 'qualification', oldValue: 'desqualificado', newValue: 'qualificado' },
+    { field: 'loss_reason', oldValue: 'nao_lead', newValue: null },
+  ]);
+  assert.equal(result.threadLeadAction, 'set_true');
+});
+
+test('isQualified null numa perdida desqualificada retem status e lossReason', () => {
+  const current: OppStateV3 = {
+    status: 'perdido',
+    isQualified: false,
+    closedAt: '2026-07-24T12:00:00.000Z',
+    title: null,
+    lossReason: 'nao_lead',
+  };
+
+  const result = applyOppPatchV3(current, { isQualified: null });
+
+  assert.equal(result.next.status, 'perdido');
+  assert.equal(result.next.isQualified, null);
+  assert.equal(result.next.lossReason, 'nao_lead');
+  assert.deepEqual(result.events, [
+    { field: 'qualification', oldValue: 'desqualificado', newValue: 'indefinido' },
+  ]);
+  assert.equal(result.threadLeadAction, 'keep');
+});
+
+test('mudar so o titulo numa ganha ainda cascateia lead (invariante ganho)', () => {
+  const current: OppStateV3 = {
+    status: 'ganho',
+    isQualified: true,
+    closedAt: '2026-07-24T12:00:00.000Z',
+    title: null,
+    lossReason: null,
+  };
+
+  const result = applyOppPatchV3(current, { title: 'Contrato fechado' });
+
+  assert.deepEqual(result.events, [
+    { field: 'title', oldValue: null, newValue: 'Contrato fechado' },
+  ]);
+  assert.equal(result.closedAtAction, 'keep');
+  assert.equal(result.threadLeadAction, 'set_true');
+});
+
+test('boardColumn em_andamento desqualificado e null defensivo (nao perdas)', () => {
+  assert.equal(
+    boardColumn(true, { status: 'em_andamento', isQualified: false, lossReason: null }),
+    null,
+  );
+});
+
 test('boardColumn projeta as cinco colunas e os casos fora do board', () => {
   assert.equal(
     boardColumn(null, { status: 'em_andamento', isQualified: null, lossReason: null }),
