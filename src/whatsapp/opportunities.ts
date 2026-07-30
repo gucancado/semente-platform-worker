@@ -314,8 +314,29 @@ export async function patchOpportunityV3(
   }
 }
 
-export async function deleteOpportunity(pool: Pool, id: number): Promise<void> {
-  await pool.query(`DELETE FROM whatsapp_opportunities WHERE id=$1`, [id]);
+/**
+ * Deleta a oportunidade SOB o lock da conversa (spec §4.11) — nunca fora dele:
+ * um DELETE concorrente com um patch/cascata/side-effect da mesma conversa
+ * corromperia o estado (ex.: cascadeNotLead fecharia uma opp já apagada, ou o
+ * side-effect da thread rodaria contra uma opp inexistente). Descobre o par
+ * (número, identifier) pra chave do lock, entra no lock, RE-LÊ a row dentro da
+ * transação (sumiu entre a descoberta e o lock → not_found) e só então DELETE.
+ * A FK ON DELETE CASCADE cobre eventos e tags.
+ */
+export async function deleteOpportunityV3(
+  pool: Pool, id: number,
+): Promise<{ ok: true } | { ok: false; error: 'not_found' }> {
+  const head = await pool.query(`SELECT whatsapp_number_id, identifier FROM whatsapp_opportunities WHERE id = $1`, [id]);
+  if (!head.rows[0]) return { ok: false, error: 'not_found' };
+  const numberId = Number(head.rows[0].whatsapp_number_id);
+  const identifier = String(head.rows[0].identifier);
+  return withConversationLock<{ ok: true } | { ok: false; error: 'not_found' }>(
+    pool, numberId, identifier, async (client) => {
+      const { rows } = await client.query(`SELECT 1 FROM whatsapp_opportunities WHERE id = $1`, [id]);
+      if (!rows[0]) return { ok: false, error: 'not_found' };
+      await client.query(`DELETE FROM whatsapp_opportunities WHERE id = $1`, [id]);
+      return { ok: true };
+    });
 }
 
 export async function listOpportunityEvents(pool: Pool, id: number): Promise<OpportunityEvent[]> {

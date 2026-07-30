@@ -8,7 +8,7 @@ import { tenantContext } from './tenant-context.js';
 import { OppInvariantError, type OppPatchV3 } from './opportunity-core.js';
 import {
   changeOpportunityTag, conversationExists, createOpportunityV3, decodeOpportunityCursor,
-  deleteOpportunity, getOpportunity, listOpportunities, listOpportunityEvents, patchOpportunityV3,
+  deleteOpportunityV3, getOpportunity, listOpportunities, listOpportunityEvents, patchOpportunityV3,
 } from './opportunities.js';
 import { isValidLossReason } from './loss-reasons.js';
 import { isGroupThread } from './thread-meta.js';
@@ -181,7 +181,10 @@ export function registerOpportunityRoutes(app: FastifyInstance, deps: {
     if (!req.actingUser) return reply.code(400).send({ error: 'x-acting-user required' });
     const loaded = await loadScoped(req, reply); if (!loaded) return;
     if (!await gateAdmin(req, reply, loaded.num.workspaceId, authz)) return;
-    await deleteOpportunity(deps.pool, loaded.opp.id);
+    // DELETE sob o lock da conversa (§4.11); id que sumiu entre o loadScoped e o
+    // lock → 404 (mesmo código do id inexistente que o loadScoped já devolve).
+    const result = await deleteOpportunityV3(deps.pool, loaded.opp.id);
+    if (!result.ok) return reply.code(404).send({ error: result.error });
     logAccess(deps.pool, { actor: req.actingUser, action: 'delete_opportunity', workspaceId: loaded.num.workspaceId, numberId: loaded.num.id, identifier: loaded.opp.identifier });
     return reply.send({ schema: 'whatsapp_v1', context: tenantContext(loaded.num), ok: true });
   });

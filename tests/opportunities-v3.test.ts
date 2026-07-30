@@ -22,6 +22,7 @@ import {
   countOpenOpportunities,
   applyThreadLeadTrue,
   createOpportunityV3,
+  deleteOpportunityV3,
 } from '../src/whatsapp/opportunities.js';
 import { OppInvariantError } from '../src/whatsapp/opportunity-core.js';
 
@@ -179,4 +180,70 @@ test('createOpportunityV3: isQualified=false lança invalid_value sem tocar o ba
   );
   assert.equal(connected, false, 'não deve nem abrir conexão (throw antes do lock)');
   assert.equal(calls.length, 0, 'nenhuma query — nenhum INSERT');
+});
+
+// =============================================================================
+// deleteOpportunityV3 — DELETE sob o lock da conversa (§4.11), re-lê dentro da tx
+// =============================================================================
+
+// fakePool: pool.query resolve a descoberta do par (head); connect() devolve um
+// client cujo `SELECT 1 ... WHERE id` responde conforme `rereadExists`. Grava a
+// sequência de queries do client (BEGIN/lock/re-read/DELETE/COMMIT).
+function fakePoolForDelete(opts: {
+  headRow: { whatsapp_number_id: number; identifier: string } | null; rereadExists: boolean;
+}) {
+  const clientCalls: { text: string; params: any[] }[] = [];
+  let connected = false;
+  const client = {
+    query(text: string, params: any[] = []) {
+      clientCalls.push({ text, params });
+      if (/SELECT 1 FROM whatsapp_opportunities WHERE id/.test(text)) {
+        return Promise.resolve({ rows: opts.rereadExists ? [{ '?column?': 1 }] : [], rowCount: opts.rereadExists ? 1 : 0 });
+      }
+      return Promise.resolve({ rows: [], rowCount: 0 });
+    },
+    release() {},
+  };
+  const pool = {
+    query(text: string, _params: any[] = []) {
+      if (/SELECT whatsapp_number_id, identifier FROM whatsapp_opportunities WHERE id/.test(text)) {
+        return Promise.resolve({ rows: opts.headRow ? [opts.headRow] : [], rowCount: opts.headRow ? 1 : 0 });
+      }
+      return Promise.resolve({ rows: [], rowCount: 0 });
+    },
+    connect() { connected = true; return Promise.resolve(client); },
+  } as any;
+  return { pool, clientCalls, wasConnected: () => connected };
+}
+
+const isDelete = (t: string) => /DELETE FROM whatsapp_opportunities WHERE id/.test(t);
+const isLock = (t: string) => /pg_advisory_xact_lock/.test(t);
+
+test('deleteOpportunityV3: opp inexistente → not_found sem abrir conexão (nem lock)', async () => {
+  const { pool, wasConnected } = fakePoolForDelete({ headRow: null, rereadExists: false });
+  const result = await deleteOpportunityV3(pool, 7);
+  assert.deepEqual(result, { ok: false, error: 'not_found' });
+  assert.equal(wasConnected(), false, 'não abre conexão quando o head já não acha a opp');
+});
+
+test('deleteOpportunityV3: opp presente → lock, re-lê e DELETE (nessa ordem), ok:true', async () => {
+  const { pool, clientCalls } = fakePoolForDelete({ headRow: { whatsapp_number_id: 9, identifier: '+5511' }, rereadExists: true });
+  const result = await deleteOpportunityV3(pool, 7);
+  assert.deepEqual(result, { ok: true });
+  const texts = clientCalls.map((c) => c.text);
+  assert.equal(texts[0], 'BEGIN');
+  assert.equal(texts.at(-1), 'COMMIT');
+  const lockIdx = texts.findIndex(isLock);
+  const rereadIdx = texts.findIndex((t) => /SELECT 1 FROM whatsapp_opportunities WHERE id/.test(t));
+  const delIdx = texts.findIndex(isDelete);
+  assert.ok(lockIdx >= 0 && lockIdx < rereadIdx && rereadIdx < delIdx, 'lock → re-read → DELETE');
+  // a chave do lock é `${numberId}:${identifier}` (mesma de conversation-lock.ts)
+  assert.deepEqual(clientCalls[lockIdx]!.params, ['9:+5511']);
+});
+
+test('deleteOpportunityV3: row sumiu entre a descoberta e o lock → not_found, sem DELETE', async () => {
+  const { pool, clientCalls } = fakePoolForDelete({ headRow: { whatsapp_number_id: 9, identifier: 'c' }, rereadExists: false });
+  const result = await deleteOpportunityV3(pool, 7);
+  assert.deepEqual(result, { ok: false, error: 'not_found' });
+  assert.equal(clientCalls.filter((c) => isDelete(c.text)).length, 0, 'não deleta se a re-leitura não achou a row');
 });

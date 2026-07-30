@@ -7,6 +7,11 @@
 -- NADA é dropado aqui — qualification e o CHECK opp_ganho_qualificado (049) ficam
 -- (worker v3 escreve as duas colunas durante a janela de deploy; contract fica pra Fase D).
 
+-- lock_timeout curto: se a tabela estiver sob lock no boot (ex.: coleta em curso),
+-- falha rápido em vez de segurar a janela de deploy — o runner re-tenta no próximo
+-- deploy (o runner envolve cada migration em BEGIN/COMMIT; SET LOCAL vale só p/ esta tx).
+SET LOCAL lock_timeout = '10s';
+
 -- ── Bloco 1: whatsapp_opportunities — colunas novas ───────────────────────────
 ALTER TABLE whatsapp_opportunities ADD COLUMN IF NOT EXISTS is_qualified BOOLEAN; -- NULL=indefinido TRUE=qualificado FALSE=desqualificado
 ALTER TABLE whatsapp_opportunities ADD COLUMN IF NOT EXISTS loss_reason TEXT;     -- código (sistema ou catálogo); só existe em perda
@@ -25,6 +30,49 @@ UPDATE whatsapp_opportunities
          ELSE NULL
        END
  WHERE is_qualified IS NULL AND qualification IS NOT NULL;
+
+-- ── Trigger temporário da janela expand — DROPAR no contract (Fase D) junto com a coluna ──
+-- Durante o rolling deploy o worker ANTIGO ainda escreve SÓ `qualification` (não
+-- conhece is_qualified). Sem sincronizar, um PATCH antigo (ex.: status='ganho' +
+-- qualification='qualificado' deixando is_qualified NULL) tornaria as duas colunas
+-- incoerentes: a projeção v3 (board, que lê is_qualified) veria estado errado e um
+-- 'ganho' com is_qualified NULL viola a invariante da app (→ 500). Este trigger
+-- mantém as duas colunas coerentes nos DOIS sentidos, cobrindo o worker antigo
+-- (qualification→is_qualified) e o novo (is_qualified→qualification, no-op pois já
+-- escreve as duas). Criado DEPOIS do backfill acima de propósito, pra não disparar
+-- em massa nas rows históricas (o backfill já as deixou coerentes) — spec §4.11/§12.1.
+CREATE OR REPLACE FUNCTION crm_v3_sync_qualification() RETURNS trigger AS $$
+BEGIN
+  IF TG_OP = 'INSERT' THEN
+    IF NEW.is_qualified IS NOT NULL THEN
+      -- INSERT trazendo is_qualified (worker novo) → deriva qualification.
+      NEW.qualification := CASE WHEN NEW.is_qualified THEN 'qualificado' ELSE 'desqualificado' END;
+    ELSIF NEW.qualification IS NOT NULL AND NEW.qualification <> 'indefinido' THEN
+      -- INSERT só com qualification (worker antigo, is_qualified NULL) → deriva is_qualified.
+      NEW.is_qualified := CASE NEW.qualification
+        WHEN 'qualificado' THEN TRUE WHEN 'desqualificado' THEN FALSE ELSE NULL END;
+    END IF;
+    RETURN NEW;
+  END IF;
+
+  -- UPDATE: a coluna que MUDOU dita a derivação da outra; is_qualified (fonte v3)
+  -- tem precedência quando ambas mudam no mesmo statement.
+  IF NEW.is_qualified IS DISTINCT FROM OLD.is_qualified THEN
+    NEW.qualification := CASE
+      WHEN NEW.is_qualified IS NULL THEN 'indefinido'
+      WHEN NEW.is_qualified THEN 'qualificado' ELSE 'desqualificado' END;
+  ELSIF NEW.qualification IS DISTINCT FROM OLD.qualification THEN
+    NEW.is_qualified := CASE NEW.qualification
+      WHEN 'qualificado' THEN TRUE WHEN 'desqualificado' THEN FALSE ELSE NULL END;
+  END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS crm_v3_sync_qualification_trg ON whatsapp_opportunities;
+CREATE TRIGGER crm_v3_sync_qualification_trg
+  BEFORE INSERT OR UPDATE ON whatsapp_opportunities
+  FOR EACH ROW EXECUTE FUNCTION crm_v3_sync_qualification();
 
 -- Constraints nomeadas (ADD CONSTRAINT não aceita IF NOT EXISTS) — guarda via
 -- pg_constraint, mesmo padrão de opp_ganho_qualificado na migration 049.

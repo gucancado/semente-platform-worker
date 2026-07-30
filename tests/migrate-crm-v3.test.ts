@@ -259,6 +259,7 @@ test('formatReport: modo APPLY + --workspace aparece no cabeçalho', () => {
 
 const UPSERT_RE = /INSERT INTO whatsapp_thread_meta \(/; // não casa com whatsapp_thread_meta_log (sem espaço antes do "_log")
 const LOG_RE = /INSERT INTO whatsapp_thread_meta_log/;
+const LOCK_RE = /pg_advisory_xact_lock/; // §4.11: adquirido ANTES de cada UPSERT
 
 /**
  * Fake client cujo UPSERT devolve rowCount conforme `rowCounts` (1 por par, na
@@ -293,7 +294,7 @@ const wsPlan = (pairs: WorkspaceCutoverPlan['pairs']): WorkspaceCutoverPlan => (
   needsSettings: false,
 });
 
-test('applyWorkspacePromotions: BEGIN antes do 1º UPSERT, 1 log por par promovido, COMMIT no fim', async () => {
+test('applyWorkspacePromotions: BEGIN, lock+UPSERT+log por par, COMMIT no fim (§4.11)', async () => {
   const { client, calls } = makeFakeClient([1, 1]);
   const ws = wsPlan([
     { numberId: 1, identifier: 'a', workspaceId: 'ws-a' },
@@ -305,14 +306,17 @@ test('applyWorkspacePromotions: BEGIN antes do 1º UPSERT, 1 log por par promovi
   assert.equal(promoted, 2);
   assert.equal(calls[0], 'BEGIN');
   assert.equal(calls[calls.length - 1], 'COMMIT');
+  assert.equal(calls.filter((c) => LOCK_RE.test(c)).length, 2);
   assert.equal(calls.filter((c) => UPSERT_RE.test(c)).length, 2);
   assert.equal(calls.filter((c) => LOG_RE.test(c)).length, 2);
-  // ordem: BEGIN, upsert(a), log(a), upsert(b), log(b), COMMIT
-  assert.equal(calls.length, 6);
-  assert.match(calls[1]!, UPSERT_RE);
-  assert.match(calls[2]!, LOG_RE);
-  assert.match(calls[3]!, UPSERT_RE);
-  assert.match(calls[4]!, LOG_RE);
+  // ordem: BEGIN, lock(a), upsert(a), log(a), lock(b), upsert(b), log(b), COMMIT
+  assert.equal(calls.length, 8);
+  assert.match(calls[1]!, LOCK_RE);
+  assert.match(calls[2]!, UPSERT_RE);
+  assert.match(calls[3]!, LOG_RE);
+  assert.match(calls[4]!, LOCK_RE);
+  assert.match(calls[5]!, UPSERT_RE);
+  assert.match(calls[6]!, LOG_RE);
 });
 
 test('applyWorkspacePromotions: par já promovido (rowCount 0) não gera log — idempotência dentro da transação', async () => {
@@ -323,14 +327,15 @@ test('applyWorkspacePromotions: par já promovido (rowCount 0) não gera log —
 
   assert.equal(promoted, 0);
   assert.deepEqual(
-    calls.map((c) => (c === 'BEGIN' || c === 'COMMIT' ? c : UPSERT_RE.test(c) ? 'UPSERT' : 'OTHER')),
-    ['BEGIN', 'UPSERT', 'COMMIT'],
+    calls.map((c) =>
+      c === 'BEGIN' || c === 'COMMIT' ? c : LOCK_RE.test(c) ? 'LOCK' : UPSERT_RE.test(c) ? 'UPSERT' : 'OTHER'),
+    ['BEGIN', 'LOCK', 'UPSERT', 'COMMIT'],
   );
 });
 
 test('applyWorkspacePromotions: erro a meio da transação → ROLLBACK e relança (nada fica meio-promovido)', async () => {
-  // callIndex 0=BEGIN, 1=upsert(a) ok, 2=log(a) FALHA aqui
-  const { client, calls } = makeFakeClient([1, 1], 2);
+  // callIndex 0=BEGIN, 1=lock(a), 2=upsert(a) ok, 3=log(a) FALHA aqui
+  const { client, calls } = makeFakeClient([1, 1], 3);
   const ws = wsPlan([
     { numberId: 1, identifier: 'a', workspaceId: 'ws-a' },
     { numberId: 1, identifier: 'b', workspaceId: 'ws-a' },
@@ -341,6 +346,7 @@ test('applyWorkspacePromotions: erro a meio da transação → ROLLBACK e relan�
   assert.equal(calls[0], 'BEGIN');
   assert.equal(calls[calls.length - 1], 'ROLLBACK');
   assert.ok(!calls.includes('COMMIT'));
-  // não chegou a tentar o 2º par (a exceção interrompeu o loop)
+  // adquiriu o lock e o upsert do 1º par antes de falhar; não tentou o 2º par.
+  assert.equal(calls.filter((c) => LOCK_RE.test(c)).length, 1);
   assert.equal(calls.filter((c) => UPSERT_RE.test(c)).length, 1);
 });

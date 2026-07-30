@@ -4,6 +4,7 @@ import { fetchMessages, normalizeGroupJid, canonicalJid } from '../evolution/cli
 import { extractMessageText } from '../webhook/evolution.js';
 import { getNumber } from './numbers.js';
 import { logAccess } from './access-log.js';
+import { setLeadStatus as realSetLeadStatus, LeadCascadeGanhoError } from './thread-meta.js';
 
 export type BackfillResult = { scanned: number; inserted: number; updated: number; skippedNoText: number; pages: number; reachedCutoff: boolean };
 
@@ -77,12 +78,24 @@ export async function backfillNumber(
 
 /**
  * S5: marca fragmentos de backfill (thread com exatamente 1 msg E identifier @lid
- * não-resolvido) como not_lead + tag fragmento_backfill. Só cria row se não existir
- * (humano/qualificação prévia prevalece). Idempotente. Nunca lança.
+ * não-resolvido) como not_lead + tag fragmento_backfill. Só toca pares SEM row em
+ * whatsapp_thread_meta (o `NOT EXISTS` do SELECT garante que humano/qualificação
+ * prévia prevalece). Idempotente.
+ *
+ * A marcação NÃO grava is_lead direto: roteia pelo CAMINHO CANÔNICO da triagem
+ * (`setLeadStatus`), que serializa sob o lock da conversa (§4.11), loga em
+ * whatsapp_thread_meta_log e cascateia o fechamento das oportunidades abertas
+ * (§4.8). Um fragmento que (defensivamente) tenha oportunidade GANHA não pode
+ * virar não-lead — `setLeadStatus` lança LeadCascadeGanhoError; nesse caso o par
+ * é PULADO e acumulado em `skippedGanho`, sem abortar os demais.
+ *
+ * `deps.setLeadStatus` é injetável só pra teste puro; produção usa o real.
  */
 export async function markBackfillFragments(
   pool: Pool, numberId: number, workspaceId: string, log: (m: string) => void = () => {},
-): Promise<{ marked: number }> {
+  deps: { setLeadStatus?: typeof realSetLeadStatus } = {},
+): Promise<{ marked: number; skippedGanho: string[] }> {
+  const setLeadStatus = deps.setLeadStatus ?? realSetLeadStatus;
   const { rows } = await pool.query(
     `SELECT m.identifier
        FROM messages m
@@ -94,15 +107,21 @@ export async function markBackfillFragments(
     [numberId],
   );
   let marked = 0;
+  const skippedGanho: string[] = [];
   for (const r of rows) {
     const identifier = r.identifier as string;
-    const ins = await pool.query(
-      `INSERT INTO whatsapp_thread_meta (whatsapp_number_id, identifier, is_lead, updated_by)
-       VALUES ($1, $2, FALSE, 'system:backfill')
-       ON CONFLICT (whatsapp_number_id, identifier) DO NOTHING`,
-      [numberId, identifier],
-    );
-    if ((ins.rowCount ?? 0) === 0) continue; // corrida: row surgiu entre o SELECT e o INSERT → respeita
+    try {
+      // lock por conversa + log + cascata not_lead. updatedBy preserva a proveniência
+      // (system:backfill) que o log da thread e a auditoria já esperam.
+      await setLeadStatus(pool, { numberId, identifier, isLead: false, updatedBy: 'system:backfill' });
+    } catch (err) {
+      if (err instanceof LeadCascadeGanhoError) {
+        skippedGanho.push(identifier); // fragmento com ganho não vira não-lead (§4.8)
+        log(`[backfill] fragmento pulado (possui ganho): ${identifier}`);
+        continue;
+      }
+      throw err;
+    }
     await pool.query(
       `INSERT INTO whatsapp_thread_tags (whatsapp_number_id, identifier, tag)
        VALUES ($1, $2, 'fragmento_backfill') ON CONFLICT DO NOTHING`,
@@ -112,5 +131,6 @@ export async function markBackfillFragments(
     logAccess(pool, { actor: 'system:backfill', action: 'auto_fragment', workspaceId, numberId, identifier });
   }
   if (marked) log(`[backfill] fragmentos marcados: ${marked}`);
-  return { marked };
+  if (skippedGanho.length) log(`[backfill] fragmentos pulados (possui ganho): ${skippedGanho.length}`);
+  return { marked, skippedGanho };
 }

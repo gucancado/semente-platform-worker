@@ -87,6 +87,11 @@ function makePool(opts: {
       else if (/closed_at\s*=\s*NULL/.test(text)) o.closed_at = null;
       state.updated++; return { rows: [{ id: o.id }], rowCount: 1 };
     }
+    if (/SELECT 1 FROM whatsapp_opportunities WHERE id/.test(text)) {
+      // re-leitura de existência dentro do lock (deleteOpportunityV3)
+      const o = state.opportunities.find(x => x.id === Number(params[0]));
+      return { rows: o ? [{ '?column?': 1 }] : [], rowCount: o ? 1 : 0 };
+    }
     if (/DELETE FROM whatsapp_opportunities /.test(text)) {
       const i = state.opportunities.findIndex(x => x.id === Number(params[0]));
       if (i >= 0) state.opportunities.splice(i, 1); return { rows: [], rowCount: i >= 0 ? 1 : 0 };
@@ -211,6 +216,26 @@ test('DELETE não-admin retorna 403', async () => {
   const authz = { assertMember: async () => {}, assertAdmin: async () => { throw new AuthzError('forbidden', 'FORBIDDEN'); } };
   const app = appFor(pool, authz); const res = await app.inject({ method: 'DELETE', url: '/whatsapp/opportunities/1', headers });
   assert.equal(res.statusCode, 403); await app.close();
+});
+
+test('DELETE admin remove a opp SOB o lock e responde ok', async () => {
+  const { pool, state } = makePool({ opportunities: [{ id: 1, identifier: 'a', created_at: date(1) }] });
+  const app = appFor(pool);
+  const res = await app.inject({ method: 'DELETE', url: '/whatsapp/opportunities/1', headers });
+  assert.equal(res.statusCode, 200); assert.equal(res.json().ok, true);
+  assert.equal(state.opportunities.length, 0, 'opp removida');
+  // §4.11: o DELETE ocorre DEPOIS de adquirir o advisory lock da conversa.
+  const texts = state.queries.map((x: any) => x.text);
+  const lockIdx = texts.findIndex((t: string) => /pg_advisory_xact_lock/.test(t));
+  const delIdx = texts.findIndex((t: string) => /DELETE FROM whatsapp_opportunities /.test(t));
+  assert.ok(lockIdx >= 0 && lockIdx < delIdx, 'DELETE depois do lock');
+  await app.close();
+});
+
+test('DELETE de id inexistente → 404 (comportamento preservado)', async () => {
+  const { pool } = makePool(); const app = appFor(pool);
+  const res = await app.inject({ method: 'DELETE', url: '/whatsapp/opportunities/999', headers });
+  assert.equal(res.statusCode, 404); await app.close();
 });
 
 test('GET pagina com cursor opaco', async () => {

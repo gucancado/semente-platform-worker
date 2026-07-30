@@ -208,6 +208,11 @@ export async function readCutoverInput(pool: Pool, workspace: string | null): Pr
  * foi de fato promovida (pra decidir se loga a transição).
  */
 async function promotePair(client: PoolClient, pair: PromotionCandidateRow): Promise<boolean> {
+  // §4.11: serializa com as mutações da conversa (rotas/poller) sob a MESMA chave
+  // do withConversationLock (conversation-lock.ts) — `${numberId}:${identifier}`.
+  // conversation-lock.ts não exporta helper de chave, então o formato é duplicado
+  // EXATO. xact_lock é liberado no COMMIT/ROLLBACK da transação por workspace.
+  await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`${pair.numberId}:${pair.identifier}`]);
   const res = await client.query(
     `INSERT INTO whatsapp_thread_meta (whatsapp_number_id, identifier, is_lead, updated_at, updated_by)
      VALUES ($1, $2, TRUE, NOW(), 'migration')
