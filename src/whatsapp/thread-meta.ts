@@ -1,10 +1,12 @@
 import type { Pool, PoolClient } from 'pg';
+import { withConversationLock } from './conversation-lock.js';
 
 /** Parameters shared by the single and bulk lead-triage update paths. */
 export interface LeadUpdateParams {
   numberId: number;
   identifier: string;
-  isLead: boolean;
+  /** Tri-state (v3): TRUE=lead, FALSE=não-lead, NULL=não triado (indefinido). */
+  isLead: boolean | null;
   updatedBy: string;
   source?: string | null;
   sourcePresent?: boolean;
@@ -15,17 +17,76 @@ export interface LeadUpdateParams {
 }
 
 /**
- * Apply a lead-triage update within an already-open transaction.
- * Stage, temperature and legacy thread tags are deliberately frozen.
+ * Lançada quando a triagem tenta marcar não-lead (is_lead=FALSE) numa conversa
+ * que tem oportunidade GANHA — a cascata aborta tudo (spec §4.8). O par (número,
+ * identifier) é reduzido a `identifier` aqui porque a rota já conhece o número.
+ */
+export class LeadCascadeGanhoError extends Error {
+  readonly identifier: string;
+  constructor(identifier: string) {
+    super(`possui_ganho: ${identifier}`);
+    this.name = 'LeadCascadeGanhoError';
+    this.identifier = identifier;
+  }
+}
+
+/**
+ * Representa o valor de is_lead como texto pro log (TRUE/FALSE/NULL → 'true'/'false'/null).
+ * NULL (não-triado) grava old/new_value NULL, distinto de 'true'/'false'.
+ */
+const leadLogValue = (v: boolean | null): string | null => (v === null ? null : String(v));
+
+/**
+ * Cascata não-lead (spec §4.8), DENTRO da transação do par (mesmo lock):
+ *  (a) existe opp status='ganho' → lança LeadCascadeGanhoError (nada é gravado);
+ *  (b) opps 'em_andamento' → fecha como 'perdido' / loss_reason='nao_lead' (is_qualified
+ *      e qualification INTACTAS) + 2 eventos por opp ('status' e 'loss_reason'),
+ *      changed_by='system' (a decisão humana fica no log da thread, não aqui).
+ */
+async function cascadeNotLead(client: Pick<PoolClient, 'query'>, numberId: number, identifier: string): Promise<void> {
+  const ganho = await client.query(
+    `SELECT 1 FROM whatsapp_opportunities
+      WHERE whatsapp_number_id = $1 AND identifier = $2 AND status = 'ganho' LIMIT 1`,
+    [numberId, identifier],
+  );
+  if (ganho.rows.length > 0) throw new LeadCascadeGanhoError(identifier);
+
+  const closed = await client.query<{ id: string }>(
+    `UPDATE whatsapp_opportunities
+        SET status = 'perdido', loss_reason = 'nao_lead', closed_at = NOW(), updated_at = NOW()
+      WHERE whatsapp_number_id = $1 AND identifier = $2 AND status = 'em_andamento'
+      RETURNING id`,
+    [numberId, identifier],
+  );
+  for (const row of closed.rows) {
+    await client.query(
+      `INSERT INTO whatsapp_opportunity_events (opportunity_id, field, old_value, new_value, changed_by)
+       VALUES ($1, 'status', 'em_andamento', 'perdido', 'system'),
+              ($1, 'loss_reason', NULL, 'nao_lead', 'system')`,
+      [Number(row.id)],
+    );
+  }
+}
+
+/**
+ * Aplica uma atualização de triagem dentro de uma transação já aberta (sob o lock
+ * do par — ver setLeadStatus/bulkSetLeadStatus). Stage, temperatura e tags legadas
+ * ficam congeladas. is_lead=FALSE cascateia o fechamento das oportunidades abertas.
  */
 export async function applyLeadUpdate(client: PoolClient, p: LeadUpdateParams): Promise<void> {
-  const prev = await client.query<{ is_lead: boolean }>(
+  const prev = await client.query<{ is_lead: boolean | null }>(
     `SELECT is_lead FROM whatsapp_thread_meta WHERE whatsapp_number_id = $1 AND identifier = $2`,
     [p.numberId, p.identifier],
   );
   const prevRow = prev.rows[0];
-  const oldIsLead: string | null = prevRow != null ? String(prevRow.is_lead) : null;
-  const newIsLead = String(p.isLead);
+  const prevValue: boolean | null = prevRow != null ? prevRow.is_lead : null;
+  const newValue: boolean | null = p.isLead;
+
+  // §4.8: marcar não-lead fecha as oportunidades abertas do par. Roda ANTES do
+  // upsert; opp ganha lança e o lock/transação desfaz tudo (nada gravado).
+  if (newValue === false) {
+    await cascadeNotLead(client, p.numberId, p.identifier);
+  }
 
   await client.query(
     `INSERT INTO whatsapp_thread_meta
@@ -53,30 +114,19 @@ export async function applyLeadUpdate(client: PoolClient, p: LeadUpdateParams): 
     ],
   );
 
-  // Keep the existing is_lead audit log behavior intact.
-  await client.query(
-    `INSERT INTO whatsapp_thread_meta_log (whatsapp_number_id, identifier, field, old_value, new_value, actor)
-     VALUES ($1, $2, $3, $4, $5, $6)`,
-    [p.numberId, p.identifier, 'is_lead', oldIsLead, newIsLead, p.updatedBy],
-  );
+  // Log em thread_meta_log SÓ quando o valor efetivo de is_lead mudou (NULL≠TRUE≠FALSE).
+  // Edição só de source/notes/disqualify_reason não gera row de is_lead.
+  if (prevValue !== newValue) {
+    await client.query(
+      `INSERT INTO whatsapp_thread_meta_log (whatsapp_number_id, identifier, field, old_value, new_value, actor)
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [p.numberId, p.identifier, 'is_lead', leadLogValue(prevValue), leadLogValue(newValue), p.updatedBy],
+    );
+  }
 }
 
 export async function setLeadStatus(pool: Pool, p: LeadUpdateParams): Promise<void> {
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-    await applyLeadUpdate(client, p);
-    await client.query('COMMIT');
-  } catch (err) {
-    try {
-      await client.query('ROLLBACK');
-    } catch {
-      // Preserve the original transaction error.
-    }
-    throw err;
-  } finally {
-    client.release();
-  }
+  await withConversationLock(pool, p.numberId, p.identifier, (client) => applyLeadUpdate(client, p));
 }
 
 export async function setGroupExposure(pool: Pool, p: { numberId: number; expose: boolean }): Promise<void> {

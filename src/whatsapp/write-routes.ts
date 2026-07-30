@@ -2,11 +2,11 @@
 import type { FastifyInstance } from 'fastify';
 import type { Pool } from 'pg';
 import { requirePanelToken } from './provision-routes.js';
-import { setLeadStatus } from './thread-meta.js';
+import { setLeadStatus, LeadCascadeGanhoError } from './thread-meta.js';
 import { getNumber } from './numbers.js';
 import { defaultRouteAuthz, gateAdmin, type RouteAuthz } from './route-authz.js';
 import { logAccess as defaultLogAccess, type LogAccessFn } from './access-log.js';
-import { validateLeadQualifyFields, validateDisqualifyReason, resolveLeadStatus } from './lead-qualify.js';
+import { validateLeadQualifyFields, validateDisqualifyReason, resolveLeadStatus, statusToIsLead } from './lead-qualify.js';
 import { bulkSetLeadStatus, BulkLeadIdentifierError, BULK_LEAD_MAX } from './bulk-lead.js';
 import { upsertDisqualifyReason, deactivateDisqualifyReason } from './disqualify-reasons.js';
 import { upsertSourceSignal, deactivateSourceSignal } from './source-signals.js';
@@ -80,18 +80,24 @@ export function registerWriteRoutes(
       if (!valid) return reply.code(400).send({ error: `disqualifyReason '${disqualifyReason}' não encontrado ou inativo` });
     }
 
-    await setLeadStatus(deps.pool, {
-      numberId: Number(number_id),
-      identifier: req.params.identifier,
-      isLead: effectiveStatus === 'lead',
-      updatedBy: req.actingUser,
-      source,
-      sourcePresent: hasOwn(body, 'source'),
-      disqualifyReason,
-      disqualifyReasonPresent: hasOwn(body, 'disqualifyReason'),
-      notes,
-      notesPresent: hasOwn(body, 'notes'),
-    });
+    try {
+      await setLeadStatus(deps.pool, {
+        numberId: Number(number_id),
+        identifier: req.params.identifier,
+        isLead: statusToIsLead(effectiveStatus),
+        updatedBy: req.actingUser,
+        source,
+        sourcePresent: hasOwn(body, 'source'),
+        disqualifyReason,
+        disqualifyReasonPresent: hasOwn(body, 'disqualifyReason'),
+        notes,
+        notesPresent: hasOwn(body, 'notes'),
+      });
+    } catch (err) {
+      // §4.8: não-lead com oportunidade ganha aberta → conflito, nada é gravado.
+      if (err instanceof LeadCascadeGanhoError) return reply.code(409).send({ error: 'possui_ganho' });
+      throw err;
+    }
 
     // Keep notes out of access-log metadata (free text/PII); log triage fields only.
     logAccess(deps.pool, { actor: req.actingUser, action: 'set_lead', workspaceId: num.workspaceId, numberId: Number(number_id), identifier: req.params.identifier, meta: { status: effectiveStatus, source, disqualifyReason } });
@@ -184,7 +190,7 @@ export function registerWriteRoutes(
           const st = resolveLeadStatus(u.status);
           return {
             identifier: u.identifier,
-            status: ('status' in st ? st.status : u.status) as 'lead' | 'not_lead',
+            status: ('status' in st ? st.status : u.status) as 'lead' | 'not_lead' | 'indefinido',
             source: u.source, sourcePresent: hasOwn(u, 'source'),
             disqualifyReason: u.disqualifyReason, disqualifyReasonPresent: hasOwn(u, 'disqualifyReason'),
             notes: u.notes, notesPresent: hasOwn(u, 'notes'),
@@ -193,6 +199,8 @@ export function registerWriteRoutes(
       });
     } catch (err) {
       if (err instanceof BulkLeadIdentifierError) return reply.code(400).send({ error: 'identifiers not found', unknownIdentifiers: err.unknownIdentifiers });
+      // §4.8: um item cascatearia mas tem oportunidade ganha → batch inteiro falha (rollback), nomeando o identifier.
+      if (err instanceof LeadCascadeGanhoError) return reply.code(409).send({ error: 'possui_ganho', identifier: err.identifier });
       throw err;
     }
     skipped.push(...result.skipped); // unknown_identifier (só em partial)

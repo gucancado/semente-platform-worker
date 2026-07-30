@@ -15,12 +15,13 @@
 
 import type { Pool } from 'pg';
 import { applyLeadUpdate } from './thread-meta.js';
+import { statusToIsLead, type LeadTriageStatus } from './lead-qualify.js';
 
 export const BULK_LEAD_MAX = 500;
 
 export interface BulkLeadUpdate {
   identifier: string;
-  status: 'lead' | 'not_lead';
+  status: LeadTriageStatus;
   source?: string | null;
   sourcePresent?: boolean;
   disqualifyReason?: string | null;
@@ -96,14 +97,24 @@ export async function bulkSetLeadStatus(
   // Guard: nada a aplicar → sem abrir transação.
   if (applyList.length === 0) return { updated: 0, identifiers: [], skipped };
 
+  // All-or-nothing continua em UMA transação (como hoje). O lock por conversa é
+  // um pg_advisory_xact_lock por par ADQUIRIDO DENTRO dessa transação — locks
+  // xact-scoped acumulam e liberam juntos no COMMIT/ROLLBACK. Adquire em ordem
+  // determinística (identifier asc; numberId é constante) pra não deadlockar com
+  // uma mutação single concorrente na mesma conversa. Cascata não-lead roda em
+  // applyLeadUpdate; LeadCascadeGanhoError (opp ganha) sobe → ROLLBACK → batch falha.
+  const lockOrder = [...applyList].sort((a, b) =>
+    a.identifier < b.identifier ? -1 : a.identifier > b.identifier ? 1 : 0);
+
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    for (const upd of applyList) {
+    for (const upd of lockOrder) {
+      await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`${p.numberId}:${upd.identifier}`]);
       await applyLeadUpdate(client, {
         numberId: p.numberId,
         identifier: upd.identifier,
-        isLead: upd.status === 'lead',
+        isLead: statusToIsLead(upd.status),
         updatedBy: p.updatedBy,
         source: upd.source,
         sourcePresent: upd.sourcePresent,
