@@ -18,21 +18,29 @@ export interface StickyFlags {
   tagsRemovedByHuman: string[];
 }
 
-/** Atores NÃO-humanos: cascata/criação determinística, motor de IA, migração one-off. */
-const SYSTEM_ACTORS = ['ai', 'system', 'migration'] as const;
+/** Atores NÃO-humanos: cascata/criação determinística, motor de IA, migração one-off.
+ *  Exportado (Task D4) como a lista canônica compartilhada pelos caminhos de escrita
+ *  de sistema (o aplicador do julgamento IA e afins). */
+export const SYSTEM_ACTORS = ['ai', 'system', 'migration'] as const;
 
 /**
- * Humano = `actor IS NOT NULL AND actor NOT IN ('ai','system','migration')`
- * (spec §6). NULL = legado (não trava). Escrita via MCP carrega uuid real → humana
- * → trava. Case-sensitive: os atores de sistema são sempre minúsculos.
+ * Humano = `actor IS NOT NULL AND actor NOT IN ('ai','system','migration')` E que NÃO
+ * carregue o prefixo `system:` (spec §6). NULL = legado (não trava). Escrita via MCP
+ * carrega uuid real → humana → trava. Um job determinístico pode se identificar com
+ * sufixo (`system:backfill`, `system:auto_loss`) — o prefixo `system:` é tratado como
+ * ator de sistema e NÃO trava o sticky da IA. Case-sensitive: sistema é sempre minúsculo.
  */
 export function isHumanActor(actor: string | null | undefined): boolean {
-  return actor != null && actor !== '' && !(SYSTEM_ACTORS as readonly string[]).includes(actor);
+  if (actor == null || actor === '') return false;
+  if ((SYSTEM_ACTORS as readonly string[]).includes(actor)) return false;
+  if (actor.startsWith('system:')) return false;
+  return true;
 }
 
-/** Fragmento SQL do predicado humano na coluna dada (fonte única — actor / changed_by). */
+/** Fragmento SQL do predicado humano na coluna dada (fonte única — actor / changed_by).
+ *  Espelha isHumanActor: exclui a lista fixa E o prefixo `system:`. */
 function humanActorSql(col: string): string {
-  return `${col} IS NOT NULL AND ${col} NOT IN ('ai', 'system', 'migration')`;
+  return `${col} IS NOT NULL AND ${col} NOT IN ('ai', 'system', 'migration') AND ${col} NOT LIKE 'system:%'`;
 }
 
 /**

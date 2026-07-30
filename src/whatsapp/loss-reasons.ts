@@ -1,4 +1,4 @@
-import type { Pool } from 'pg';
+import type { Pool, PoolClient } from 'pg';
 
 /** Motivos de perda selecionáveis no dropdown — constantes hardcoded, SEM row em
  *  whatsapp_loss_reasons (migration 051, spec §3.2). */
@@ -94,10 +94,14 @@ export async function countLossReasonUsage(
  * qualquer código que não bata com nenhum dos anteriores (inativo, inexistente,
  * ou de outro workspace).
  */
-export async function isValidLossReason(pool: Pool, workspaceId: string, code: string): Promise<boolean> {
+// `db` aceita Pool OU PoolClient (Pick<PoolClient,'query'>): a validação é uma leitura
+// workspace-scoped (não do par travado), então o aplicador do julgamento IA (D4) pode
+// re-validar DENTRO do seu lock passando o `client` da transação — capturando um humano
+// que desativou o motivo entre a montagem do snapshot e a aplicação.
+export async function isValidLossReason(db: Pick<PoolClient, 'query'>, workspaceId: string, code: string): Promise<boolean> {
   if (code === CASCADE_LOSS_REASON) return false;
   if (SYSTEM_CODES.has(code)) return true;
-  const { rows } = await pool.query(
+  const { rows } = await db.query(
     `SELECT 1 FROM whatsapp_loss_reasons WHERE workspace_id = $1 AND code = $2 AND active = TRUE LIMIT 1`,
     [workspaceId, code],
   );

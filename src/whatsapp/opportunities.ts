@@ -152,12 +152,37 @@ export async function conversationExists(pool: Pool, p: { numberId: number; work
   return rows[0]?.exists === true;
 }
 
-async function insertEvent(client: Pick<PoolClient, 'query'>, p: {
+// Exportada (Task D4): o aplicador do julgamento IA grava eventos (tag_added etc.) com
+// changedBy='ai' DENTRO do seu próprio lock, reusando esta escrita canônica.
+export async function insertEvent(client: Pick<PoolClient, 'query'>, p: {
   opportunityId: number; field: string; oldValue: string | null; newValue: string | null; changedBy: string;
 }) {
   await client.query(`INSERT INTO whatsapp_opportunity_events
     (opportunity_id, field, old_value, new_value, changed_by) VALUES ($1,$2,$3,$4,$5)`,
   [p.opportunityId, p.field, p.oldValue, p.newValue, p.changedBy]);
+}
+
+/**
+ * INSERT de uma opp `em_andamento` + evento `created`, DENTRO de uma transação/lock já
+ * abertos (recebe o `client`). Extraído de createOpportunityV3 (comportamento idêntico —
+ * mesmo SQL, mesmo evento) para ser reusado pelo aplicador do julgamento IA (D4,
+ * closed_action='criar_nova') SEM abrir um lock próprio: createOpportunityV3 abriria
+ * OUTRA sessão/lock (pool.connect novo) = deadlock com o lock do aplicador. NÃO faz o
+ * side-effect de thread nem tags — quem precisa (createOpportunityV3) faz depois, na
+ * mesma transação, preservando a ordem original.
+ */
+export async function insertOpportunityInTx(client: Pick<PoolClient, 'query'>, p: {
+  numberId: number; workspaceId: string; identifier: string; title?: string | null;
+  isQualified?: boolean | null; createdBy: string;
+}): Promise<number> {
+  const isQ = p.isQualified ?? null;
+  const { rows } = await client.query(`INSERT INTO whatsapp_opportunities
+    (whatsapp_number_id, workspace_id, identifier, title, status, is_qualified, created_by)
+    VALUES ($1,$2,$3,$4,'em_andamento',$5,$6) RETURNING id`,
+  [p.numberId, p.workspaceId, p.identifier, p.title ?? null, isQ, p.createdBy]);
+  const id = Number(rows[0].id);
+  await insertEvent(client, { opportunityId: id, field: 'created', oldValue: null, newValue: null, changedBy: p.createdBy });
+  return id;
 }
 
 // ---------------------------------------------------------------------------
@@ -305,12 +330,10 @@ export async function createOpportunityV3(pool: Pool, p: {
       if (tags.rows.length !== new Set(p.tagIds).size) return null;
       for (const row of tags.rows) tagNames.set(Number(row.id), String(row.name));
     }
-    const { rows } = await client.query(`INSERT INTO whatsapp_opportunities
-      (whatsapp_number_id, workspace_id, identifier, title, status, is_qualified, created_by)
-      VALUES ($1,$2,$3,$4,'em_andamento',$5,$6) RETURNING id`,
-    [p.numberId, p.workspaceId, p.identifier, p.title ?? null, isQ, p.createdBy]);
-    const id = Number(rows[0].id);
-    await insertEvent(client, { opportunityId: id, field: 'created', oldValue: null, newValue: null, changedBy: p.createdBy });
+    const id = await insertOpportunityInTx(client, {
+      numberId: p.numberId, workspaceId: p.workspaceId, identifier: p.identifier,
+      title: p.title ?? null, isQualified: isQ, createdBy: p.createdBy,
+    });
     for (const tagId of new Set(p.tagIds ?? [])) {
       await client.query(`INSERT INTO whatsapp_opportunity_tags (opportunity_id, tag_id) VALUES ($1,$2)`, [id, tagId]);
       // Timeline canônica: etiqueta inicial também é tag_added (paridade com o v2).
@@ -336,7 +359,11 @@ export async function createOpportunityV3(pool: Pool, p: {
  *  - `oppChanged`: houve UPDATE/eventos de opp (transition.events > 0);
  *  - `threadChanged`: o side-effect `set_true` do kernel realmente logou a thread.
  */
-async function applyOppPatchInTx(
+// Exportada (Task D4): o aplicador do julgamento IA reusa este aplicador de patch
+// (kernel + UPDATE + eventos + side-effect de thread) DENTRO do seu próprio lock, em vez
+// de patchOpportunityGuarded (que abriria outra sessão/lock = deadlock). Lança
+// OppInvariantError — o chamador trata no catch (skip note, sem abortar o resto).
+export async function applyOppPatchInTx(
   client: PoolClient,
   opportunityId: number,
   cur: OppStateV3,
