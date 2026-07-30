@@ -8,9 +8,19 @@
  * `em_andamento` cuja última atividade já passou de `auto_loss_days`.
  *
  * "Última atividade" = GREATEST(MAX(messages.created_at) do par, created_at da
- * própria opp). O GREATEST cobre um caso sutil: uma opp criada manualmente numa
- * conversa já dormente ganha a janela cheia a partir da PRÓPRIA criação, não do
- * histórico velho do par — senão nasceria "auto-perdível" no minuto seguinte.
+ * própria opp, `pipeline_since` do workspace). O GREATEST de 3 termos cobre 2
+ * casos sutis:
+ *   - uma opp criada manualmente numa conversa já dormente ganha a janela cheia
+ *     a partir da PRÓPRIA criação, não do histórico velho do par — senão
+ *     nasceria "auto-perdível" no minuto seguinte;
+ *   - TODA opp (incl. as ~444 migradas da v1, cujo `created_at` é o
+ *     `thread.updated_at` HISTÓRICO da era pré-CRM) ganha a janela cheia de
+ *     `auto_loss_days` contada a partir do `pipeline_since` (cutover) — sem
+ *     esse piso, o 1º tick pós-deploy fecharia em massa toda opp legada inativa
+ *     há >7d, com motivo FALSO (`lead_nao_respondeu`), já que `created_at`
+ *     sozinho é antigo demais (achado do review whole-phase). Com o piso, o
+ *     legado inativo fecha naturalmente só depois de `pipeline_since + auto_loss_days`
+ *     — comportamento desejado, não um bug.
  * Candidato também exige `is_lead IS DISTINCT FROM FALSE` (join com
  * whatsapp_thread_meta) — mesma simetria do poller de criação (B1): uma opp
  * órfã numa thread explicitamente not_lead não devia virar "perda" com motivo
@@ -89,16 +99,18 @@ export function resolveAutoLossPollIntervalMs(explicit?: number): number {
 }
 
 // Candidatos: opps em_andamento cuja última atividade (GREATEST entre a última
-// mensagem do par e o created_at da própria opp) já passou de auto_loss_days,
-// numa thread que não é explicitamente not_lead (simetria com o poller B1).
-// $1 = workspace_id, $2 = auto_loss_days. Desempate de "quem falou por último"
-// via ORDER BY created_at DESC, id DESC (2 mensagens no mesmo timestamp — o id
-// mais alto vence) dentro do ARRAY_AGG. Traz o.created_at cru (além do
-// last_activity já combinado) pra o guard do patch poder re-checar a inatividade
-// sob o lock sem precisar re-selecionar a opportunity.
+// mensagem do par, o created_at da própria opp E o pipeline_since do workspace
+// — o piso que impede o fechamento em massa do legado v1, ver doc do módulo) já
+// passou de auto_loss_days, numa thread que não é explicitamente not_lead
+// (simetria com o poller B1). $1 = workspace_id, $2 = auto_loss_days,
+// $3 = pipeline_since. Desempate de "quem falou por último" via ORDER BY
+// created_at DESC, id DESC (2 mensagens no mesmo timestamp — o id mais alto
+// vence) dentro do ARRAY_AGG. Traz o.created_at cru (além do last_activity já
+// combinado) pra o guard do patch poder re-checar a inatividade sob o lock sem
+// precisar re-selecionar a opportunity.
 const CANDIDATES_SQL = `
   SELECT o.id, o.whatsapp_number_id, o.identifier, o.created_at,
-         GREATEST(COALESCE(last.max_at, 'epoch'::timestamptz), o.created_at) AS last_activity,
+         GREATEST(COALESCE(last.max_at, 'epoch'::timestamptz), o.created_at, $3::timestamptz) AS last_activity,
          last.direction AS last_direction
     FROM whatsapp_opportunities o
     LEFT JOIN whatsapp_thread_meta tm
@@ -111,23 +123,26 @@ const CANDIDATES_SQL = `
     ) last ON TRUE
    WHERE o.workspace_id = $1 AND o.status = 'em_andamento'
      AND (tm.is_lead IS DISTINCT FROM FALSE)
-     AND GREATEST(COALESCE(last.max_at, 'epoch'::timestamptz), o.created_at) < NOW() - make_interval(days => $2)`;
+     AND GREATEST(COALESCE(last.max_at, 'epoch'::timestamptz), o.created_at, $3::timestamptz) < NOW() - make_interval(days => $2)`;
 
 /**
  * Guard do patch de auto-perda (roda DENTRO do lock, depois do re-read, antes de
- * qualquer escrita — ver doc do módulo, itens (a)/(b)). `createdAt`/`autoLossDays`
- * vêm do SELECT de candidatos (fora do lock); o guard usa `createdAt` (imutável)
- * mas RE-LÊ `MAX(messages.created_at)` fresco — é exatamente essa releitura que
- * pega uma mensagem nova chegada depois do SELECT de candidatos.
+ * qualquer escrita — ver doc do módulo, itens (a)/(b)). `createdAt`/`pipelineSince`/
+ * `autoLossDays` vêm do SELECT de candidatos e das settings do workspace (fora do
+ * lock); o guard usa `createdAt`/`pipelineSince` (imutáveis) mas RE-LÊ
+ * `MAX(messages.created_at)` fresco — é exatamente essa releitura que pega uma
+ * mensagem nova chegada depois do SELECT de candidatos. Repete o MESMO GREATEST
+ * de 3 termos da CANDIDATES_SQL (mesmo piso de pipeline_since), senão o guard e
+ * o critério de candidatura divergiriam.
  */
-function autoLossGuard(ctx: { numberId: number; identifier: string; createdAt: unknown; autoLossDays: number }): PatchGuard {
+function autoLossGuard(ctx: { numberId: number; identifier: string; createdAt: unknown; pipelineSince: unknown; autoLossDays: number }): PatchGuard {
   return async (client: PoolClient, current: OppStateV3): Promise<boolean> => {
     if (current.status !== 'em_andamento') return false; // (a) humano já fechou diferente (ex.: ganho)
     const { rows } = await client.query(
       `SELECT GREATEST(COALESCE((SELECT MAX(m.created_at) FROM messages m
-          WHERE m.whatsapp_number_id = $1 AND m.identifier = $2), 'epoch'::timestamptz), $3::timestamptz)
-         < NOW() - make_interval(days => $4) AS still_stale`,
-      [ctx.numberId, ctx.identifier, ctx.createdAt, ctx.autoLossDays],
+          WHERE m.whatsapp_number_id = $1 AND m.identifier = $2), 'epoch'::timestamptz), $3::timestamptz, $4::timestamptz)
+         < NOW() - make_interval(days => $5) AS still_stale`,
+      [ctx.numberId, ctx.identifier, ctx.createdAt, ctx.pipelineSince, ctx.autoLossDays],
     );
     return rows[0]?.still_stale === true; // (b) segue inativo mesmo com leitura fresca
   };
@@ -145,19 +160,20 @@ function autoLossGuard(ctx: { numberId: number; identifier: string; createdAt: u
 export async function runAutoLossSweep(pool: Pool): Promise<{ closed: number }> {
   let closed = 0;
   const { rows: workspaces } = await pool.query(
-    `SELECT workspace_id, auto_loss_days FROM whatsapp_workspace_settings WHERE auto_loss_days IS NOT NULL`,
+    `SELECT workspace_id, auto_loss_days, pipeline_since FROM whatsapp_workspace_settings WHERE auto_loss_days IS NOT NULL`,
   );
   for (const row of workspaces) {
     const workspaceId = String(row.workspace_id);
     const autoLossDays = Number(row.auto_loss_days);
+    const pipelineSince = row.pipeline_since;
     try {
-      const { rows: candidates } = await pool.query(CANDIDATES_SQL, [workspaceId, autoLossDays]);
+      const { rows: candidates } = await pool.query(CANDIDATES_SQL, [workspaceId, autoLossDays, pipelineSince]);
       for (const c of candidates) {
         const opportunityId = Number(c.id);
         const numberId = Number(c.whatsapp_number_id);
         const identifier = String(c.identifier);
         const lossReason = lossReasonForLastDirection(c.last_direction);
-        const guard = autoLossGuard({ numberId, identifier, createdAt: c.created_at, autoLossDays });
+        const guard = autoLossGuard({ numberId, identifier, createdAt: c.created_at, pipelineSince, autoLossDays });
         const result = await patchOpportunityGuarded(pool, opportunityId, { status: 'perdido', lossReason }, 'system', guard);
         if (result.ok) closed++;
         else if (result.error === 'conflict') console.info(`[auto-loss] opp ${opportunityId} deixou de ser candidata (workspace ${workspaceId}) — segue`);

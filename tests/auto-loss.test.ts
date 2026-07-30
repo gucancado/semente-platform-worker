@@ -4,12 +4,15 @@
  * Testes PUROS (sem Postgres nem env de servidor) do job de auto-perda por
  * inatividade (Fase B, Task B2):
  *   - lossReasonForLastDirection: mapeamento direction→motivo (3 casos, spec §6).
- *   - runAutoLossSweep: shape do SQL de candidatos (GREATEST com created_at,
+ *   - runAutoLossSweep: shape do SQL de candidatos (GREATEST de 3 termos —
+ *     created_at E pipeline_since do workspace, o piso que impede o
+ *     fechamento em massa do legado v1 migrado com created_at histórico —,
  *     desempate ORDER BY created_at DESC, id DESC, make_interval(days=>$2)) e o
- *     filtro `auto_loss_days IS NOT NULL` na query de settings; workspace sem
- *     auto_loss_days não gera query de candidatos (a própria SQL de settings já
- *     filtra); contagem `closed` end-to-end com um fake pool completo (query
- *     top-level de settings/candidatos/head do patch + connect() pro lock do
+ *     filtro `auto_loss_days IS NOT NULL` na query de settings (que agora
+ *     também traz pipeline_since); workspace sem auto_loss_days não gera query
+ *     de candidatos (a própria SQL de settings já filtra); contagem `closed`
+ *     end-to-end com um fake pool completo (query top-level de
+ *     settings/candidatos/head do patch + connect() pro lock do
  *     patchOpportunityV3); patch com {ok:false} loga warn e segue; erro num
  *     workspace loga warn e segue pros demais.
  *   - resolveAutoLossPollIntervalMs: explicit > env > default (1h).
@@ -56,8 +59,13 @@ test('lossReasonForLastDirection: par sem mensagem nenhuma (null) → lead_nao_r
 //    opportunity_id pra que o SELECT o.* (chamado ANTES e DEPOIS do UPDATE, com
 //    o MESMO texto de query) reflita o estado real, sem depender de contar
 //    chamadas por ordem. ──────────────────────────────────────────────────────
+// pipeline_since default do fixture: bem antigo, pra não interferir nos cenários
+// que não são especificamente sobre o piso (a checagem still_stale/candidatos é
+// toda mockada por opts, não recomputada a partir dessas datas).
+const DEFAULT_PIPELINE_SINCE = '2020-01-01T00:00:00Z';
+
 function fakePoolFull(opts: {
-  settingsRows: { workspace_id: string; auto_loss_days: number }[];
+  settingsRows: { workspace_id: string; auto_loss_days: number; pipeline_since?: string }[];
   candidatesByWorkspace: Record<string, { id: number; whatsapp_number_id: number; identifier: string; last_direction: string | null }[]>;
   missingOppIds?: Set<number>; // simula opp sumida entre o SELECT de candidatos e o patch → not_found
   failWorkspaces?: Set<string>;
@@ -107,7 +115,8 @@ function fakePoolFull(opts: {
     query(text: string, params: any[] = []) {
       poolCalls.push({ text, params });
       if (/FROM whatsapp_workspace_settings/.test(text)) {
-        return Promise.resolve({ rows: opts.settingsRows, rowCount: opts.settingsRows.length });
+        const rows = opts.settingsRows.map((r) => ({ pipeline_since: DEFAULT_PIPELINE_SINCE, ...r }));
+        return Promise.resolve({ rows, rowCount: rows.length });
       }
       if (/SELECT whatsapp_number_id, identifier FROM whatsapp_opportunities WHERE id = \$1/.test(text)) {
         const id = Number(params[0]);
@@ -131,30 +140,34 @@ function fakePoolFull(opts: {
 // runAutoLossSweep — shape do SQL
 // =============================================================================
 
-test('runAutoLossSweep: query de settings filtra auto_loss_days IS NOT NULL', async () => {
+test('runAutoLossSweep: query de settings filtra auto_loss_days IS NOT NULL e traz pipeline_since', async () => {
   const { pool, poolCalls } = fakePoolFull({ settingsRows: [], candidatesByWorkspace: {} });
   const result = await runAutoLossSweep(pool);
   assert.deepEqual(result, { closed: 0 });
   const settingsCall = poolCalls.find((c) => /FROM whatsapp_workspace_settings/.test(c.text));
-  assert.ok(settingsCall, 'lê workspace_id + auto_loss_days');
-  assert.match(settingsCall!.text, /SELECT workspace_id, auto_loss_days/);
+  assert.ok(settingsCall, 'lê workspace_id + auto_loss_days + pipeline_since');
+  assert.match(settingsCall!.text, /SELECT workspace_id, auto_loss_days, pipeline_since/);
   assert.match(settingsCall!.text, /WHERE auto_loss_days IS NOT NULL/);
 });
 
-test('runAutoLossSweep: query de candidatos — GREATEST com created_at, desempate created_at/id DESC, make_interval', async () => {
+test('runAutoLossSweep: query de candidatos — GREATEST de 3 termos (created_at + pipeline_since), desempate created_at/id DESC, make_interval', async () => {
   const { pool, poolCalls } = fakePoolFull({
-    settingsRows: [{ workspace_id: 'ws-1', auto_loss_days: 7 }],
+    settingsRows: [{ workspace_id: 'ws-1', auto_loss_days: 7, pipeline_since: '2026-01-01T00:00:00Z' }],
     candidatesByWorkspace: {},
   });
   await runAutoLossSweep(pool);
   const candidatesCall = poolCalls.find((c) => /FROM whatsapp_opportunities o\b/.test(c.text));
   assert.ok(candidatesCall, 'roda a query de candidatos');
-  assert.deepEqual(candidatesCall!.params, ['ws-1', 7]);
+  assert.deepEqual(candidatesCall!.params, ['ws-1', 7, '2026-01-01T00:00:00Z'], 'params: workspace_id, auto_loss_days, pipeline_since');
   assert.match(candidatesCall!.text, /LEFT JOIN LATERAL/);
-  // GREATEST aparece na lista de colunas E no WHERE — opp manual numa conversa
-  // dormente ganha janela cheia a partir do próprio created_at.
-  const greatestOccurrences = candidatesCall!.text.match(/GREATEST\(COALESCE\(last\.max_at, 'epoch'::timestamptz\), o\.created_at\)/g) ?? [];
-  assert.equal(greatestOccurrences.length, 2, 'GREATEST(...) deve aparecer no SELECT e no WHERE');
+  // GREATEST de 3 termos (last.max_at/epoch, o.created_at, $3=pipeline_since)
+  // aparece na lista de colunas E no WHERE — o piso do pipeline_since garante
+  // que TODA opp (incl. legado v1 com created_at histórico) só vira candidata
+  // depois de auto_loss_days contados a partir do cutover, nunca antes.
+  const greatestOccurrences = candidatesCall!.text.match(
+    /GREATEST\(COALESCE\(last\.max_at, 'epoch'::timestamptz\), o\.created_at, \$3::timestamptz\)/g,
+  ) ?? [];
+  assert.equal(greatestOccurrences.length, 2, 'GREATEST(...) de 3 termos deve aparecer no SELECT e no WHERE');
   assert.match(candidatesCall!.text, /ARRAY_AGG\(m\.direction ORDER BY m\.created_at DESC, m\.id DESC\)/);
   assert.match(candidatesCall!.text, /o\.status = 'em_andamento'/);
   assert.match(candidatesCall!.text, /NOW\(\) - make_interval\(days => \$2\)/);
@@ -251,6 +264,44 @@ test('runAutoLossSweep: guard (b) — mensagem nova chegou depois do SELECT de c
     assert.deepEqual(result, { closed: 0 });
     assert.equal(store.get(56).status, 'em_andamento', 'não fechou — a conversa reativou');
     assert.equal(clientCalls.some((c) => /UPDATE whatsapp_opportunities SET/.test(c.text)), false);
+  } finally {
+    console.info = originalInfo;
+  }
+});
+
+test('runAutoLossSweep: guard sob o lock repete o GREATEST de 3 termos com pipeline_since do workspace (params na ordem certa)', async () => {
+  const { pool, clientCalls, store } = fakePoolFull({
+    settingsRows: [{ workspace_id: 'ws-1', auto_loss_days: 7, pipeline_since: '2026-01-01T00:00:00Z' }],
+    candidatesByWorkspace: { 'ws-1': [{ id: 60, whatsapp_number_id: 9, identifier: 'c', last_direction: 'inbound' }] },
+  });
+  await runAutoLossSweep(pool);
+  const stillStaleCall = clientCalls.find((c) => /AS still_stale/.test(c.text));
+  assert.ok(stillStaleCall, 'o guard deve rodar o re-check sob o lock');
+  assert.match(stillStaleCall!.text, /'epoch'::timestamptz\), \$3::timestamptz, \$4::timestamptz\)/,
+    'o re-check repete o MESMO GREATEST de 3 termos da query de candidatos (mesmo piso de pipeline_since)');
+  assert.match(stillStaleCall!.text, /make_interval\(days => \$5\)/);
+  assert.equal(stillStaleCall!.params.length, 5, 'numberId, identifier, createdAt, pipelineSince, autoLossDays');
+  assert.equal(stillStaleCall!.params[3], '2026-01-01T00:00:00Z', 'pipeline_since do workspace vai no 4º param');
+  assert.equal(stillStaleCall!.params[4], 7, 'autoLossDays no 5º param');
+  assert.equal(store.get(60).status, 'perdido');
+});
+
+test('runAutoLossSweep: pipeline_since RECENTE domina o GREATEST → re-check acha not-stale → conflict/skip (mata o fechamento em massa do legado v1)', async () => {
+  const originalInfo = console.info;
+  console.info = () => {}; // comportamento já coberto no log do guard (a)
+  try {
+    const { pool, store } = fakePoolFull({
+      settingsRows: [{ workspace_id: 'ws-1', auto_loss_days: 7, pipeline_since: '2026-01-01T00:00:00Z' }],
+      candidatesByWorkspace: { 'ws-1': [{ id: 61, whatsapp_number_id: 9, identifier: 'c', last_direction: 'inbound' }] },
+      // No mundo real, um pipeline_since recente (perto de NOW()) domina o
+      // GREATEST de 3 termos e a janela de auto_loss_days ainda não fechou —
+      // aqui o fake simula esse resultado diretamente; a query real (com o
+      // GREATEST de verdade) é exercida no .db.test.ts.
+      stillStaleByOppId: { 61: false },
+    });
+    const result = await runAutoLossSweep(pool);
+    assert.deepEqual(result, { closed: 0 }, 'skip — a opp deixou de ser candidata pelo piso do pipeline_since');
+    assert.equal(store.get(61).status, 'em_andamento', 'legado com pipeline_since recente NÃO fecha em massa');
   } finally {
     console.info = originalInfo;
   }

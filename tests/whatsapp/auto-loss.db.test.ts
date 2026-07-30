@@ -27,6 +27,14 @@
  *      de corrida, reproduzida deterministicamente contra Postgres via um pool
  *      proxy que injeta a escrita "humana" no meio do fluxo) → o guard recusa,
  *      a opp CONTINUA ganha, sem eventos/clobber do sweep.
+ *   9. Fix round 2 (bloqueador do Gate B, achado do review Codex whole-phase):
+ *      opp com created_at HISTÓRICO (perfil das ~444 migradas da v1) + mensagem
+ *      antiga, mas `pipeline_since` do workspace é AGORA (cutover recente) →
+ *      NÃO fecha — o piso do pipeline_since no GREATEST de 3 termos impede o
+ *      fechamento em massa do legado logo no 1º tick pós-deploy.
+ *  10. Mesma opp (9), mas `pipeline_since` 8 dias atrás (> auto_loss_days=7) →
+ *      fecha normalmente — o piso deixa de proteger quando o próprio cutover já
+ *      passou da janela.
  */
 
 import { test, beforeEach, after } from 'node:test';
@@ -58,10 +66,18 @@ async function insertMsg(o: {
   );
 }
 
-async function insertSettings(workspaceId: string, autoLossDays: number | null): Promise<void> {
+/**
+ * `pipelineSince` default é BEM antigo (2020) pra não interferir nos cenários
+ * que não são sobre o piso do fix round 2 — nesses, o GREATEST de 3 termos é
+ * dominado pela mensagem/created_at, exatamente como antes do fix. Os 2 testes
+ * dedicados ao piso passam um `pipelineSince` explícito (recente ou 8d atrás).
+ */
+async function insertSettings(
+  workspaceId: string, autoLossDays: number | null, pipelineSince: string = '2020-01-01T00:00:00Z',
+): Promise<void> {
   await pool.query(
-    `INSERT INTO whatsapp_workspace_settings (workspace_id, auto_loss_days) VALUES ($1,$2)`,
-    [workspaceId, autoLossDays],
+    `INSERT INTO whatsapp_workspace_settings (workspace_id, auto_loss_days, pipeline_since) VALUES ($1,$2,$3)`,
+    [workspaceId, autoLossDays, pipelineSince],
   );
 }
 
@@ -221,4 +237,33 @@ test('fix round 1 (Important do review): opp marcada GANHA por um humano entre o
   );
   assert.equal(ev.rows.some((r: any) => r.field === 'loss_reason'), false,
     'o sweep não deve ter gravado loss_reason — nenhuma escrita do lado do auto-loss');
+});
+
+test('fix round 2 (bloqueador do Gate B): opp com created_at HISTÓRICO (perfil do legado v1) + pipeline_since AGORA (cutover recente) → NÃO fecha em massa', async () => {
+  await insertNumber(8, 'ws8');
+  // pipeline_since = agora: simula o cutover acontecendo no momento do deploy.
+  await insertSettings('ws8', 7, new Date().toISOString());
+  // created_at e última mensagem BEM antigos — perfil exato das ~444 opps
+  // migradas da v1 (created_at = thread.updated_at histórico da era pré-CRM).
+  await insertMsg({ numberId: 8, workspaceId: 'ws8', identifier: 'c8', createdAt: '2020-01-01T00:00:00Z', direction: 'inbound' });
+  const oppId = await insertOpportunity({ numberId: 8, workspaceId: 'ws8', identifier: 'c8', createdAt: '2020-01-01T00:00:00Z' });
+
+  const r = await runAutoLossSweep(pool);
+  assert.deepEqual(r, { closed: 0 }, 'pipeline_since recente domina o GREATEST de 3 termos — não é candidata ainda');
+  const opp = await getOpportunity(oppId);
+  assert.equal(opp.status, 'em_andamento', 'legado histórico não fecha em massa no 1º tick pós-deploy');
+});
+
+test('fix round 2: MESMA opp/mensagem históricas, mas pipeline_since 8 dias atrás (> auto_loss_days=7) → fecha normalmente', async () => {
+  await insertNumber(9, 'ws9');
+  const pipelineSince8dAgo = new Date(Date.now() - 8 * 24 * 60 * 60_000).toISOString();
+  await insertSettings('ws9', 7, pipelineSince8dAgo);
+  await insertMsg({ numberId: 9, workspaceId: 'ws9', identifier: 'c9', createdAt: '2020-01-01T00:00:00Z', direction: 'inbound' });
+  const oppId = await insertOpportunity({ numberId: 9, workspaceId: 'ws9', identifier: 'c9', createdAt: '2020-01-01T00:00:00Z' });
+
+  const r = await runAutoLossSweep(pool);
+  assert.deepEqual(r, { closed: 1 }, 'o próprio pipeline_since já passou de auto_loss_days — o piso deixa de proteger');
+  const opp = await getOpportunity(oppId);
+  assert.equal(opp.status, 'perdido');
+  assert.equal(opp.loss_reason, 'atendente_nao_respondeu'); // last_direction='inbound'
 });
