@@ -19,9 +19,10 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { listThreads, searchThreads } from '../../src/whatsapp/read-queries.js';
+import { listThreads, searchThreads, parseOppColumnCsv } from '../../src/whatsapp/read-queries.js';
 import { getStats } from '../../src/whatsapp/stats.js';
 import { getTimeseries } from '../../src/whatsapp/timeseries.js';
+import { BOARD_COLUMN_CASE_SQL } from '../../src/whatsapp/board.js';
 
 // ── pool fake: devolve `rows` fixos, grava cada chamada (text+params) ──────────
 function fakePool(handler: (text: string, params: any[]) => any[]) {
@@ -186,6 +187,91 @@ test('searchThreads: filtros opp/status/qualification/tag em $11..$14', async ()
   assert.match(text, /oflt\.is_qualified IS NOT DISTINCT FROM/);
   assert.match(text, /FROM whatsapp_opportunities o/);
   assert.match(text, /ORDER BY o\.created_at DESC, o\.id DESC/);
+});
+
+// =============================================================================
+// opp_column (Task C3, §10) — filtro multi/CSV, união, pela opp MAIS RECENTE do par
+// =============================================================================
+
+test('parseOppColumnCsv: ausente/vazio → undefined (sem filtro)', () => {
+  assert.equal(parseOppColumnCsv(undefined), undefined);
+  assert.equal(parseOppColumnCsv(''), undefined);
+  assert.equal(parseOppColumnCsv('   '), undefined);
+});
+
+test('parseOppColumnCsv: 1 valor válido → array de 1', () => {
+  assert.deepEqual(parseOppColumnCsv('ganhos'), ['ganhos']);
+});
+
+test('parseOppColumnCsv: N valores válidos (CSV, com espaços) → array', () => {
+  assert.deepEqual(parseOppColumnCsv('novas_conversas, ganhos ,perdas'), ['novas_conversas', 'ganhos', 'perdas']);
+});
+
+test('parseOppColumnCsv: array (repeated query key) também aceito', () => {
+  assert.deepEqual(parseOppColumnCsv(['interessados', 'negociacoes']), ['interessados', 'negociacoes']);
+});
+
+test('parseOppColumnCsv: valor fora do enum das 5 colunas → null (sentinela de 400)', () => {
+  assert.equal(parseOppColumnCsv('foo'), null);
+  assert.equal(parseOppColumnCsv('ganhos,bogus'), null); // 1 inválido no meio do CSV já invalida tudo
+});
+
+test('listThreads: sem opp_column → $18 é NULL, sem filtro', async () => {
+  const { pool, calls } = fakePool(() => []);
+  await listThreads(pool, { workspaceId: 'ws-1', numberId: 1, limit: 50 });
+  assert.equal(calls[0].params[17], null); // $18
+});
+
+// Extrai o bloco do LATERAL `opp_col` isolado (marcador ") opp_col ON TRUE" é
+// único no texto) — evita que a regex de shape "vaze" pro LATERAL `os`
+// pré-existente (que também tem "FROM whatsapp_opportunities o" +
+// "ORDER BY o.created_at DESC, o.id DESC" no seu próprio ARRAY_AGG).
+function oppColLateralBlock(sql: string): string {
+  const marker = ') opp_col ON TRUE';
+  const end = sql.indexOf(marker);
+  assert.ok(end > -1, 'SQL deve conter o LATERAL opp_col');
+  const start = sql.lastIndexOf('LEFT JOIN LATERAL', end);
+  assert.ok(start > -1);
+  return sql.slice(start, end + marker.length);
+}
+
+test('listThreads: opp_column casa via LATERAL da opp mais recente + BOARD_COLUMN_CASE_SQL + ANY($18)', async () => {
+  const { pool, calls } = fakePool(() => []);
+  await listThreads(pool, { workspaceId: 'ws-1', numberId: 1, limit: 50, oppColumn: ['ganhos'] });
+  const { params, text } = calls[0];
+  assert.deepEqual(params[17], ['ganhos']); // $18
+  const block = oppColLateralBlock(text);
+  // fonte única: a mesma CASE de board.ts, não uma reimplementação
+  assert.ok(block.includes(BOARD_COLUMN_CASE_SQL), 'deve reusar BOARD_COLUMN_CASE_SQL literalmente');
+  assert.match(block, /FROM whatsapp_opportunities o/);
+  // "mais recente" = created_at DESC, id DESC (canônico), num LATERAL scoped ao par (LIMIT 1)
+  assert.match(block, /ORDER BY o\.created_at DESC, o\.id DESC\s*\n\s*LIMIT 1/);
+  // união via ANY sobre o array (equivalente a IN)
+  assert.match(text, /\$18::text\[\] IS NULL OR opp_col\.opp_board_column = ANY\(\$18\)/);
+});
+
+test('listThreads: opp_column multi-valor (CSV→array) propagado intacto pro param', async () => {
+  const { pool, calls } = fakePool(() => []);
+  await listThreads(pool, { workspaceId: 'ws-1', numberId: 1, limit: 50, oppColumn: ['novas_conversas', 'ganhos', 'perdas'] });
+  assert.deepEqual(calls[0].params[17], ['novas_conversas', 'ganhos', 'perdas']);
+});
+
+test('searchThreads: sem opp_column → $15 é NULL, sem filtro', async () => {
+  const { pool, calls } = fakePool(() => []);
+  await searchThreads(pool, { workspaceId: 'ws-1', numberId: 1, query: 'x' });
+  assert.equal(calls[0].params[14], null); // $15
+});
+
+test('searchThreads: opp_column casa via LATERAL da opp mais recente + BOARD_COLUMN_CASE_SQL + ANY($15)', async () => {
+  const { pool, calls } = fakePool(() => []);
+  await searchThreads(pool, { workspaceId: 'ws-1', numberId: 1, query: 'x', oppColumn: ['interessados', 'negociacoes'] });
+  const { params, text } = calls[0];
+  assert.deepEqual(params[14], ['interessados', 'negociacoes']); // $15
+  const block = oppColLateralBlock(text);
+  assert.ok(block.includes(BOARD_COLUMN_CASE_SQL), 'deve reusar BOARD_COLUMN_CASE_SQL literalmente');
+  assert.match(block, /FROM whatsapp_opportunities o/);
+  assert.match(block, /ORDER BY o\.created_at DESC, o\.id DESC\s*\n\s*LIMIT 1/);
+  assert.match(text, /\$15::text\[\] IS NULL OR opp_col\.opp_board_column = ANY\(\$15\)/);
 });
 
 // =============================================================================

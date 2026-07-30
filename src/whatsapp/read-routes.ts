@@ -1,7 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import type { Pool } from 'pg';
 import { listNumbers, getNumber } from './numbers.js';
-import { listThreads, listThreadMessages, searchThreads } from './read-queries.js';
+import { listThreads, listThreadMessages, searchThreads, parseOppColumnCsv } from './read-queries.js';
 import { exportConversation } from './export.js';
 import { getStats } from './stats.js';
 import { getTimeseries } from './timeseries.js';
@@ -70,10 +70,13 @@ export function registerReadRoutes(
   // ── GET /whatsapp/threads ────────────────────────────────────────────────────
   // workspace_id + number_id in query; listThreads IS workspace-scoped → authz before DB.
   app.get('/whatsapp/threads', { preHandler: auth }, async (req: any, reply) => {
-    const { workspace_id, number_id, limit, cursor, kind, lead_status, lead_stage, lead_source, tag, temperature, include_first_inbound, since, until, period_basis, opp, opp_status, opp_qualification, opp_tag_id } = req.query;
+    const { workspace_id, number_id, limit, cursor, kind, lead_status, lead_stage, lead_source, tag, temperature, include_first_inbound, since, until, period_basis, opp, opp_status, opp_qualification, opp_tag_id, opp_column } = req.query;
     if (!workspace_id || !number_id) return reply.code(400).send({ error: 'workspace_id and number_id required' });
     if (Number.isNaN(Number(number_id))) return reply.code(400).send({ error: 'number_id must be numeric' });
     if (opp_tag_id !== undefined && opp_tag_id !== '' && Number.isNaN(Number(opp_tag_id))) return reply.code(400).send({ error: 'opp_tag_id must be numeric' });
+    // Task C3 (§10): `opp_column=` multi (CSV, união) — valor fora do enum das 5 colunas → 400.
+    const oppColumn = parseOppColumnCsv(opp_column);
+    if (oppColumn === null) return reply.code(400).send({ error: 'invalid opp_column' });
     const pb = emptyToUndefined(period_basis);
     if (pb !== undefined && pb !== 'arrival' && pb !== 'activity') {
       return reply.code(400).send({ error: "period_basis must be 'arrival' or 'activity'" });
@@ -100,6 +103,7 @@ export function registerReadRoutes(
       oppStatus: emptyToUndefined(opp_status),
       oppQualification: emptyToUndefined(opp_qualification),
       oppTagId: emptyToUndefined(opp_tag_id),
+      oppColumn: oppColumn ?? undefined,
     });
     const numForCtx = await getNumber(deps.pool, Number(number_id));
     const ctx = numForCtx && numForCtx.workspaceId === workspace_id
@@ -254,10 +258,13 @@ export function registerReadRoutes(
   // ── GET /whatsapp/search ─────────────────────────────────────────────────────
   // workspace_id + number_id in query; searchThreads IS workspace-scoped → authz before DB.
   app.get('/whatsapp/search', { preHandler: auth }, async (req: any, reply) => {
-    const { workspace_id, number_id, query, since, until, kind, lead_status, limit, lead_stage, lead_source, tag, opp, opp_status, opp_qualification, opp_tag_id } = req.query;
+    const { workspace_id, number_id, query, since, until, kind, lead_status, limit, lead_stage, lead_source, tag, opp, opp_status, opp_qualification, opp_tag_id, opp_column } = req.query;
     if (!workspace_id || !number_id || !query) return reply.code(400).send({ error: 'workspace_id, number_id e query required' });
     if (Number.isNaN(Number(number_id))) return reply.code(400).send({ error: 'number_id must be numeric' });
     if (opp_tag_id !== undefined && opp_tag_id !== '' && Number.isNaN(Number(opp_tag_id))) return reply.code(400).send({ error: 'opp_tag_id must be numeric' });
+    // Task C3 (§10): mesma validação de opp_column de /whatsapp/threads.
+    const oppColumn = parseOppColumnCsv(opp_column);
+    if (oppColumn === null) return reply.code(400).send({ error: 'invalid opp_column' });
     if (!await gateMember(req, reply, workspace_id, authz)) return;
     const k = kind === 'dm' || kind === 'group' ? kind : 'all';
     // Tri-state v3: 'indefinido' aceito além de lead/not_lead; qualquer outro valor → 'all'.
@@ -272,6 +279,7 @@ export function registerReadRoutes(
       oppStatus: emptyToUndefined(opp_status),
       oppQualification: emptyToUndefined(opp_qualification),
       oppTagId: emptyToUndefined(opp_tag_id),
+      oppColumn: oppColumn ?? undefined,
     });
     const numForCtx = await getNumber(deps.pool, Number(number_id));
     const ctx = numForCtx && numForCtx.workspaceId === workspace_id

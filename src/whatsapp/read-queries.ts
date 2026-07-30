@@ -2,6 +2,8 @@ import type { Pool } from 'pg';
 import { leadFilterSql, type LeadStatus } from './lead-filter.js';
 import { qualificationLabel } from './opportunity-core.js';
 import { resolveIsQualifiedFilter } from './opportunities.js';
+import type { BoardColumn } from './opportunity-core.js';
+import { BOARD_COLUMN_CASE_SQL, isBoardColumn } from './board.js';
 
 /**
  * Converte o alias string `opp_qualification` (qualificado/desqualificado/indefinido)
@@ -15,6 +17,28 @@ export function oppQualificationToken(qualification: string | undefined): string
   const isQ = resolveIsQualifiedFilter({ qualification });
   if (isQ === undefined) return null;
   return isQ === null ? 'null' : String(isQ); // true→'true' · false→'false' · null→'null'
+}
+
+/**
+ * Parseia `opp_column=` (Task C3, §10): CSV multi-valor (ex.:
+ * "novas_conversas,ganhos") ou array (repeated query key) pro array de
+ * `BoardColumn` validado — casa a conversa pela coluna do board da opp MAIS
+ * RECENTE do par (união, `= ANY`). Retorna:
+ *  - `undefined`: filtro ausente/vazio (sem filtro; whitespace-only conta como vazio).
+ *  - `BoardColumn[]`: 1+ valores válidos (trim, vazios descartados).
+ *  - `null`: SENTINELA — pelo menos um valor fora do enum das 5 colunas
+ *    (`isBoardColumn`); o caller (read-routes.ts) 400s nesse caso.
+ * Exportada p/ teste puro da conversão (mesmo padrão de `oppQualificationToken`).
+ */
+export function parseOppColumnCsv(raw: string | string[] | undefined): BoardColumn[] | undefined | null {
+  if (raw === undefined) return undefined;
+  const parts = Array.isArray(raw) ? raw : raw.split(',');
+  const values = parts.map((v) => String(v).trim()).filter(Boolean);
+  if (values.length === 0) return undefined;
+  for (const v of values) {
+    if (!isBoardColumn(v)) return null;
+  }
+  return values as BoardColumn[];
 }
 
 export type Thread = {
@@ -104,6 +128,8 @@ export async function listThreads(pool: Pool, p: {
   oppStatus?: string;
   oppQualification?: string;
   oppTagId?: string | number;
+  /** Task C3 (§10): união (CSV) de colunas do board — casa pela opp MAIS RECENTE do par. */
+  oppColumn?: BoardColumn[];
 }) {
   const cur = p.cursor ? decode(p.cursor) : null;
   const kind = p.kind ?? 'all';
@@ -156,6 +182,10 @@ export async function listThreads(pool: Pool, p: {
   // $14=opp $15=oppStatus $16=oppQualification(token is_qualified) $17=oppTagId
   // oppQualification (alias string) é convertido pro token do predicado sobre is_qualified.
   params.push(p.opp ?? null, p.oppStatus ?? null, oppQualificationToken(p.oppQualification), p.oppTagId ?? null);
+  // $18 = oppColumn (Task C3): array de BoardColumn ou null (sem filtro). Casa via
+  // LATERAL `opp_col` abaixo, que projeta a MESMA CASE (BOARD_COLUMN_CASE_SQL,
+  // fonte única de board.ts) sobre a opp mais recente do par (created_at DESC, id DESC).
+  params.push(p.oppColumn && p.oppColumn.length > 0 ? p.oppColumn : null);
 
   const { rows } = await pool.query(
     `WITH agg AS (
@@ -230,6 +260,22 @@ export async function listThreads(pool: Pool, p: {
            ) ot ON TRUE
           WHERE o.whatsapp_number_id = $1 AND o.identifier = a.identifier
        ) os ON TRUE
+       -- Task C3 (§10): board_column da opp MAIS RECENTE do par (created_at DESC, id
+       -- DESC — mesma definição de "mais recente" do LATERAL os acima), via a MESMA
+       -- CASE de board.ts (BOARD_COLUMN_CASE_SQL, fonte única). FROM próprio
+       -- (whatsapp_opportunities o + whatsapp_thread_meta tm2) espelha o BOARD_OPPS_CTE
+       -- de board.ts p/ os nomes sem prefixo (is_lead/status/is_qualified/loss_reason)
+       -- resolverem sem ambiguidade. Par sem opp → LATERAL não devolve linha →
+       -- opp_board_column NULL → nunca casa um filtro ativo (par sem opp não tem coluna).
+       LEFT JOIN LATERAL (
+         SELECT (${BOARD_COLUMN_CASE_SQL}) AS opp_board_column
+           FROM whatsapp_opportunities o
+           LEFT JOIN whatsapp_thread_meta tm2
+             ON tm2.whatsapp_number_id = o.whatsapp_number_id AND tm2.identifier = o.identifier
+          WHERE o.whatsapp_number_id = $1 AND o.identifier = a.identifier
+          ORDER BY o.created_at DESC, o.id DESC
+          LIMIT 1
+       ) opp_col ON TRUE
       WHERE ($3::timestamptz IS NULL
           OR date_trunc('milliseconds', ${orderCol}) < $3
           OR (date_trunc('milliseconds', ${orderCol}) = $3 AND a.identifier > $4))
@@ -266,6 +312,7 @@ export async function listThreads(pool: Pool, p: {
                WHERE oflt.whatsapp_number_id = $1 AND oflt.identifier = a.identifier
                  AND oft.tag_id = $17
             ))
+        AND ($18::text[] IS NULL OR opp_col.opp_board_column = ANY($18))
         ${periodFilterSql}
       ORDER BY date_trunc('milliseconds', ${orderCol}) DESC, a.identifier ASC
       LIMIT $5`,
@@ -355,6 +402,8 @@ export async function searchThreads(pool: Pool, p: {
   oppStatus?: string;
   oppQualification?: string;
   oppTagId?: string | number;
+  /** Task C3 (§10): união (CSV) de colunas do board — casa pela opp MAIS RECENTE do par. */
+  oppColumn?: BoardColumn[];
 }) {
   const kind = p.kind ?? 'all';
   const leadStatus = p.leadStatus ?? 'all';
@@ -377,6 +426,8 @@ export async function searchThreads(pool: Pool, p: {
     // $13 = token do predicado sobre is_qualified (alias string opp_qualification convertido).
     oppQualificationToken(p.oppQualification),
     p.oppTagId ?? null,
+    // $15 = oppColumn (Task C3): array de BoardColumn ou null (sem filtro).
+    p.oppColumn && p.oppColumn.length > 0 ? p.oppColumn : null,
   ];
 
   const { rows } = await pool.query(
@@ -435,6 +486,17 @@ export async function searchThreads(pool: Pool, p: {
            ) ot ON TRUE
           WHERE o.whatsapp_number_id = $1 AND o.identifier = h.identifier
        ) os ON TRUE
+       -- Task C3 (§10): mesmo LATERAL de listThreads, casando pela opp mais recente
+       -- do par via BOARD_COLUMN_CASE_SQL (fonte única de board.ts).
+       LEFT JOIN LATERAL (
+         SELECT (${BOARD_COLUMN_CASE_SQL}) AS opp_board_column
+           FROM whatsapp_opportunities o
+           LEFT JOIN whatsapp_thread_meta tm2
+             ON tm2.whatsapp_number_id = o.whatsapp_number_id AND tm2.identifier = o.identifier
+          WHERE o.whatsapp_number_id = $1 AND o.identifier = h.identifier
+          ORDER BY o.created_at DESC, o.id DESC
+          LIMIT 1
+       ) opp_col ON TRUE
       WHERE ($6 = 'all'
           OR ($6 = 'group' AND (h.has_author OR g.jid IS NOT NULL))
           OR ($6 = 'dm' AND NOT (h.has_author OR g.jid IS NOT NULL)))
@@ -467,6 +529,7 @@ export async function searchThreads(pool: Pool, p: {
                WHERE oflt.whatsapp_number_id = $1 AND oflt.identifier = h.identifier
                  AND oft.tag_id = $14
             ))
+        AND ($15::text[] IS NULL OR opp_col.opp_board_column = ANY($15))
       ORDER BY h.last_match_at DESC
       LIMIT $7`,
     params);
