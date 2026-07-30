@@ -201,6 +201,13 @@ const EnvSchema = z.object({
   FIREFLIES_IMPORT_ENABLED: z.enum(['true', 'false']).default('false').transform((v) => v === 'true'),
   // Hora LOCAL America/Sao_Paulo em que o import roda (0-23). Default ~04:00.
   FIREFLIES_IMPORT_HOUR: z.coerce.number().int().min(0).max(23).default(4),
+
+  // ── CRM WhatsApp v3 (Fase B) — kill-switch dos pollers de criação de
+  // oportunidade + auto-perda. Master switch: default ON (diferente de
+  // LUA/FIREFLIES/MEETINGS_READ, que nascem OFF) — 'false' desliga ambos os
+  // pollers no boot como resposta de emergência, sem redeploy de código. Parse
+  // ESTRITO (NÃO z.coerce.boolean — ver LUA_ENABLED acima).
+  CRM_PIPELINE_ENABLED: z.enum(['true', 'false']).default('true').transform((v) => v === 'true'),
 });
 
 export const config = EnvSchema.parse(process.env);

@@ -35,6 +35,8 @@ import { startProvisioningReaperCron } from './whatsapp/provisioning-reaper.js';
 import { startConnectionAlertSweep } from './whatsapp/connection-alerts.js';
 import { startTranscriptionPoller } from './transcription/poller.js';
 import { r2Configured } from './integrations/r2.js';
+import { startCreationPoller } from './whatsapp/opportunity-pipeline.js';
+import { startAutoLossPoller } from './whatsapp/auto-loss.js';
 
 async function main() {
   const app = Fastify({
@@ -243,6 +245,17 @@ async function main() {
     startMeetingsCollectPoller(app.log);
   } else {
     app.log.info('meetings-collect: poller NÃO iniciado (VEXA_* ausentes)');
+  }
+
+  // CRM WhatsApp v3 (Fase B): poller de criação de oportunidade + job de
+  // auto-perda por inatividade. Kill-switch CRM_PIPELINE_ENABLED (default ON) —
+  // 'false' desliga os dois no boot, sem redeploy de código.
+  if (config.CRM_PIPELINE_ENABLED) {
+    startCreationPoller(pool);
+    startAutoLossPoller(pool);
+    app.log.info('crm-pipeline: pollers de criação + auto-perda iniciados');
+  } else {
+    app.log.info('crm-pipeline: pollers NÃO iniciados (CRM_PIPELINE_ENABLED=false)');
   }
 }
 
