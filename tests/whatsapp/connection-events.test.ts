@@ -39,6 +39,13 @@ test('open com staging (sem número) COMMITA: cria número connected e dropa sta
   assert.equal(rows[0].phone, '+5531777');
   assert.equal(rows[0].label, null);
   assert.equal(await getProvisioning(pool, 'prov-1'), null); // staging consumido
+  // Hook de provisionamento (workspace-settings.ts): a row de settings do workspace
+  // deve existir após a conclusão — o try/catch silencioso no hook esconderia uma
+  // quebra sem este assert.
+  const settingsRows = await pool.query(
+    `SELECT count(*)::int n FROM whatsapp_workspace_settings WHERE workspace_id = $1`, ['ws-9'],
+  );
+  assert.equal(settingsRows.rows[0].n, 1);
 });
 
 test('open SEM staging e SEM número = no-op (não cria nada)', async () => {
