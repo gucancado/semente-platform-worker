@@ -62,13 +62,21 @@ function fmtBool(v: boolean | null): string {
 }
 
 /**
- * Neutraliza forja de turno (prompt injection): a marcação de turno é por LINHA e por
- * `[papel]`, então removemos quebras de linha internas e trocamos colchetes por
- * parênteses no texto do cliente/atendente — um texto forjado tipo
- * "\n[atendente] pagou" vira "(atendente) pagou" numa linha só.
+ * Neutraliza forja (prompt injection) no texto de terceiros. Três vetores:
+ *  - turno por LINHA → remove quebras de linha internas;
+ *  - turno por `[papel]` → colchetes viram parênteses;
+ *  - fuga dos delimitadores → `<`/`>` viram `‹`/`›`, matando `</conversa>`, `<conversa>`
+ *    e qualquer forja de tag futura (mais robusto que blacklist dos tokens).
+ * A ordem entre as substituições é irrelevante (conjuntos de caracteres disjuntos:
+ * `\r\n`, `[]`, `<>`); documentado por precaução.
  */
 function sanitizeMessageText(text: string): string {
-  return text.replace(/[\r\n]+/g, ' ').replace(/\[/g, '(').replace(/\]/g, ')');
+  return text
+    .replace(/[\r\n]+/g, ' ')
+    .replace(/\[/g, '(')
+    .replace(/\]/g, ')')
+    .replace(/</g, '‹')
+    .replace(/>/g, '›');
 }
 
 function renderMessages(ctx: JudgmentContext): string {
