@@ -136,6 +136,10 @@ test('getStats: triage.queue é query própria (opps em_andamento + is_lead IS N
   assert.match(triageCall!.text, /FROM whatsapp_opportunities o/);
   assert.match(triageCall!.text, /o\.status = 'em_andamento'/);
   assert.match(triageCall!.text, /tm\.is_lead IS NULL/);
+  // GUARD DM defensivo (§5 board é DM-only): exclui grupos pelos DOIS NOT EXISTS do
+  // detector canônico (row em whatsapp_groups pelo jid + message do par com author).
+  assert.match(triageCall!.text, /NOT EXISTS \(\s*SELECT 1 FROM whatsapp_groups g/);
+  assert.match(triageCall!.text, /NOT EXISTS \(\s*SELECT 1 FROM messages m[\s\S]*m\.author IS NOT NULL/);
   // NÃO pode reusar os CTEs de thread (colapsam identifier entre números).
   assert.doesNotMatch(triageCall!.text, /threads_in_period|threads_scoped/);
   // snapshot vivo do board: usa só [workspace, número], ignora a janela de período.

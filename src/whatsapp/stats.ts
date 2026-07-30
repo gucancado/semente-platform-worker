@@ -257,11 +257,16 @@ export async function getStats(
   // ── (1b) triage.queue — coluna `novas_conversas` do board (spec §5/§10) ───────
   // REDEFINIDA na v3: opps `em_andamento` de threads DM cujo is_lead IS NULL (não
   // triadas). Query PRÓPRIA em whatsapp_opportunities — NÃO reusa threads_in_period/
-  // threads_scoped (colapsam identifier entre números). Grupos nunca têm opp por
-  // invariante, então não é preciso filtrar kind. Snapshot vivo do board: NÃO aplica
-  // a janela de período (usa só $1/$2). O LATERAL sobre thread_meta é um lookup pela
-  // PK (whatsapp_number_id, identifier) — is_lead IS NULL cobre "sem row" (LEFT JOIN
-  // devolve NULL) e is_lead explicitamente NULL.
+  // threads_scoped (colapsam identifier entre números). Snapshot vivo do board: NÃO
+  // aplica a janela de período (usa só $1/$2). O LATERAL sobre thread_meta é um lookup
+  // pela PK (whatsapp_number_id, identifier) — is_lead IS NULL cobre "sem row" (LEFT
+  // JOIN devolve NULL) e is_lead explicitamente NULL.
+  //
+  // GUARD DM DEFENSIVO (§5 = board é DM-only): filtra grupos pelo MESMO detector
+  // canônico de stats/threads — grupo = row em whatsapp_groups pelo jid OU alguma
+  // message do par com author IS NOT NULL. Não dependemos da invariante "grupo não
+  // tem opp" (o guard grupo→400 no POST só chega na Task 8; hoje uma opp de grupo
+  // pode existir por criação manual e inflaria a fila vs o board DM-only).
   const triageQueueQuery = pool.query(
     `SELECT COUNT(*)::int AS triage_queue
        FROM whatsapp_opportunities o
@@ -275,7 +280,16 @@ export async function getStats(
       WHERE o.workspace_id = $1
         AND ($2::int IS NULL OR o.whatsapp_number_id = $2)
         AND o.status = 'em_andamento'
-        AND tm.is_lead IS NULL`,
+        AND tm.is_lead IS NULL
+        AND NOT EXISTS (
+          SELECT 1 FROM whatsapp_groups g
+           WHERE g.whatsapp_number_id = o.whatsapp_number_id AND g.jid = o.identifier
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM messages m
+           WHERE m.whatsapp_number_id = o.whatsapp_number_id AND m.identifier = o.identifier
+             AND m.author IS NOT NULL
+        )`,
     params.slice(0, 2),
   );
 

@@ -19,14 +19,16 @@ beforeEach(async () => {
   // DM not_lead sem opp aberta → NÃO conta (não é indefinido)
   await pool.query(`INSERT INTO messages (whatsapp_number_id, workspace_id, channel, identifier, direction, text, created_at) VALUES (1,'ws','whatsapp','dm_nl','inbound','oi',NOW())`);
   await pool.query(`INSERT INTO whatsapp_thread_meta (whatsapp_number_id, identifier, is_lead) VALUES (1,'dm_nl',FALSE)`);
-  // GRUPO (tem author) → grupos nunca têm opp; conta em hiddenGroups (exposição off)
+  // GRUPO (tem author) indefinido COM opp em_andamento (criação manual, hoje possível) →
+  // NÃO conta na fila: o board é DM-only (guard DM defensivo). Também entra em hiddenGroups.
   await pool.query(`INSERT INTO messages (whatsapp_number_id, workspace_id, channel, identifier, direction, text, author, created_at) VALUES (1,'ws','whatsapp','g1@g.us','inbound','oi','+55autor',NOW())`);
+  await pool.query(`INSERT INTO whatsapp_opportunities (whatsapp_number_id, workspace_id, identifier, status, created_by) VALUES (1,'ws','g1@g.us','em_andamento','test')`);
 });
 after(() => pool.end());
 
-test('triage.queue = opps em_andamento de DMs indefinidas (novas_conversas); hiddenGroups conta grupo de número com exposição off', async () => {
+test('triage.queue = opps em_andamento de DMs indefinidas (novas_conversas); grupo com opp NÃO conta; hiddenGroups conta grupo de número com exposição off', async () => {
   const stats = await getStats(pool, { workspaceId: 'ws' });
-  assert.equal(stats.triage.queue, 1, 'só a opp de dm_novo (is_lead NULL)');
+  assert.equal(stats.triage.queue, 1, 'só a opp de dm_novo (is_lead NULL); a opp do grupo g1 é excluída pelo guard DM');
   assert.equal(stats.triage.hiddenGroups, 1, 'g1@g.us em número com exposição off');
   assert.ok(typeof stats.triage.note === 'string' && stats.triage.note.length > 0);
   // sanidade: buckets de thread permanecem
