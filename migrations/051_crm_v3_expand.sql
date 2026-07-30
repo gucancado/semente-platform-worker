@@ -51,6 +51,14 @@ BEGIN
       -- INSERT só com qualification (worker antigo, is_qualified NULL) → deriva is_qualified.
       NEW.is_qualified := CASE NEW.qualification
         WHEN 'qualificado' THEN TRUE WHEN 'desqualificado' THEN FALSE ELSE NULL END;
+      -- worker v2 na janela: desqualificar via coluna legada (is_qualified→FALSE)
+      -- fecha a opp como perdida (espelha §4.3 do kernel + o fix-dirty da 051),
+      -- senão o CHECK opp_v3_desqualificado_perdido dispara 23514. Só neste ramo
+      -- DERIVADO (worker antigo); o ramo com is_qualified explícito é o kernel v3.
+      IF NEW.is_qualified = FALSE AND NEW.status <> 'perdido' THEN
+        NEW.status := 'perdido';
+        NEW.closed_at := COALESCE(NEW.closed_at, NOW());
+      END IF;
     END IF;
     RETURN NEW;
   END IF;
@@ -64,6 +72,14 @@ BEGIN
   ELSIF NEW.qualification IS DISTINCT FROM OLD.qualification THEN
     NEW.is_qualified := CASE NEW.qualification
       WHEN 'qualificado' THEN TRUE WHEN 'desqualificado' THEN FALSE ELSE NULL END;
+    -- worker v2 na janela: desqualificar opp ABERTA via coluna legada
+    -- (is_qualified→FALSE) fecha como perdida (§4.3 do kernel + fix-dirty da 051),
+    -- senão o CHECK opp_v3_desqualificado_perdido dispara 23514. Só neste ramo
+    -- DERIVADO; quando is_qualified vem explícito (acima) é o kernel v3, intocado.
+    IF NEW.is_qualified = FALSE AND NEW.status <> 'perdido' THEN
+      NEW.status := 'perdido';
+      NEW.closed_at := COALESCE(NEW.closed_at, NOW());
+    END IF;
   END IF;
   RETURN NEW;
 END;
