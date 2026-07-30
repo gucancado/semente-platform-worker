@@ -160,7 +160,8 @@ test('runAutoLossSweep: query de candidatos — GREATEST de 3 termos (created_at
   await runAutoLossSweep(pool);
   const candidatesCall = poolCalls.find((c) => /FROM whatsapp_opportunities o\b/.test(c.text));
   assert.ok(candidatesCall, 'roda a query de candidatos');
-  assert.deepEqual(candidatesCall!.params, ['ws-1', 7, '2026-01-01T00:00:00Z'], 'params: workspace_id, auto_loss_days, pipeline_since');
+  assert.deepEqual(candidatesCall!.params, ['ws-1', 7, '2026-01-01T00:00:00Z', false],
+    'params: workspace_id, auto_loss_days, pipeline_since, ai_engine_enabled');
   assert.match(candidatesCall!.text, /LEFT JOIN LATERAL/);
   // GREATEST de 3 termos (last.max_at/epoch, o.created_at, $3=pipeline_since)
   // aparece na lista de colunas E no WHERE — o piso do pipeline_since garante
@@ -177,6 +178,20 @@ test('runAutoLossSweep: query de candidatos — GREATEST de 3 termos (created_at
   // não vira "perda" com motivo.
   assert.match(candidatesCall!.text, /LEFT JOIN whatsapp_thread_meta tm/);
   assert.match(candidatesCall!.text, /tm\.is_lead IS DISTINCT FROM FALSE/);
+  // Fase D (Task D5): exclusão de não-triados onde a IA vai triar.
+  assert.match(candidatesCall!.text, /NOT \(\$4::boolean AND tm\.is_lead IS NULL\)/);
+});
+
+test('runAutoLossSweep: workspace com IA habilitada → ai_engine_enabled=true vai no $4 da query de candidatos (não fecha não-triado)', async () => {
+  const { pool, poolCalls } = fakePoolFull({
+    settingsRows: [{ workspace_id: 'ws-ai', auto_loss_days: 7, ai_engine_enabled: true } as any],
+    candidatesByWorkspace: {},
+  });
+  await runAutoLossSweep(pool);
+  const settingsCall = poolCalls.find((c) => /FROM whatsapp_workspace_settings/.test(c.text));
+  assert.match(settingsCall!.text, /ai_engine_enabled/, 'a query de settings passa a trazer ai_engine_enabled');
+  const candidatesCall = poolCalls.find((c) => /FROM whatsapp_opportunities o\b/.test(c.text));
+  assert.equal(candidatesCall!.params[3], true, 'ai_engine_enabled=true propaga como $4');
 });
 
 test('runAutoLossSweep: workspace sem auto_loss_days não gera query de candidatos (filtro já é da SQL de settings)', async () => {

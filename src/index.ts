@@ -38,6 +38,8 @@ import { startTranscriptionPoller } from './transcription/poller.js';
 import { r2Configured } from './integrations/r2.js';
 import { startCreationPoller } from './whatsapp/opportunity-pipeline.js';
 import { startAutoLossPoller } from './whatsapp/auto-loss.js';
+import { startJudgmentRunner } from './whatsapp/ai-judgment-runner.js';
+import { OpenAIJudgmentLlm } from './whatsapp/ai-llm.js';
 
 async function main() {
   const app = Fastify({
@@ -257,6 +259,17 @@ async function main() {
     startCreationPoller(pool);
     startAutoLossPoller(pool);
     app.log.info('crm-pipeline: pollers de criação + auto-perda iniciados');
+
+    // Runner do julgamento IA nível 1 (Fase D): tick horário + gate de janela
+    // 03:00–04:00 BRT. Só sobe com OPENAI_API_KEY (mesma chave da transcrição);
+    // sem ela, o motor de IA fica desligado sem quebrar o boot dos demais pollers.
+    if (config.OPENAI_API_KEY) {
+      const provider = new OpenAIJudgmentLlm({ apiKey: config.OPENAI_API_KEY, model: config.CRM_AI_MODEL });
+      startJudgmentRunner(pool, provider, { log: app.log });
+      app.log.info({ model: config.CRM_AI_MODEL }, 'crm-ai-judgment: runner iniciado (janela 03:00–04:00 BRT)');
+    } else {
+      app.log.info('crm-ai-judgment: runner NÃO iniciado (OPENAI_API_KEY ausente)');
+    }
   } else {
     app.log.info('crm-pipeline: pollers NÃO iniciados (CRM_PIPELINE_ENABLED=false)');
   }

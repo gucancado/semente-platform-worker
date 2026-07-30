@@ -208,6 +208,13 @@ const EnvSchema = z.object({
   // pollers no boot como resposta de emergência, sem redeploy de código. Parse
   // ESTRITO (NÃO z.coerce.boolean — ver LUA_ENABLED acima).
   CRM_PIPELINE_ENABLED: z.enum(['true', 'false']).default('true').transform((v) => v === 'true'),
+
+  // ── CRM WhatsApp v3 (Fase D) — motor de julgamento IA nível 1. Modelo LLM barato
+  // (molde do TRANSCRIBE_MODEL): default gpt-4o-mini. A chave é OPENAI_API_KEY (mesma
+  // da transcrição/Lua); o runner do julgamento só sobe se ela estiver presente. Os
+  // demais parâmetros do runner (CRM_AI_TICK_MS, CRM_AI_MAX_CONVERSATIONS_PER_RUN) são
+  // lidos direto de process.env pelo runner (módulo config-free, pureza dos testes).
+  CRM_AI_MODEL: z.string().default('gpt-4o-mini'),
 });
 
 export const config = EnvSchema.parse(process.env);

@@ -103,11 +103,19 @@ export function resolveAutoLossPollIntervalMs(explicit?: number): number {
 // — o piso que impede o fechamento em massa do legado v1, ver doc do módulo) já
 // passou de auto_loss_days, numa thread que não é explicitamente not_lead
 // (simetria com o poller B1). $1 = workspace_id, $2 = auto_loss_days,
-// $3 = pipeline_since. Desempate de "quem falou por último" via ORDER BY
-// created_at DESC, id DESC (2 mensagens no mesmo timestamp — o id mais alto
-// vence) dentro do ARRAY_AGG. Traz o.created_at cru (além do last_activity já
-// combinado) pra o guard do patch poder re-checar a inatividade sob o lock sem
-// precisar re-selecionar a opportunity.
+// $3 = pipeline_since, $4 = ai_engine_enabled do workspace. Desempate de "quem
+// falou por último" via ORDER BY created_at DESC, id DESC (2 mensagens no mesmo
+// timestamp — o id mais alto vence) dentro do ARRAY_AGG. Traz o.created_at cru
+// (além do last_activity já combinado) pra o guard do patch poder re-checar a
+// inatividade sob o lock sem precisar re-selecionar a opportunity.
+//
+// Fase D (Task D5): a exclusão `NOT ($4 AND tm.is_lead IS NULL)` — onde o motor
+// de IA está habilitado (ai_engine_enabled) e a thread ainda NÃO foi triada
+// (is_lead NULL, cobre "sem row" via LEFT JOIN) — deixa a conversa fora da
+// auto-perda: a IA vai triá-la no run diário, e fechá-la por inatividade ANTES
+// disso a marcaria como "perda" (motivo de sistema) sem nunca ter sido avaliada
+// como lead. `ai_engine_enabled` vem como parâmetro (não join) porque o sweep já
+// carrega a settings row do workspace — é a MESMA row que um join traria.
 const CANDIDATES_SQL = `
   SELECT o.id, o.whatsapp_number_id, o.identifier, o.created_at,
          GREATEST(COALESCE(last.max_at, 'epoch'::timestamptz), o.created_at, $3::timestamptz) AS last_activity,
@@ -123,6 +131,7 @@ const CANDIDATES_SQL = `
     ) last ON TRUE
    WHERE o.workspace_id = $1 AND o.status = 'em_andamento'
      AND (tm.is_lead IS DISTINCT FROM FALSE)
+     AND NOT ($4::boolean AND tm.is_lead IS NULL)
      AND GREATEST(COALESCE(last.max_at, 'epoch'::timestamptz), o.created_at, $3::timestamptz) < NOW() - make_interval(days => $2)`;
 
 /**
@@ -160,14 +169,15 @@ function autoLossGuard(ctx: { numberId: number; identifier: string; createdAt: u
 export async function runAutoLossSweep(pool: Pool): Promise<{ closed: number }> {
   let closed = 0;
   const { rows: workspaces } = await pool.query(
-    `SELECT workspace_id, auto_loss_days, pipeline_since FROM whatsapp_workspace_settings WHERE auto_loss_days IS NOT NULL`,
+    `SELECT workspace_id, auto_loss_days, pipeline_since, ai_engine_enabled FROM whatsapp_workspace_settings WHERE auto_loss_days IS NOT NULL`,
   );
   for (const row of workspaces) {
     const workspaceId = String(row.workspace_id);
     const autoLossDays = Number(row.auto_loss_days);
     const pipelineSince = row.pipeline_since;
+    const aiEngineEnabled = row.ai_engine_enabled === true;
     try {
-      const { rows: candidates } = await pool.query(CANDIDATES_SQL, [workspaceId, autoLossDays, pipelineSince]);
+      const { rows: candidates } = await pool.query(CANDIDATES_SQL, [workspaceId, autoLossDays, pipelineSince, aiEngineEnabled]);
       for (const c of candidates) {
         const opportunityId = Number(c.id);
         const numberId = Number(c.whatsapp_number_id);
