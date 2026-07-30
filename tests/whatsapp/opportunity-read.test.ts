@@ -246,8 +246,22 @@ test('listThreads: opp_column casa via LATERAL da opp mais recente + BOARD_COLUM
   assert.match(block, /FROM whatsapp_opportunities o/);
   // "mais recente" = created_at DESC, id DESC (canônico), num LATERAL scoped ao par (LIMIT 1)
   assert.match(block, /ORDER BY o\.created_at DESC, o\.id DESC\s*\n\s*LIMIT 1/);
-  // união via ANY sobre o array (equivalente a IN)
+  // união via ANY sobre o array (equivalente a IN) — cláusula WHERE composta segue IS NULL OR = ANY
   assert.match(text, /\$18::text\[\] IS NULL OR opp_col\.opp_board_column = ANY\(\$18\)/);
+});
+
+test('listThreads: Fix round 1 (review) — subquery correlacionada do opp_col gateada atrás de CASE WHEN $18 IS NOT NULL (rota quente não paga o custo sem opp_column)', async () => {
+  const { pool, calls } = fakePool(() => []);
+  await listThreads(pool, { workspaceId: 'ws-1', numberId: 1, limit: 50, oppColumn: ['ganhos'] });
+  const block = oppColLateralBlock(calls[0].text);
+  // o SELECT FROM whatsapp_opportunities (a parte cara) só roda dentro do THEN do CASE
+  assert.match(block, /SELECT CASE WHEN \$18::text\[\] IS NOT NULL THEN \(/);
+  assert.match(block, /\) ELSE NULL END AS opp_board_column/);
+  // e a cláusula cara (FROM/ORDER BY/LIMIT) está DEPOIS do THEN, não antes — ou seja,
+  // gateada, não apenas decorada com o CASE em outro lugar do bloco.
+  const thenIdx = block.indexOf('THEN (');
+  const fromIdx = block.indexOf('FROM whatsapp_opportunities o');
+  assert.ok(thenIdx > -1 && fromIdx > thenIdx, 'FROM whatsapp_opportunities deve vir DEPOIS do THEN (gateado)');
 });
 
 test('listThreads: opp_column multi-valor (CSV→array) propagado intacto pro param', async () => {
@@ -271,7 +285,19 @@ test('searchThreads: opp_column casa via LATERAL da opp mais recente + BOARD_COL
   assert.ok(block.includes(BOARD_COLUMN_CASE_SQL), 'deve reusar BOARD_COLUMN_CASE_SQL literalmente');
   assert.match(block, /FROM whatsapp_opportunities o/);
   assert.match(block, /ORDER BY o\.created_at DESC, o\.id DESC\s*\n\s*LIMIT 1/);
+  // cláusula WHERE composta segue IS NULL OR = ANY
   assert.match(text, /\$15::text\[\] IS NULL OR opp_col\.opp_board_column = ANY\(\$15\)/);
+});
+
+test('searchThreads: Fix round 1 (review) — subquery correlacionada do opp_col gateada atrás de CASE WHEN $15 IS NOT NULL (rota quente não paga o custo sem opp_column)', async () => {
+  const { pool, calls } = fakePool(() => []);
+  await searchThreads(pool, { workspaceId: 'ws-1', numberId: 1, query: 'x', oppColumn: ['interessados', 'negociacoes'] });
+  const block = oppColLateralBlock(calls[0].text);
+  assert.match(block, /SELECT CASE WHEN \$15::text\[\] IS NOT NULL THEN \(/);
+  assert.match(block, /\) ELSE NULL END AS opp_board_column/);
+  const thenIdx = block.indexOf('THEN (');
+  const fromIdx = block.indexOf('FROM whatsapp_opportunities o');
+  assert.ok(thenIdx > -1 && fromIdx > thenIdx, 'FROM whatsapp_opportunities deve vir DEPOIS do THEN (gateado)');
 });
 
 // =============================================================================

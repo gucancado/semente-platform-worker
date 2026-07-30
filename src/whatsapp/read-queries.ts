@@ -265,16 +265,25 @@ export async function listThreads(pool: Pool, p: {
        -- CASE de board.ts (BOARD_COLUMN_CASE_SQL, fonte única). FROM próprio
        -- (whatsapp_opportunities o + whatsapp_thread_meta tm2) espelha o BOARD_OPPS_CTE
        -- de board.ts p/ os nomes sem prefixo (is_lead/status/is_qualified/loss_reason)
-       -- resolverem sem ambiguidade. Par sem opp → LATERAL não devolve linha →
+       -- resolverem sem ambiguidade. Par sem opp → subquery não devolve linha →
        -- opp_board_column NULL → nunca casa um filtro ativo (par sem opp não tem coluna).
+       -- Fix round 1 (review): a subquery correlacionada (reabre whatsapp_opportunities+
+       -- thread_meta por thread) fica atrás de CASE WHEN $18 IS NOT NULL — mesmo gate de
+       -- $10/includeFirstInboundText acima — pra rota quente (sem opp_column, caso
+       -- majoritário) NÃO pagar esse custo por thread da página. Otimização futura (YAGNI
+       -- agora): computar board_column a partir do jsonb já materializado pelo LATERAL os
+       -- (mesma opp mais recente) em vez de reabrir as tabelas aqui — mexe em jsonb de rota
+       -- quente, deixado fora deste fix mínimo.
        LEFT JOIN LATERAL (
-         SELECT (${BOARD_COLUMN_CASE_SQL}) AS opp_board_column
-           FROM whatsapp_opportunities o
-           LEFT JOIN whatsapp_thread_meta tm2
-             ON tm2.whatsapp_number_id = o.whatsapp_number_id AND tm2.identifier = o.identifier
-          WHERE o.whatsapp_number_id = $1 AND o.identifier = a.identifier
-          ORDER BY o.created_at DESC, o.id DESC
-          LIMIT 1
+         SELECT CASE WHEN $18::text[] IS NOT NULL THEN (
+                  SELECT (${BOARD_COLUMN_CASE_SQL})
+                    FROM whatsapp_opportunities o
+                    LEFT JOIN whatsapp_thread_meta tm2
+                      ON tm2.whatsapp_number_id = o.whatsapp_number_id AND tm2.identifier = o.identifier
+                   WHERE o.whatsapp_number_id = $1 AND o.identifier = a.identifier
+                   ORDER BY o.created_at DESC, o.id DESC
+                   LIMIT 1
+                ) ELSE NULL END AS opp_board_column
        ) opp_col ON TRUE
       WHERE ($3::timestamptz IS NULL
           OR date_trunc('milliseconds', ${orderCol}) < $3
@@ -487,15 +496,21 @@ export async function searchThreads(pool: Pool, p: {
           WHERE o.whatsapp_number_id = $1 AND o.identifier = h.identifier
        ) os ON TRUE
        -- Task C3 (§10): mesmo LATERAL de listThreads, casando pela opp mais recente
-       -- do par via BOARD_COLUMN_CASE_SQL (fonte única de board.ts).
+       -- do par via BOARD_COLUMN_CASE_SQL (fonte única de board.ts). Fix round 1
+       -- (review): subquery gateada atrás de CASE WHEN $15 IS NOT NULL — sem
+       -- opp_column (caso majoritário) não reabre whatsapp_opportunities+thread_meta
+       -- por hit. Otimização futura (YAGNI agora): derivar do jsonb do LATERAL os
+       -- em vez de reabrir as tabelas aqui.
        LEFT JOIN LATERAL (
-         SELECT (${BOARD_COLUMN_CASE_SQL}) AS opp_board_column
-           FROM whatsapp_opportunities o
-           LEFT JOIN whatsapp_thread_meta tm2
-             ON tm2.whatsapp_number_id = o.whatsapp_number_id AND tm2.identifier = o.identifier
-          WHERE o.whatsapp_number_id = $1 AND o.identifier = h.identifier
-          ORDER BY o.created_at DESC, o.id DESC
-          LIMIT 1
+         SELECT CASE WHEN $15::text[] IS NOT NULL THEN (
+                  SELECT (${BOARD_COLUMN_CASE_SQL})
+                    FROM whatsapp_opportunities o
+                    LEFT JOIN whatsapp_thread_meta tm2
+                      ON tm2.whatsapp_number_id = o.whatsapp_number_id AND tm2.identifier = o.identifier
+                   WHERE o.whatsapp_number_id = $1 AND o.identifier = h.identifier
+                   ORDER BY o.created_at DESC, o.id DESC
+                   LIMIT 1
+                ) ELSE NULL END AS opp_board_column
        ) opp_col ON TRUE
       WHERE ($6 = 'all'
           OR ($6 = 'group' AND (h.has_author OR g.jid IS NOT NULL))
