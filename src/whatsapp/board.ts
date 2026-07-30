@@ -138,24 +138,44 @@ export function boardColumnSqlMirror(
   return null;
 }
 
+// ── Projeção da coluna (CASE) — fonte SQL única ───────────────────────────────
+/**
+ * Expressão SQL do `board_column` (spec §5), FONTE ÚNICA reusada pela projeção
+ * (BOARD_OPPS_CTE) E pela prova exaustiva contra o kernel (board.db.test.ts —
+ * exercita este CASE sobre os 81 estados via VALUES). Espelha o kernel
+ * `boardColumn` (opportunity-core.ts) e `boardColumnSqlMirror` acima.
+ *
+ * Usa referências de coluna SEM prefixo (`is_lead`, `status`, `is_qualified`,
+ * `loss_reason`) DE PROPÓSITO — assim a mesma string resolve tanto no CTE (onde
+ * `is_lead` só existe em whatsapp_thread_meta e `status`/`is_qualified`/
+ * `loss_reason` só em whatsapp_opportunities → sem ambiguidade) quanto sobre um
+ * `VALUES ... AS t(is_lead, status, is_qualified, loss_reason)` no teste. Se uma
+ * migration futura adicionar qualquer uma dessas 4 colunas à OUTRA tabela do
+ * FROM do CTE, a resolução vira ambígua e a query quebra — mover pra alias
+ * explícito então (e ajustar o teste).
+ */
+export const BOARD_COLUMN_CASE_SQL = `
+  CASE
+    WHEN is_lead = FALSE THEN NULL
+    WHEN status = 'ganho' THEN 'ganhos'
+    WHEN status = 'perdido' THEN
+      CASE WHEN loss_reason IS DISTINCT FROM '${CASCADE_LOSS_REASON}' THEN 'perdas' ELSE NULL END
+    WHEN is_lead IS NULL THEN 'novas_conversas'
+    WHEN is_lead = TRUE AND is_qualified IS NULL THEN 'interessados'
+    WHEN is_lead = TRUE AND is_qualified = TRUE THEN 'negociacoes'
+    ELSE NULL
+  END`;
+
 // ── Query ────────────────────────────────────────────────────────────────────
-// $1 = numberId, $2 = workspaceId. board_column mirrorado em boardColumnSqlMirror.
+// $1 = numberId, $2 = workspaceId. board_column mirrorado em boardColumnSqlMirror
+// + BOARD_COLUMN_CASE_SQL (fonte única, provada contra o kernel no db.test).
 // Filtro DM-only + is_lead ≠ FALSE espelha stats.ts/opportunity-pipeline (canônico).
 const BOARD_OPPS_CTE = `
 board_opps AS (
   SELECT o.id AS opp_id, o.identifier, o.title, o.status, o.is_qualified, o.loss_reason,
          date_trunc('milliseconds', last.max_at) AS la,
          last.max_at AS last_at_raw,
-         CASE
-           WHEN tm.is_lead = FALSE THEN NULL
-           WHEN o.status = 'ganho' THEN 'ganhos'
-           WHEN o.status = 'perdido' THEN
-             CASE WHEN o.loss_reason IS DISTINCT FROM '${CASCADE_LOSS_REASON}' THEN 'perdas' ELSE NULL END
-           WHEN tm.is_lead IS NULL THEN 'novas_conversas'
-           WHEN tm.is_lead = TRUE AND o.is_qualified IS NULL THEN 'interessados'
-           WHEN tm.is_lead = TRUE AND o.is_qualified = TRUE THEN 'negociacoes'
-           ELSE NULL
-         END AS board_column,
+         (${BOARD_COLUMN_CASE_SQL}) AS board_column,
          -- contactName: push_name de evento fromMe é o dono do número, não o contato —
          -- só vale o push_name de eventos com mensagem inbound correspondente (read-queries.ts).
          (SELECT w.push_name FROM webhook_logs w

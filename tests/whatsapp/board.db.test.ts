@@ -13,7 +13,8 @@
 import { test, beforeEach, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { pool } from '../../src/db.js';
-import { getBoard, decodeBoardCursor } from '../../src/whatsapp/board.js';
+import { getBoard, decodeBoardCursor, BOARD_COLUMN_CASE_SQL } from '../../src/whatsapp/board.js';
+import { boardColumn, type OppStatus } from '../../src/whatsapp/opportunity-core.js';
 
 const TRUNCATE = `TRUNCATE messages, whatsapp_numbers, whatsapp_opportunities, whatsapp_opportunity_events,
   whatsapp_opportunity_tags, whatsapp_tags, whatsapp_thread_meta, whatsapp_groups, webhook_logs
@@ -164,6 +165,49 @@ test('total é independente do limit; paginação por cursor dentro da coluna', 
   const p2 = await getBoard(pool, { workspaceId: 'ws', numberId: 1, limitPerColumn: 2, column: 'interessados', cursor: cur });
   assert.deepEqual(ids(p2.columns.interessados.cards), ['c']);
   assert.equal(p2.columns.interessados.nextCursor, null);
+});
+
+test('CASE board_column REAL == kernel boardColumn nos 81 estados (via VALUES)', async () => {
+  // Blindagem de regressão: exercita o CASE SQL de board.ts (BOARD_COLUMN_CASE_SQL,
+  // fonte única) sobre TODOS os 81 estados — inclusive os sensíveis à ORDEM dos
+  // WHENs que os fixtures em tabela não alcançam (ganho/perdido com is_lead NULL;
+  // em_andamento+lead+is_qualified=FALSE → ELSE). Reordenar o CASE quebra este teste.
+  // VALUES não passa por CHECK, então estados impossíveis em tabela existem aqui.
+  const LEADS: (boolean | null)[] = [null, true, false];
+  const STATUSES: OppStatus[] = ['em_andamento', 'ganho', 'perdido'];
+  const QUALS: (boolean | null)[] = [null, true, false];
+  const LOSS: (string | null)[] = [null, 'nao_lead', 'sem_orcamento'];
+
+  const tuples: { isLead: boolean | null; status: OppStatus; isQualified: boolean | null; lossReason: string | null }[] = [];
+  for (const isLead of LEADS)
+    for (const status of STATUSES)
+      for (const isQualified of QUALS)
+        for (const lossReason of LOSS)
+          tuples.push({ isLead, status, isQualified, lossReason });
+  assert.equal(tuples.length, 81);
+
+  // Literais 100% test-controlled (enums fixos) → sem risco de injeção; casts
+  // explícitos por valor pra o VALUES ter tipos de coluna determinísticos.
+  const boolLit = (v: boolean | null) => (v === null ? 'NULL::boolean' : v ? 'TRUE' : 'FALSE');
+  const textLit = (v: string | null) => (v === null ? 'NULL::text' : `'${v}'::text`);
+  const rowsSql = tuples
+    .map((t, i) => `(${i}, ${boolLit(t.isLead)}, ${textLit(t.status)}, ${boolLit(t.isQualified)}, ${textLit(t.lossReason)})`)
+    .join(',\n');
+
+  const { rows } = await pool.query(
+    `SELECT idx, (${BOARD_COLUMN_CASE_SQL}) AS board_column
+       FROM (VALUES ${rowsSql}) AS t(idx, is_lead, status, is_qualified, loss_reason)
+      ORDER BY idx`,
+  );
+  assert.equal(rows.length, 81);
+  for (const r of rows) {
+    const t = tuples[Number(r.idx)];
+    const kernel = boardColumn(t.isLead, { status: t.status, isQualified: t.isQualified, lossReason: t.lossReason });
+    assert.equal(
+      r.board_column, kernel,
+      `divergência SQL↔kernel idx=${r.idx} isLead=${t.isLead} status=${t.status} isQ=${t.isQualified} loss=${t.lossReason}: sql=${r.board_column} kernel=${kernel}`,
+    );
+  }
 });
 
 test('contactName vem do push_name de evento com mensagem inbound', async () => {
