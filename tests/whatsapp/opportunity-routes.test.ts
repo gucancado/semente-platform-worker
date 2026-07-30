@@ -58,7 +58,8 @@ function makePool(opts: {
       return { rows: [], rowCount: 1 };
     }
     if (/INSERT INTO whatsapp_thread_meta\b/.test(text)) {
-      state.threadMeta[`${params[0]}:${params[1]}`] = true; // applyThreadLeadTrue sempre grava TRUE
+      // applyThreadLead usa token LITERAL no SQL (TRUE/NULL); is_lead não vem em params.
+      state.threadMeta[`${params[0]}:${params[1]}`] = /is_lead = NULL/.test(text) ? null : true;
       return { rows: [], rowCount: 1 };
     }
     if (/INSERT INTO whatsapp_opportunities/.test(text)) {
@@ -420,5 +421,111 @@ test('GET resposta expõe isQualified, lossReason e qualification derivada', asy
   assert.equal(opp.isQualified, false);
   assert.equal(opp.lossReason, 'nao_lead');
   assert.equal(opp.qualification, 'desqualificado');
+  await app.close();
+});
+
+// =============================================================================
+// v3 — POST /:id/move (DnD do kanban, §5/§10)
+// =============================================================================
+
+test('MOVE sem x-acting-user → 400', async () => {
+  const { pool } = makePool({ opportunities: [{ id: 1, identifier: 'a', created_at: date(1) }] }); const app = appFor(pool);
+  const res = await app.inject({ method: 'POST', url: '/whatsapp/opportunities/1/move',
+    headers: { 'x-panel-token': TOKEN }, payload: { column: 'ganhos' } });
+  assert.equal(res.statusCode, 400); await app.close();
+});
+
+test('MOVE coluna inválida → 400 invalid column', async () => {
+  const { pool } = makePool({ opportunities: [{ id: 1, identifier: 'a', created_at: date(1) }] }); const app = appFor(pool);
+  const res = await app.inject({ method: 'POST', url: '/whatsapp/opportunities/1/move', headers, payload: { column: 'lixo' } });
+  assert.equal(res.statusCode, 400); assert.deepEqual(res.json(), { error: 'invalid column' }); await app.close();
+});
+
+test('MOVE perdas sem loss_reason → 400 loss_reason_obrigatorio', async () => {
+  const { pool } = makePool({ opportunities: [{ id: 1, identifier: 'a', created_at: date(1) }] }); const app = appFor(pool);
+  const res = await app.inject({ method: 'POST', url: '/whatsapp/opportunities/1/move', headers, payload: { column: 'perdas' } });
+  assert.equal(res.statusCode, 400); assert.deepEqual(res.json(), { error: 'loss_reason_obrigatorio' }); await app.close();
+});
+
+test('MOVE perdas loss_reason inexistente → 400 loss_reason_invalido nomeando', async () => {
+  const { pool } = makePool({ opportunities: [{ id: 1, identifier: 'a', created_at: date(1) }] }); const app = appFor(pool);
+  const res = await app.inject({ method: 'POST', url: '/whatsapp/opportunities/1/move', headers,
+    payload: { column: 'perdas', loss_reason: 'motivo_inexistente' } });
+  assert.equal(res.statusCode, 400); assert.deepEqual(res.json(), { error: 'loss_reason_invalido', code: 'motivo_inexistente' }); await app.close();
+});
+
+test('MOVE perdas loss_reason=nao_lead (cascata) → 400 (nunca aceito de fora)', async () => {
+  const { pool } = makePool({ opportunities: [{ id: 1, identifier: 'a', created_at: date(1) }] }); const app = appFor(pool);
+  const res = await app.inject({ method: 'POST', url: '/whatsapp/opportunities/1/move', headers,
+    payload: { column: 'perdas', loss_reason: 'nao_lead' } });
+  assert.equal(res.statusCode, 400); assert.deepEqual(res.json(), { error: 'loss_reason_invalido', code: 'nao_lead' }); await app.close();
+});
+
+test('MOVE não-admin → 403', async () => {
+  const { pool } = makePool({ opportunities: [{ id: 1, identifier: 'a', created_at: date(1) }] });
+  const authz = { assertMember: async () => {}, assertAdmin: async () => { throw new AuthzError('forbidden', 'FORBIDDEN'); } };
+  const app = appFor(pool, authz);
+  const res = await app.inject({ method: 'POST', url: '/whatsapp/opportunities/1/move', headers, payload: { column: 'ganhos' } });
+  assert.equal(res.statusCode, 403); await app.close();
+});
+
+test('MOVE opp inexistente → 404', async () => {
+  const { pool } = makePool(); const app = appFor(pool);
+  const res = await app.inject({ method: 'POST', url: '/whatsapp/opportunities/999/move', headers, payload: { column: 'ganhos' } });
+  assert.equal(res.statusCode, 404); await app.close();
+});
+
+test('MOVE → ganhos: 200, opp ganho + column final ganhos', async () => {
+  const { pool, state } = makePool({ opportunities: [{ id: 1, identifier: 'a', created_at: date(1) }] }); const app = appFor(pool);
+  const res = await app.inject({ method: 'POST', url: '/whatsapp/opportunities/1/move', headers, payload: { column: 'ganhos' } });
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.json().opportunity.status, 'ganho');
+  assert.equal(res.json().opportunity.qualification, 'qualificado');
+  assert.equal(res.json().column, 'ganhos');
+  assert.equal(res.json().moved, true);
+  assert.equal(state.threadMeta['1:a'], true, 'ganho cascateia is_lead=TRUE');
+  // resposta pública não vaza numberId/workspaceId
+  assert.equal('numberId' in res.json().opportunity, false);
+  await app.close();
+});
+
+test('MOVE → negociacoes: 200, is_qualified TRUE + thread TRUE + column negociacoes', async () => {
+  const { pool, state } = makePool({ opportunities: [{ id: 1, identifier: 'a', created_at: date(1) }] }); const app = appFor(pool);
+  const res = await app.inject({ method: 'POST', url: '/whatsapp/opportunities/1/move', headers, payload: { column: 'negociacoes' } });
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.json().opportunity.isQualified, true);
+  assert.equal(res.json().opportunity.status, 'em_andamento');
+  assert.equal(res.json().column, 'negociacoes');
+  assert.equal(state.threadMeta['1:a'], true);
+  await app.close();
+});
+
+test('MOVE → novas_conversas: 200, thread NULL + column novas_conversas', async () => {
+  const { pool, state } = makePool({
+    opportunities: [{ id: 1, identifier: 'a', created_at: date(1), is_qualified: true, qualification: 'qualificado' }],
+    threadMeta: { '1:a': true },
+  });
+  const app = appFor(pool);
+  const res = await app.inject({ method: 'POST', url: '/whatsapp/opportunities/1/move', headers, payload: { column: 'novas_conversas' } });
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.json().opportunity.isQualified, null);
+  assert.equal(res.json().column, 'novas_conversas');
+  assert.equal(state.threadMeta['1:a'], null, 'thread rebaixada pra indefinido');
+  await app.close();
+});
+
+test('MOVE → perdas com motivo de sistema: 200, perdido + loss_reason + thread intacta', async () => {
+  const { pool, state } = makePool({
+    opportunities: [{ id: 1, identifier: 'a', created_at: date(1), is_qualified: true, qualification: 'qualificado' }],
+    threadMeta: { '1:a': true },
+  });
+  const app = appFor(pool);
+  const res = await app.inject({ method: 'POST', url: '/whatsapp/opportunities/1/move', headers,
+    payload: { column: 'perdas', loss_reason: 'lead_nao_respondeu' } });
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.json().opportunity.status, 'perdido');
+  assert.equal(res.json().opportunity.lossReason, 'lead_nao_respondeu');
+  assert.equal(res.json().column, 'perdas');
+  assert.equal(state.threadMeta['1:a'], true, 'perda não mexe na triagem');
   await app.close();
 });

@@ -1,8 +1,10 @@
 import type { Pool, PoolClient } from 'pg';
 import {
   applyOppPatchV3,
+  boardColumn,
   OppInvariantError,
   qualificationLabel,
+  type BoardColumn,
   type OppPatchV3,
   type OppQualification,
   type OppStateV3,
@@ -186,38 +188,61 @@ export async function countAnyOpportunities(client: PoolClient, numberId: number
 }
 
 /**
- * Side-effect §4.1-4.2: quando o resultado da opp é ganho/qualificado/desqualificado,
- * a thread vira lead. Faz upsert incondicional de is_lead=TRUE, mas grava no
- * whatsapp_thread_meta_log SÓ SE o valor anterior era diferente de TRUE (sem row
- * anterior conta como diferente). Log incondicional travaria o sticky da IA (§6)
- * num mero title-edit de opp já ganha. Exportada pro teste puro da invariante do log.
+ * Side-effect §4.1-4.2 GENERALIZADO: escreve a triagem da thread para `value`
+ * (TRUE=lead ou NULL=indefinido — NUNCA FALSE por aqui; a cascata não-lead tem
+ * caminho próprio em thread-meta.ts `cascadeNotLead`). Faz upsert INCONDICIONAL do
+ * valor, mas grava no whatsapp_thread_meta_log SÓ SE o valor efetivo mudou (sem row
+ * anterior conta como NULL). Log incondicional travaria o sticky da IA (§6) num
+ * mero title-edit de opp já ganha, ou num drop na mesma coluna. Devolve `changed`
+ * (se logou) — usado pela rota `move` pra distinguir no-op de transição real.
+ *
+ * O novo valor entra como TOKEN LITERAL no SQL (TRUE/NULL) — não parametrizado —
+ * então os params (upsert=3, log=4) e a forma do statement independem do valor:
+ * `applyThreadLead(client, p, true)` é byte-a-byte o antigo `applyThreadLeadTrue`.
  *
  * CONTRATO: DEVE ser chamada DENTRO de withConversationLock (mesma transação) — o
  * upsert e o log são 2 statements e exigem atomicidade: sem a transação, um crash
- * entre eles deixa is_lead=TRUE sem log (ou uma corrida duplica o log).
+ * entre eles deixa is_lead escrito sem log (ou uma corrida duplica o log).
+ */
+export async function applyThreadLead(
+  client: Pick<PoolClient, 'query'>,
+  p: { numberId: number; identifier: string; changedBy: string },
+  value: true | null,
+): Promise<boolean> {
+  const prev = await client.query(
+    `SELECT is_lead FROM whatsapp_thread_meta WHERE whatsapp_number_id = $1 AND identifier = $2`,
+    [p.numberId, p.identifier]);
+  const prevRow = prev.rows[0];
+  // Sem row OU is_lead NULL contam ambos como NULL (não-triado).
+  const prevValue: boolean | null = prevRow == null || prevRow.is_lead == null ? null : prevRow.is_lead;
+  const changed = prevValue !== value;
+  const valueSql = value === true ? 'TRUE' : 'NULL';
+  await client.query(
+    `INSERT INTO whatsapp_thread_meta (whatsapp_number_id, identifier, is_lead, updated_at, updated_by)
+     VALUES ($1, $2, ${valueSql}, NOW(), $3)
+     ON CONFLICT (whatsapp_number_id, identifier)
+     DO UPDATE SET is_lead = ${valueSql}, updated_at = NOW(), updated_by = EXCLUDED.updated_by`,
+    [p.numberId, p.identifier, p.changedBy]);
+  if (changed) {
+    await client.query(
+      `INSERT INTO whatsapp_thread_meta_log (whatsapp_number_id, identifier, field, old_value, new_value, actor)
+       VALUES ($1, $2, 'is_lead', $3, ${value === true ? `'true'` : 'NULL'}, $4)`,
+      // old_value NULL (não-triado) grava NULL — não a string 'null'.
+      [p.numberId, p.identifier, prevValue == null ? null : String(prevValue), p.changedBy]);
+  }
+  return changed;
+}
+
+/**
+ * @deprecated Use `applyThreadLead(client, {..., changedBy}, true)`. Wrapper fino
+ * mantido pelos call sites de criação (createOpportunityV3) e pelos testes: mesmo
+ * SQL, sem valor de retorno.
  */
 export async function applyThreadLeadTrue(
   client: Pick<PoolClient, 'query'>,
   p: { numberId: number; identifier: string; actor: string },
 ): Promise<void> {
-  const prev = await client.query(
-    `SELECT is_lead FROM whatsapp_thread_meta WHERE whatsapp_number_id = $1 AND identifier = $2`,
-    [p.numberId, p.identifier]);
-  const prevRow = prev.rows[0];
-  const wasTrue = prevRow != null && prevRow.is_lead === true;
-  await client.query(
-    `INSERT INTO whatsapp_thread_meta (whatsapp_number_id, identifier, is_lead, updated_at, updated_by)
-     VALUES ($1, $2, TRUE, NOW(), $3)
-     ON CONFLICT (whatsapp_number_id, identifier)
-     DO UPDATE SET is_lead = TRUE, updated_at = NOW(), updated_by = EXCLUDED.updated_by`,
-    [p.numberId, p.identifier, p.actor]);
-  if (!wasTrue) {
-    await client.query(
-      `INSERT INTO whatsapp_thread_meta_log (whatsapp_number_id, identifier, field, old_value, new_value, actor)
-       VALUES ($1, $2, 'is_lead', $3, 'true', $4)`,
-      // is_lead NULL (não-triado) grava old_value NULL — não a string 'null'.
-      [p.numberId, p.identifier, prevRow == null || prevRow.is_lead == null ? null : String(prevRow.is_lead), p.actor]);
-  }
+  await applyThreadLead(client, { numberId: p.numberId, identifier: p.identifier, changedBy: p.actor }, true);
 }
 
 /**
@@ -292,6 +317,52 @@ export async function createOpportunityV3(pool: Pool, p: {
 }
 
 /**
+ * Aplica UM patch v3 já validado no par pela via do kernel, DENTRO de uma
+ * transação/lock já abertos, sobre o estado `cur` já relido. Concentra as escritas
+ * de opp (UPDATE dual-write + eventos) e o side-effect de thread (§4.1-4.2) num só
+ * lugar — reusado por `patchOpportunityGuarded` E por `moveOpportunity`, pra não
+ * duplicar o SQL do UPDATE/eventos. Lança `OppInvariantError` (do kernel) — quem
+ * chama trata no catch. Devolve o que de fato mudou:
+ *  - `oppChanged`: houve UPDATE/eventos de opp (transition.events > 0);
+ *  - `threadChanged`: o side-effect `set_true` do kernel realmente logou a thread.
+ */
+async function applyOppPatchInTx(
+  client: PoolClient,
+  opportunityId: number,
+  cur: OppStateV3,
+  patch: OppPatchV3,
+  changedBy: string,
+  pair: { numberId: number; identifier: string },
+): Promise<{ oppChanged: boolean; threadChanged: boolean }> {
+  const transition = applyOppPatchV3(cur, patch); // lança OppInvariantError → catch do chamador
+  let oppChanged = false;
+  if (transition.events.length > 0) {
+    oppChanged = true;
+    const next = transition.next;
+    const closedAtExpr =
+      transition.closedAtAction === 'set_now' ? 'NOW()'
+        : transition.closedAtAction === 'clear' ? 'NULL'
+          : 'closed_at';
+    await client.query(
+      `UPDATE whatsapp_opportunities SET
+         status = $2, is_qualified = $3, qualification = $4, title = $5, loss_reason = $6,
+         closed_at = ${closedAtExpr}, updated_at = NOW()
+       WHERE id = $1`,
+      [opportunityId, next.status, next.isQualified, qualificationLabel(next.isQualified), next.title, next.lossReason]);
+    for (const ev of transition.events) {
+      await insertEvent(client, { opportunityId, field: ev.field, oldValue: ev.oldValue, newValue: ev.newValue, changedBy });
+    }
+  }
+  // §4.1-4.2: side-effect roda mesmo em patch sem eventos de opp (ex.: title-only
+  // numa ganha, ou re-qualificar idêntico) — o guard de log evita spam no sticky.
+  let threadChanged = false;
+  if (transition.threadLeadAction === 'set_true') {
+    threadChanged = await applyThreadLead(client, { numberId: pair.numberId, identifier: pair.identifier, changedBy }, true);
+  }
+  return { oppChanged, threadChanged };
+}
+
+/**
  * Guard avaliado DENTRO do lock, logo após o re-read do estado atual da opp e
  * ANTES de qualquer escrita (kernel/UPDATE/eventos). Devolver `false` aborta o
  * patch inteiro sem escrever nada — ver `patchOpportunityGuarded`.
@@ -341,28 +412,7 @@ export async function patchOpportunityGuarded(
           lossReason: row.loss_reason ?? null,
         };
         if (!(await guard(client, cur))) return { ok: false, error: 'conflict' };
-        const transition = applyOppPatchV3(cur, patch); // lança OppInvariantError → catch abaixo
-        if (transition.events.length > 0) {
-          const next = transition.next;
-          const closedAtExpr =
-            transition.closedAtAction === 'set_now' ? 'NOW()'
-              : transition.closedAtAction === 'clear' ? 'NULL'
-                : 'closed_at';
-          await client.query(
-            `UPDATE whatsapp_opportunities SET
-               status = $2, is_qualified = $3, qualification = $4, title = $5, loss_reason = $6,
-               closed_at = ${closedAtExpr}, updated_at = NOW()
-             WHERE id = $1`,
-            [opportunityId, next.status, next.isQualified, qualificationLabel(next.isQualified), next.title, next.lossReason]);
-          for (const ev of transition.events) {
-            await insertEvent(client, { opportunityId, field: ev.field, oldValue: ev.oldValue, newValue: ev.newValue, changedBy });
-          }
-        }
-        // §4.1-4.2: side-effect roda mesmo em patch sem eventos de opp (ex.: title-only
-        // numa ganha, ou re-qualificar idêntico) — o guard de log evita spam no sticky.
-        if (transition.threadLeadAction === 'set_true') {
-          await applyThreadLeadTrue(client, { numberId, identifier, actor: changedBy });
-        }
+        await applyOppPatchInTx(client, opportunityId, cur, patch, changedBy, { numberId, identifier });
         const { rows: after } = await client.query(`${OPP_SELECT} WHERE o.id = $1`, [opportunityId]);
         return { ok: true, opportunity: mapOpportunity(after[0]) };
       });
@@ -384,6 +434,87 @@ export async function patchOpportunityV3(
   return patchOpportunityGuarded(pool, opportunityId, patch, changedBy, async () => true) as Promise<
     { ok: true; opportunity: Opportunity } | { ok: false; error: 'not_found' | 'desqualificar_ganho' | 'invalid_value' }
   >;
+}
+
+export type MoveResult =
+  | { ok: true; opportunity: Opportunity; column: BoardColumn | null; moved: boolean }
+  | { ok: false; error: 'not_found' | 'invalid_value' | 'desqualificar_ganho' };
+
+/**
+ * Rota do drag-and-drop do kanban (spec §5/§10): UMA chamada que executa a
+ * transição de coluna INTEIRA (opp + thread + eventos) numa única transação sob o
+ * lock do par (§4.11), relendo o estado DENTRO do lock. A coluna alvo deriva o
+ * patch da opp e o alvo de thread (tabela §5):
+ *
+ *  | coluna          | patch da opp                              | thread          |
+ *  |-----------------|-------------------------------------------|-----------------|
+ *  | novas_conversas | reabre se fechada; is_qualified=NULL       | is_lead=NULL     |
+ *  | interessados    | reabre se fechada; is_qualified=NULL       | is_lead=TRUE     |
+ *  | negociacoes     | status=em_andamento; is_qualified=TRUE      | TRUE via kernel  |
+ *  | ganhos          | status=ganho                               | TRUE via kernel  |
+ *  | perdas          | status=perdido; loss_reason=<motivo>       | (não toca)       |
+ *
+ * `negociacoes`/`ganhos` não escrevem a thread aqui: is_qualified=TRUE e status=ganho
+ * já fazem o kernel emitir `set_true` (via applyOppPatchInTx). `perdas` não muda a
+ * triagem. As escritas de opp reusam os internals de patch (applyOppPatchInTx) — mesmo
+ * kernel/UPDATE/eventos, sem duplicar SQL. Ator = usuário real (`changedBy`).
+ *
+ * No-op (estado final == atual E thread já no valor) → `moved:false`, sem eventos.
+ * A `column` devolvida é RECALCULADA do estado final via `boardColumn` (honesta).
+ * Invariantes de kernel (invalid_value/desqualificar_ganho) viram o union de erro.
+ */
+export async function moveOpportunity(
+  pool: Pool, opportunityId: number, column: BoardColumn, lossReason: string | null, changedBy: string,
+): Promise<MoveResult> {
+  const head = await pool.query(`SELECT whatsapp_number_id, identifier FROM whatsapp_opportunities WHERE id = $1`, [opportunityId]);
+  if (!head.rows[0]) return { ok: false, error: 'not_found' };
+  const numberId = Number(head.rows[0].whatsapp_number_id);
+  const identifier = String(head.rows[0].identifier);
+  try {
+    return await withConversationLock<MoveResult>(pool, numberId, identifier, async (client) => {
+      const { rows } = await client.query(`${OPP_SELECT} WHERE o.id = $1`, [opportunityId]);
+      const row = rows[0];
+      if (!row) return { ok: false, error: 'not_found' };
+      const cur: OppStateV3 = {
+        status: row.status,
+        isQualified: row.is_qualified === undefined ? null : row.is_qualified,
+        closedAt: row.closed_at ? iso(row.closed_at) : null,
+        title: row.title,
+        lossReason: row.loss_reason ?? null,
+      };
+      // "reabre se fechada": só injeta status=em_andamento quando NÃO está aberta
+      // (kernel no-opa status igual; mas é a reabertura perdido→em_andamento que
+      // limpa loss_reason/desqualificação — precisa do status explícito).
+      const reopen: Pick<OppPatchV3, 'status'> = cur.status !== 'em_andamento' ? { status: 'em_andamento' } : {};
+      let patch: OppPatchV3;
+      let threadTarget: true | null | undefined; // escrita EXPLÍCITA de thread; undefined = deixa pro kernel
+      switch (column) {
+        case 'novas_conversas': patch = { ...reopen, isQualified: null }; threadTarget = null; break;
+        case 'interessados': patch = { ...reopen, isQualified: null }; threadTarget = true; break;
+        case 'negociacoes': patch = { status: 'em_andamento', isQualified: true }; threadTarget = undefined; break;
+        case 'ganhos': patch = { status: 'ganho' }; threadTarget = undefined; break;
+        case 'perdas': patch = { status: 'perdido', lossReason }; threadTarget = undefined; break;
+      }
+      const oppResult = await applyOppPatchInTx(client, opportunityId, cur, patch, changedBy, { numberId, identifier });
+      let explicitThreadChanged = false;
+      if (threadTarget !== undefined) {
+        explicitThreadChanged = await applyThreadLead(client, { numberId, identifier, changedBy }, threadTarget);
+      }
+      const moved = oppResult.oppChanged || oppResult.threadChanged || explicitThreadChanged;
+      const { rows: after } = await client.query(`${OPP_SELECT} WHERE o.id = $1`, [opportunityId]);
+      const opportunity = mapOpportunity(after[0]);
+      const leadRes = await client.query(
+        `SELECT is_lead FROM whatsapp_thread_meta WHERE whatsapp_number_id = $1 AND identifier = $2`, [numberId, identifier]);
+      const finalIsLead: boolean | null = leadRes.rows[0] ? (leadRes.rows[0].is_lead ?? null) : null;
+      const finalColumn = boardColumn(finalIsLead, {
+        status: opportunity.status, isQualified: opportunity.isQualified, lossReason: opportunity.lossReason,
+      });
+      return { ok: true, opportunity, column: finalColumn, moved };
+    });
+  } catch (err) {
+    if (err instanceof OppInvariantError) return { ok: false, error: err.code };
+    throw err;
+  }
 }
 
 /**

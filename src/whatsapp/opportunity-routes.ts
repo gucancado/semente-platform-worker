@@ -8,9 +8,10 @@ import { tenantContext } from './tenant-context.js';
 import { OppInvariantError, type OppPatchV3 } from './opportunity-core.js';
 import {
   changeOpportunityTag, conversationExists, createOpportunityV3, decodeOpportunityCursor,
-  deleteOpportunityV3, getOpportunity, listOpportunities, listOpportunityEvents, patchOpportunityV3,
+  deleteOpportunityV3, getOpportunity, listOpportunities, listOpportunityEvents, moveOpportunity, patchOpportunityV3,
 } from './opportunities.js';
 import { isValidLossReason } from './loss-reasons.js';
+import { isBoardColumn } from './board.js';
 import { isGroupThread } from './thread-meta.js';
 
 const statuses = new Set(['em_andamento', 'ganho', 'perdido']);
@@ -175,6 +176,38 @@ export function registerOpportunityRoutes(app: FastifyInstance, deps: {
     }
     logAccess(deps.pool, { actor: req.actingUser, action: 'update_opportunity', workspaceId: loaded.num.workspaceId, numberId: loaded.num.id, identifier: loaded.opp.identifier });
     return reply.send({ schema: 'whatsapp_v1', context: tenantContext(loaded.num), opportunity: result.opportunity });
+  });
+
+  // POST /whatsapp/opportunities/:id/move — DnD do kanban (§5/§10): 1 chamada que
+  // executa a transição de coluna inteira (opp + thread + eventos) numa transação
+  // sob o lock. body {column, loss_reason?}; 'perdas' exige loss_reason válido.
+  app.post('/whatsapp/opportunities/:id/move', { preHandler: auth }, async (req: any, reply) => {
+    if (!req.actingUser) return reply.code(400).send({ error: 'x-acting-user required' });
+    const body = req.body ?? {};
+    if (!isBoardColumn(body.column)) return reply.code(400).send({ error: 'invalid column' });
+    const column = body.column;
+    // loss_reason: obrigatório + validado SÓ pra 'perdas'; ignorado nas demais colunas.
+    let lossReason: string | null = null;
+    if (column === 'perdas') {
+      if (typeof body.loss_reason !== 'string' || body.loss_reason.trim() === '') {
+        return reply.code(400).send({ error: 'loss_reason_obrigatorio' });
+      }
+      lossReason = body.loss_reason;
+    }
+    const loaded = await loadScoped(req, reply); if (!loaded) return;
+    if (!await gateAdmin(req, reply, loaded.num.workspaceId, authz)) return;
+    // Motivo selecionável (sistema ∪ custom ativo); nunca a cascata 'nao_lead'.
+    if (column === 'perdas' && !await isValidLossReason(deps.pool, loaded.num.workspaceId, lossReason!)) {
+      return reply.code(400).send({ error: 'loss_reason_invalido', code: lossReason });
+    }
+    const result = await moveOpportunity(deps.pool, loaded.opp.id, column, lossReason, req.actingUser);
+    if (!result.ok) {
+      const code = result.error === 'not_found' ? 404 : result.error === 'desqualificar_ganho' ? 409 : 400;
+      return reply.code(code).send({ error: result.error });
+    }
+    logAccess(deps.pool, { actor: req.actingUser, action: 'move_opportunity', workspaceId: loaded.num.workspaceId, numberId: loaded.num.id, identifier: loaded.opp.identifier });
+    return reply.send({ schema: 'whatsapp_v1', context: tenantContext(loaded.num),
+      opportunity: result.opportunity, column: result.column, moved: result.moved });
   });
 
   app.delete('/whatsapp/opportunities/:id', { preHandler: auth }, async (req: any, reply) => {
