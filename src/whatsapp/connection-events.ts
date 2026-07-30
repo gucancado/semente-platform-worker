@@ -4,6 +4,7 @@ import { getProvisioning, deleteProvisioning, markProvisioningBlocked } from './
 import { markLinkConsumed } from './provision-links.js';
 import { seedDefaultReasons } from './disqualify-reasons.js';
 import { seedDefaultSourceSignals } from './source-signals.js';
+import { getOrCreateSettings } from './workspace-settings.js';
 import { config } from '../config.js';
 import { deleteInstance } from '../evolution/client.js';
 import { syncGroupSubjectsDebounced } from './group-sync.js';
@@ -85,6 +86,14 @@ export async function handleConnectionEvent(pool: Pool, payload: any): Promise<b
       await deleteProvisioning(pool, instance);
       await seedDefaultReasons(pool, prov.workspaceId);
       await seedDefaultSourceSignals(pool, prov.workspaceId);
+      // Best-effort: settings (auto_loss_days/pipeline_since/etc — migration 051) são
+      // obrigatórias pros jobs das Fases B/D, mas uma falha aqui NÃO pode derrubar o
+      // provisionamento do número em si (que já terminou acima).
+      try {
+        await getOrCreateSettings(pool, prov.workspaceId);
+      } catch (err) {
+        console.error('[workspace-settings] getOrCreateSettings no provisionamento falhou (não-fatal):', (err as Error).message);
+      }
       if (prov.provisionLinkToken && numberId !== null) {
         await markLinkConsumed(pool, prov.provisionLinkToken, numberId).catch((err) =>
           console.error('[provision-link] markConsumed falhou (não-fatal):', (err as Error).message),
