@@ -145,10 +145,11 @@ test('move → novas_conversas: reabre (status em_andamento, is_qualified NULL, 
   const res = await moveOpportunity(pool, 7, 'novas_conversas', null, 'u1');
   assert.equal(res.ok, true);
   const up = updateCall(calls)!;
-  // UPDATE params: [id, status, is_qualified, qualification, title, loss_reason]
+  // UPDATE params (v3 contract, mig 053 — sem a coluna legada `qualification`):
+  // [id, status, is_qualified, title, loss_reason]
   assert.equal(up.params[1], 'em_andamento');
   assert.equal(up.params[2], null, 'is_qualified NULL');
-  assert.equal(up.params[5], null, 'loss_reason limpo na reabertura');
+  assert.equal(up.params[4], null, 'loss_reason limpo na reabertura');
   const th = threadUpsertCall(calls)!;
   assert.match(th.text, /is_lead = NULL/, 'thread vai pra NULL');
 });
@@ -197,7 +198,7 @@ test('move → perdas: status perdido + loss_reason do modal, sem tocar a thread
   assert.equal(res.ok, true);
   const up = updateCall(calls)!;
   assert.equal(up.params[1], 'perdido');
-  assert.equal(up.params[5], 'sem_orcamento', 'novo motivo gravado');
+  assert.equal(up.params[4], 'sem_orcamento', 'novo motivo gravado');
   assert.equal(calls.some((c) => isMetaUpsert(c.text)), false, 'perda não escreve triagem');
 });
 

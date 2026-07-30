@@ -63,8 +63,10 @@ export type OpportunityTag = { id: number; name: string; color: string };
 export type OpportunitySummary = {
   count: number;
   /**
-   * Resumo da opp mais recente. v3: expõe `isQualified` (boolean|null, fonte da verdade)
-   * e `lossReason`; `qualification` (string) mantida por 1 release, derivada de is_qualified.
+   * Resumo da opp mais recente. v3 contract (mig 053): expõe `isQualified`
+   * (boolean|null, ÚNICA fonte da verdade — a coluna legada `qualification` foi
+   * dropada do banco) e `lossReason`; `qualification` (string) segue exposta na
+   * resposta, mas SEMPRE derivada de is_qualified.
    */
   latest: {
     id: number;
@@ -89,8 +91,8 @@ function mapOpportunitySummary(r: any): OpportunitySummary {
   const latest = typeof r.opportunity_latest === 'string'
     ? JSON.parse(r.opportunity_latest)
     : r.opportunity_latest;
-  // Deriva a string `qualification` de is_qualified quando presente (inclui NULL→indefinido);
-  // só cai no legado `qualification` do jsonb se is_qualified não veio (compat de deploy).
+  // v3 contract (mig 053): a string `qualification` é SEMPRE derivada de
+  // is_qualified — o jsonb do LATERAL não traz mais a coluna legada.
   const isQualified = latest.is_qualified === undefined ? null : latest.is_qualified;
   return {
     count: Number(r.opportunity_count) || 0,
@@ -99,7 +101,7 @@ function mapOpportunitySummary(r: any): OpportunitySummary {
       status: latest.status,
       isQualified,
       lossReason: latest.loss_reason ?? null,
-      qualification: latest.is_qualified !== undefined ? qualificationLabel(latest.is_qualified) : latest.qualification,
+      qualification: qualificationLabel(isQualified),
       title: latest.title ?? null,
       tags: (latest.tags ?? []).map((t: any) => ({ id: Number(t.id), name: t.name, color: t.color })),
     },
@@ -246,7 +248,6 @@ export async function listThreads(pool: Pool, p: {
                   jsonb_build_object(
                     'id', o.id, 'status', o.status,
                     'is_qualified', o.is_qualified, 'loss_reason', o.loss_reason,
-                    'qualification', o.qualification,
                     'title', o.title, 'tags', COALESCE(ot.tags, '[]'::jsonb)
                   ) ORDER BY o.created_at DESC, o.id DESC
                 ))[1] AS opportunity_latest
@@ -481,7 +482,6 @@ export async function searchThreads(pool: Pool, p: {
                   jsonb_build_object(
                     'id', o.id, 'status', o.status,
                     'is_qualified', o.is_qualified, 'loss_reason', o.loss_reason,
-                    'qualification', o.qualification,
                     'title', o.title, 'tags', COALESCE(ot.tags, '[]'::jsonb)
                   ) ORDER BY o.created_at DESC, o.id DESC
                 ))[1] AS opportunity_latest

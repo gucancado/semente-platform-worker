@@ -15,49 +15,32 @@ import { isBoardColumn } from './board.js';
 import { isGroupThread } from './thread-meta.js';
 
 const statuses = new Set(['em_andamento', 'ganho', 'perdido']);
-const qualifications = new Set(['indefinido', 'qualificado', 'desqualificado']);
 const positiveInt = (value: unknown): number | null => {
   if (typeof value === 'string' && !/^[1-9]\d*$/.test(value)) return null;
   const n = Number(value);
   return Number.isSafeInteger(n) && n > 0 ? n : null;
 };
 
-// Alias legado qualification (string) → is_qualified (v3, boolean|null).
-const qualificationToBool = (q: string): boolean | null =>
-  q === 'qualificado' ? true : q === 'desqualificado' ? false : null;
-
 /**
- * Resolve o valor de is_qualified a partir dos DOIS campos aceitos no corpo:
- * `is_qualified` (boolean|null, contrato v3) e o alias legado `qualification`
- * (string). Contrato §10 (aliases completos do review Codex):
- *  - nenhum presente        → { present:false }
- *  - só um presente         → usa o valor dele
- *  - ambos presentes        → precisam mapear pro MESMO valor, senão 'campos_divergentes'
- *  - tipo/enum inválido      → erro nomeado ('invalid is_qualified' / 'invalid qualification')
+ * Resolve o valor de is_qualified a partir do corpo (v3 contract, mig 053): SÓ
+ * `is_qualified` (boolean|null) é aceito. O alias legado `qualification`
+ * (string) foi REMOVIDO junto com a coluna — presença da chave é rejeitada com
+ * o MESMO erro que antes sinalizava um valor de enum inválido
+ * (`invalid qualification`), reusando o 400 existente em vez de introduzir um
+ * shape novo. No PATCH esse ramo é redundante com o allowlist de chaves (que já
+ * barra `qualification` via 'invalid patch' antes de chegar aqui) — mantido
+ * aqui pra o POST, que não tem allowlist, convergir no mesmo comportamento.
  */
 type QualResolution =
   | { ok: true; present: boolean; value: boolean | null }
   | { ok: false; error: Record<string, unknown> };
 function resolveQualificationInput(body: any): QualResolution {
-  const hasIsQualified = body.is_qualified !== undefined;
-  const hasQualification = body.qualification !== undefined;
-  let fromIsQualified: boolean | null | undefined;
-  if (hasIsQualified) {
-    if (body.is_qualified !== true && body.is_qualified !== false && body.is_qualified !== null) {
-      return { ok: false, error: { error: 'invalid is_qualified' } };
-    }
-    fromIsQualified = body.is_qualified;
+  if (body.qualification !== undefined) return { ok: false, error: { error: 'invalid qualification' } };
+  if (body.is_qualified === undefined) return { ok: true, present: false, value: null };
+  if (body.is_qualified !== true && body.is_qualified !== false && body.is_qualified !== null) {
+    return { ok: false, error: { error: 'invalid is_qualified' } };
   }
-  let fromQualification: boolean | null | undefined;
-  if (hasQualification) {
-    if (!qualifications.has(body.qualification)) return { ok: false, error: { error: 'invalid qualification' } };
-    fromQualification = qualificationToBool(body.qualification);
-  }
-  if (hasIsQualified && hasQualification && fromIsQualified !== fromQualification) {
-    return { ok: false, error: { error: 'campos_divergentes' } };
-  }
-  if (!hasIsQualified && !hasQualification) return { ok: true, present: false, value: null };
-  return { ok: true, present: true, value: (hasIsQualified ? fromIsQualified : fromQualification) as boolean | null };
+  return { ok: true, present: true, value: body.is_qualified };
 }
 
 export function registerOpportunityRoutes(app: FastifyInstance, deps: {
@@ -73,7 +56,9 @@ export function registerOpportunityRoutes(app: FastifyInstance, deps: {
     if (q.number_id === undefined) return reply.code(400).send({ error: 'number_id required' });
     if (!numberId) return reply.code(400).send({ error: 'number_id must be numeric' });
     if (q.status !== undefined && !statuses.has(q.status)) return reply.code(400).send({ error: 'invalid status' });
-    if (q.qualification !== undefined && !qualifications.has(q.qualification)) return reply.code(400).send({ error: 'invalid qualification' });
+    // v3 contract (mig 053): alias legado `qualification` REMOVIDO — a chave em si
+    // (qualquer valor) é rejeitada, reusando o 400 que antes só pegava enum inválido.
+    if (q.qualification !== undefined) return reply.code(400).send({ error: 'invalid qualification' });
     // Filtro tri-state v3: is_qualified vem como STRING na query ('true'|'false'|'null').
     let isQualifiedFilter: boolean | null | undefined;
     if (q.is_qualified !== undefined) {
@@ -93,7 +78,7 @@ export function registerOpportunityRoutes(app: FastifyInstance, deps: {
     if (!num) return reply.code(404).send({ error: 'number not found' });
     if (!await gateMember(req, reply, num.workspaceId, authz)) return;
     const result = await listOpportunities(deps.pool, { numberId, workspaceId: num.workspaceId,
-      status: q.status, isQualified: isQualifiedFilter, qualification: q.qualification,
+      status: q.status, isQualified: isQualifiedFilter,
       tagId: tagId ?? undefined, identifier: q.identifier,
       limit: rawLimit, cursor: cursor ?? undefined });
     logAccess(deps.pool, { actor: req.actingUser, action: 'list_opportunities', workspaceId: num.workspaceId, numberId });
@@ -150,7 +135,9 @@ export function registerOpportunityRoutes(app: FastifyInstance, deps: {
   app.patch('/whatsapp/opportunities/:id', { preHandler: auth }, async (req: any, reply) => {
     if (!req.actingUser) return reply.code(400).send({ error: 'x-acting-user required' });
     const body = req.body ?? {};
-    const allowed = ['title', 'status', 'is_qualified', 'loss_reason', 'qualification'];
+    // v3 contract (mig 053): `qualification` REMOVIDO do allowlist — presença da
+    // chave já cai no 400 'invalid patch' abaixo (mesmo mecanismo de sempre).
+    const allowed = ['title', 'status', 'is_qualified', 'loss_reason'];
     if (Object.keys(body).some(k => !allowed.includes(k)) || !Object.keys(body).some(k => allowed.includes(k))) return reply.code(400).send({ error: 'invalid patch' });
     if (body.title !== undefined && body.title !== null && typeof body.title !== 'string') return reply.code(400).send({ error: 'invalid title' });
     if (body.status !== undefined && !statuses.has(body.status)) return reply.code(400).send({ error: 'invalid status' });

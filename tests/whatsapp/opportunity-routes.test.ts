@@ -12,16 +12,19 @@ const date = (n: number) => new Date(`2026-07-${String(n).padStart(2, '0')}T12:0
 // ── Mock v3-aware ────────────────────────────────────────────────────────────
 // As rotas migraram pro data layer v3 (withConversationLock + createOpportunityV3
 // /patchOpportunityV3), então o stub cobre o advisory lock, o INSERT/UPDATE com
-// colunas is_qualified/qualification/loss_reason, o side-effect em whatsapp_thread_meta
-// (+ _log), o probe de grupo (isGroupThread) e o de motivo de perda (isValidLossReason).
+// colunas is_qualified/loss_reason (v3 contract, mig 053 — `qualification` saiu do
+// banco), o side-effect em whatsapp_thread_meta (+ _log), o probe de grupo
+// (isGroupThread) e o de motivo de perda (isValidLossReason).
 function makePool(opts: {
   conversation?: boolean; group?: boolean; opportunities?: any[]; tags?: any[];
   lossReasons?: { workspace_id: string; code: string; active: boolean }[];
   threadMeta?: Record<string, boolean | null>;
 } = {}) {
   const state = {
+    // v3 contract (mig 053): coluna `qualification` não existe mais — as rows do
+    // fixture não a carregam (mapOpportunity deriva sempre de is_qualified).
     opportunities: (opts.opportunities ?? []).map(o => ({ whatsapp_number_id: 1, workspace_id: 'ws-1',
-      title: null, status: 'em_andamento', is_qualified: null, qualification: 'indefinido',
+      title: null, status: 'em_andamento', is_qualified: null,
       loss_reason: null, created_by: 'user-1', updated_at: o.created_at, closed_at: null, tags: [], ...o })),
     events: [] as any[],
     tags: opts.tags ?? [{ id: 10, workspace_id: 'ws-1', name: 'VIP', color: 'warn' }],
@@ -63,9 +66,11 @@ function makePool(opts: {
       return { rows: [], rowCount: 1 };
     }
     if (/INSERT INTO whatsapp_opportunities/.test(text)) {
+      // v3 contract (mig 053): INSERT sem a coluna legada `qualification` — params:
+      // [numberId, workspaceId, identifier, title, is_qualified, createdBy].
       const row = { id: state.nextId++, whatsapp_number_id: params[0], workspace_id: params[1],
         identifier: params[2], title: params[3], status: 'em_andamento', is_qualified: params[4],
-        qualification: params[5], loss_reason: null, created_by: params[6],
+        loss_reason: null, created_by: params[5],
         created_at: date(state.nextId), updated_at: date(state.nextId), closed_at: null, tags: [] };
       state.opportunities.push(row); return { rows: [{ id: row.id }], rowCount: 1 };
     }
@@ -81,9 +86,9 @@ function makePool(opts: {
     if (/UPDATE whatsapp_opportunities SET/.test(text)) {
       const o = state.opportunities.find(x => x.id === Number(params[0]));
       if (!o) return { rows: [], rowCount: 0 };
-      // v3: SET status=$2, is_qualified=$3, qualification=$4, title=$5, loss_reason=$6, closed_at=...
-      o.status = params[1]; o.is_qualified = params[2]; o.qualification = params[3];
-      o.title = params[4]; o.loss_reason = params[5]; o.updated_at = date(24);
+      // v3 contract (mig 053): SET status=$2, is_qualified=$3, title=$4, loss_reason=$5, closed_at=...
+      o.status = params[1]; o.is_qualified = params[2];
+      o.title = params[3]; o.loss_reason = params[4]; o.updated_at = date(24);
       if (/closed_at\s*=\s*NOW/.test(text)) o.closed_at = date(24);
       else if (/closed_at\s*=\s*NULL/.test(text)) o.closed_at = null;
       state.updated++; return { rows: [{ id: o.id }], rowCount: 1 };
@@ -167,7 +172,7 @@ test('POST conversa inexistente retorna 404', async () => {
 test('POST cria em_andamento e somente evento created', async () => {
   const { pool, state } = makePool(); const app = appFor(pool);
   const res = await app.inject({ method: 'POST', url: '/whatsapp/opportunities', headers,
-    payload: { number_id: 1, identifier: 'a', qualification: 'qualificado' } });
+    payload: { number_id: 1, identifier: 'a' } });
   assert.equal(res.statusCode, 200); assert.equal(res.json().opportunity.status, 'em_andamento');
   assert.equal('numberId' in res.json().opportunity, false); assert.equal('workspaceId' in res.json().opportunity, false);
   assert.deepEqual(state.events.map(e => e.field), ['created']); await app.close();
@@ -192,10 +197,12 @@ test('PATCH ganho qualifica, fecha e gera dois eventos; no-op não atualiza', as
   assert.equal(noop.statusCode, 200); assert.equal(state.updated, updates); assert.equal(state.events.length, 2); await app.close();
 });
 
-test('PATCH desqualificar ganho retorna 409', async () => {
-  const { pool } = makePool({ opportunities: [{ id: 1, identifier: 'a', created_at: date(1), status: 'ganho', is_qualified: true, qualification: 'qualificado' }] });
-  const app = appFor(pool); const res = await app.inject({ method: 'PATCH', url: '/whatsapp/opportunities/1', headers, payload: { qualification: 'desqualificado' } });
-  assert.equal(res.statusCode, 409); assert.deepEqual(res.json(), { error: 'desqualificar_ganho' }); await app.close();
+test('PATCH desqualificar via alias qualification (legado) → 400 invalid patch, não chega no kernel (v3 contract, mig 053)', async () => {
+  const { pool, state } = makePool({ opportunities: [{ id: 1, identifier: 'a', created_at: date(1), status: 'ganho', is_qualified: true }] });
+  const app = appFor(pool); const before = state.updated;
+  const res = await app.inject({ method: 'PATCH', url: '/whatsapp/opportunities/1', headers, payload: { qualification: 'desqualificado' } });
+  assert.equal(res.statusCode, 400); assert.deepEqual(res.json(), { error: 'invalid patch' });
+  assert.equal(state.updated, before, 'nenhum UPDATE — rejeitado antes do kernel'); await app.close();
 });
 
 test('PATCH somente title gera só evento title (não toca status/qualification)', async () => {
@@ -264,18 +271,27 @@ test('tags attach/detach gera eventos com nome', async () => {
 });
 
 // =============================================================================
-// v3 — aliases completos is_qualified/qualification + loss_reason + grupo (§10)
+// v3 — is_qualified + loss_reason + grupo (§10). O alias legado `qualification`
+// foi REMOVIDO da aceitação (v3 contract, mig 053) — os testes que o exercitavam
+// agora provam 400 (chave rejeitada), não mais o comportamento de alias.
 // =============================================================================
 
-test('POST alias qualification → is_qualified (qualificado cascateia is_lead=TRUE na thread)', async () => {
+test('POST is_qualified booleano cascateia is_lead=TRUE na thread quando true', async () => {
   const { pool, state } = makePool(); const app = appFor(pool);
   const res = await app.inject({ method: 'POST', url: '/whatsapp/opportunities', headers,
-    payload: { number_id: 1, identifier: 'a', qualification: 'qualificado' } });
+    payload: { number_id: 1, identifier: 'a', is_qualified: true } });
   assert.equal(res.statusCode, 200);
   assert.equal(res.json().opportunity.isQualified, true);
-  assert.equal(res.json().opportunity.qualification, 'qualificado');
+  assert.equal(res.json().opportunity.qualification, 'qualificado', 'string derivada continua na resposta');
   assert.equal(state.threadMeta['1:a'], true, 'is_lead cascateado na thread');
   await app.close();
+});
+
+test('POST alias qualification (legado) → 400 invalid qualification (aceitação removida, v3 contract mig 053)', async () => {
+  const { pool } = makePool(); const app = appFor(pool);
+  const res = await app.inject({ method: 'POST', url: '/whatsapp/opportunities', headers,
+    payload: { number_id: 1, identifier: 'a', qualification: 'qualificado' } });
+  assert.equal(res.statusCode, 400); assert.deepEqual(res.json(), { error: 'invalid qualification' }); await app.close();
 });
 
 test('POST aceita is_qualified booleano direto (true)', async () => {
@@ -292,25 +308,18 @@ test('POST is_qualified=false → 400 invalid_value (desqualificar é patch, nã
   assert.equal(res.statusCode, 400); assert.deepEqual(res.json(), { error: 'invalid_value' }); await app.close();
 });
 
-test('POST alias qualification=desqualificado → 400 invalid_value (mesma regra do false)', async () => {
+test('POST alias qualification=desqualificado (legado) → 400 invalid qualification (aceitação removida)', async () => {
   const { pool } = makePool(); const app = appFor(pool);
   const res = await app.inject({ method: 'POST', url: '/whatsapp/opportunities', headers,
     payload: { number_id: 1, identifier: 'a', qualification: 'desqualificado' } });
-  assert.equal(res.statusCode, 400); assert.deepEqual(res.json(), { error: 'invalid_value' }); await app.close();
+  assert.equal(res.statusCode, 400); assert.deepEqual(res.json(), { error: 'invalid qualification' }); await app.close();
 });
 
-test('POST is_qualified + qualification divergentes → 400 campos_divergentes', async () => {
-  const { pool } = makePool(); const app = appFor(pool);
-  const res = await app.inject({ method: 'POST', url: '/whatsapp/opportunities', headers,
-    payload: { number_id: 1, identifier: 'a', is_qualified: false, qualification: 'qualificado' } });
-  assert.equal(res.statusCode, 400); assert.deepEqual(res.json(), { error: 'campos_divergentes' }); await app.close();
-});
-
-test('POST is_qualified + qualification consistentes → ok', async () => {
+test('POST is_qualified + qualification (legado) juntos, mesmo consistentes → 400 invalid qualification (não há mais divergência a checar)', async () => {
   const { pool } = makePool(); const app = appFor(pool);
   const res = await app.inject({ method: 'POST', url: '/whatsapp/opportunities', headers,
     payload: { number_id: 1, identifier: 'a', is_qualified: true, qualification: 'qualificado' } });
-  assert.equal(res.statusCode, 200); assert.equal(res.json().opportunity.isQualified, true); await app.close();
+  assert.equal(res.statusCode, 400); assert.deepEqual(res.json(), { error: 'invalid qualification' }); await app.close();
 });
 
 test('POST em thread de GRUPO → 400 grupo_nao_tem_oportunidade', async () => {
@@ -320,24 +329,24 @@ test('POST em thread de GRUPO → 400 grupo_nao_tem_oportunidade', async () => {
   assert.equal(res.statusCode, 400); assert.deepEqual(res.json(), { error: 'grupo_nao_tem_oportunidade' }); await app.close();
 });
 
-test('PATCH alias qualification=desqualificado → is_qualified=false (fecha como perdido)', async () => {
+test('PATCH is_qualified=false fecha como perdido (o alias qualification saiu, este é o caminho real)', async () => {
   const { pool } = makePool({ opportunities: [{ id: 1, identifier: 'a', created_at: date(1) }] }); const app = appFor(pool);
-  const res = await app.inject({ method: 'PATCH', url: '/whatsapp/opportunities/1', headers, payload: { qualification: 'desqualificado' } });
+  const res = await app.inject({ method: 'PATCH', url: '/whatsapp/opportunities/1', headers, payload: { is_qualified: false } });
   assert.equal(res.statusCode, 200);
   assert.equal(res.json().opportunity.isQualified, false);
   assert.equal(res.json().opportunity.status, 'perdido');
   await app.close();
 });
 
-test('PATCH is_qualified + qualification divergentes → 400 campos_divergentes', async () => {
+test('PATCH alias qualification (legado) numa opp aberta → 400 invalid patch (aceitação removida)', async () => {
   const { pool } = makePool({ opportunities: [{ id: 1, identifier: 'a', created_at: date(1) }] }); const app = appFor(pool);
   const res = await app.inject({ method: 'PATCH', url: '/whatsapp/opportunities/1', headers,
     payload: { is_qualified: true, qualification: 'desqualificado' } });
-  assert.equal(res.statusCode, 400); assert.deepEqual(res.json(), { error: 'campos_divergentes' }); await app.close();
+  assert.equal(res.statusCode, 400); assert.deepEqual(res.json(), { error: 'invalid patch' }); await app.close();
 });
 
 test('PATCH is_qualified=false num ganho → 409 desqualificar_ganho (repassa erro do kernel)', async () => {
-  const { pool } = makePool({ opportunities: [{ id: 1, identifier: 'a', created_at: date(1), status: 'ganho', is_qualified: true, qualification: 'qualificado' }] });
+  const { pool } = makePool({ opportunities: [{ id: 1, identifier: 'a', created_at: date(1), status: 'ganho', is_qualified: true }] });
   const app = appFor(pool);
   const res = await app.inject({ method: 'PATCH', url: '/whatsapp/opportunities/1', headers, payload: { is_qualified: false } });
   assert.equal(res.statusCode, 409); assert.deepEqual(res.json(), { error: 'desqualificar_ganho' }); await app.close();
@@ -379,7 +388,8 @@ test('PATCH loss_reason custom ATIVO do workspace → 200', async () => {
 });
 
 // =============================================================================
-// v3 — GET: filtro is_qualified (string) + alias qualification, resposta dual
+// v3 — GET: filtro is_qualified (string); alias `qualification` REMOVIDO (v3
+// contract, mig 053) — a resposta segue expondo `qualification` derivada.
 // =============================================================================
 
 test('GET filtro is_qualified=true vira o.is_qualified = $ com param true', async () => {
@@ -397,12 +407,10 @@ test('GET filtro is_qualified=null vira o.is_qualified IS NULL', async () => {
   assert.match(listQuery(state).text, /o\.is_qualified IS NULL/); await app.close();
 });
 
-test('GET alias qualification=desqualificado vira o.is_qualified = $ com param false', async () => {
-  const { pool, state } = makePool(); const app = appFor(pool);
+test('GET alias qualification (legado) → 400 invalid qualification (aceitação removida, v3 contract mig 053)', async () => {
+  const { pool } = makePool(); const app = appFor(pool);
   const res = await app.inject({ method: 'GET', url: '/whatsapp/opportunities?number_id=1&qualification=desqualificado', headers });
-  assert.equal(res.statusCode, 200);
-  const q = listQuery(state);
-  assert.match(q.text, /o\.is_qualified = \$/); assert.ok(q.params.includes(false)); await app.close();
+  assert.equal(res.statusCode, 400); assert.deepEqual(res.json(), { error: 'invalid qualification' }); await app.close();
 });
 
 test('GET is_qualified inválido → 400', async () => {
@@ -413,7 +421,7 @@ test('GET is_qualified inválido → 400', async () => {
 
 test('GET resposta expõe isQualified, lossReason e qualification derivada', async () => {
   const { pool } = makePool({ opportunities: [{ id: 1, identifier: 'a', created_at: date(1),
-    status: 'perdido', is_qualified: false, qualification: 'desqualificado', loss_reason: 'nao_lead' }] });
+    status: 'perdido', is_qualified: false, loss_reason: 'nao_lead' }] });
   const app = appFor(pool);
   const res = await app.inject({ method: 'GET', url: '/whatsapp/opportunities?number_id=1', headers });
   assert.equal(res.statusCode, 200);
@@ -502,7 +510,7 @@ test('MOVE → negociacoes: 200, is_qualified TRUE + thread TRUE + column negoci
 
 test('MOVE → novas_conversas: 200, thread NULL + column novas_conversas', async () => {
   const { pool, state } = makePool({
-    opportunities: [{ id: 1, identifier: 'a', created_at: date(1), is_qualified: true, qualification: 'qualificado' }],
+    opportunities: [{ id: 1, identifier: 'a', created_at: date(1), is_qualified: true }],
     threadMeta: { '1:a': true },
   });
   const app = appFor(pool);
@@ -516,7 +524,7 @@ test('MOVE → novas_conversas: 200, thread NULL + column novas_conversas', asyn
 
 test('MOVE → perdas com motivo de sistema: 200, perdido + loss_reason + thread intacta', async () => {
   const { pool, state } = makePool({
-    opportunities: [{ id: 1, identifier: 'a', created_at: date(1), is_qualified: true, qualification: 'qualificado' }],
+    opportunities: [{ id: 1, identifier: 'a', created_at: date(1), is_qualified: true }],
     threadMeta: { '1:a': true },
   });
   const app = appFor(pool);

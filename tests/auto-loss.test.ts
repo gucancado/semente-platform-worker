@@ -102,7 +102,9 @@ function fakePoolFull(opts: {
         return Promise.resolve({ rows: [{ still_stale: stillStale }], rowCount: 1 });
       }
       if (/UPDATE whatsapp_opportunities SET/.test(text)) {
-        const [id, status, isQualified, , title, lossReason] = params;
+        // v3 contract (mig 053): params sem a coluna legada `qualification` —
+        // [id, status, is_qualified, title, loss_reason].
+        const [id, status, isQualified, title, lossReason] = params;
         const row = store.get(Number(id));
         if (row) { row.status = status; row.is_qualified = isQualified; row.title = title; row.loss_reason = lossReason; }
         return Promise.resolve({ rows: [], rowCount: 1 });

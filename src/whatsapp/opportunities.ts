@@ -18,8 +18,10 @@ export interface Opportunity {
   identifier: string;
   title: string | null;
   status: OppStatus;
-  // v3: is_qualified é a fonte da verdade (NULL=indefinido/TRUE=qualificado/FALSE=desqualificado);
-  // qualification continua exposta (derivada) até a Fase D remover a coluna legada.
+  // v3 contract (mig 053): is_qualified é a ÚNICA fonte da verdade (NULL=indefinido/
+  // TRUE=qualificado/FALSE=desqualificado) — a coluna legada `qualification` foi
+  // dropada do banco. `qualification` aqui continua exposta nas respostas, mas
+  // SEMPRE derivada de is_qualified (nunca lida do banco).
   isQualified: boolean | null;
   lossReason: string | null;
   qualification: OppQualification;
@@ -42,18 +44,21 @@ export interface OpportunityEvent {
 type ScopedOpportunity = Opportunity & { numberId: number; workspaceId: string };
 const iso = (value: any): string => value?.toISOString?.() ?? value;
 const mapTag = (r: any): OpportunityTag => ({ id: Number(r.id), name: r.name, color: r.color });
-export const mapOpportunity = (r: any): Opportunity => ({
-  id: Number(r.id),
-  identifier: r.identifier, title: r.title, status: r.status,
-  isQualified: r.is_qualified === undefined ? null : r.is_qualified,
-  lossReason: r.loss_reason ?? null,
-  // Deriva de is_qualified quando a coluna está presente (inclui NULL→indefinido);
-  // só cai na coluna legada `qualification` se is_qualified nem veio no SELECT.
-  qualification: r.is_qualified !== undefined ? qualificationLabel(r.is_qualified) : r.qualification,
-  createdAt: iso(r.created_at), updatedAt: iso(r.updated_at),
-  closedAt: r.closed_at ? iso(r.closed_at) : null, createdBy: r.created_by,
-  tags: Array.isArray(r.tags) ? r.tags.map(mapTag) : [],
-});
+export const mapOpportunity = (r: any): Opportunity => {
+  const isQualified = r.is_qualified === undefined ? null : r.is_qualified;
+  return {
+    id: Number(r.id),
+    identifier: r.identifier, title: r.title, status: r.status,
+    isQualified,
+    lossReason: r.loss_reason ?? null,
+    // v3 contract (mig 053): SEMPRE derivada de is_qualified — a coluna legada
+    // `qualification` não existe mais no banco.
+    qualification: qualificationLabel(isQualified),
+    createdAt: iso(r.created_at), updatedAt: iso(r.updated_at),
+    closedAt: r.closed_at ? iso(r.closed_at) : null, createdBy: r.created_by,
+    tags: Array.isArray(r.tags) ? r.tags.map(mapTag) : [],
+  };
+};
 const mapScopedOpportunity = (r: any): ScopedOpportunity => ({
   ...mapOpportunity(r),
   numberId: Number(r.whatsapp_number_id),
@@ -61,6 +66,8 @@ const mapScopedOpportunity = (r: any): ScopedOpportunity => ({
 });
 
 // SELECT o.* já traz as colunas v3 (is_qualified, loss_reason) desde a migration 051.
+// v3 contract (mig 053): a coluna legada `qualification` NÃO existe mais — não vem
+// mais no `o.*`; mapOpportunity deriva a string sempre de is_qualified.
 const OPP_SELECT = `SELECT o.*,
   COALESCE((SELECT json_agg(json_build_object('id', t.id, 'name', t.name, 'color', t.color) ORDER BY t.name, t.id)
     FROM whatsapp_opportunity_tags ot JOIN whatsapp_tags t ON t.id = ot.tag_id
@@ -154,9 +161,10 @@ async function insertEvent(client: Pick<PoolClient, 'query'>, p: {
 }
 
 // ---------------------------------------------------------------------------
-// Data layer v3 — lock por conversa, dual-write is_qualified/qualification,
-// side-effect na thread (spec §4.11 + §4.1-4.2). É o ÚNICO caminho de escrita
-// das rotas desde a Task 8 (o createOpportunity/patchOpportunity v2 saíram).
+// Data layer v3 — lock por conversa, escrita SÓ is_qualified (v3 contract, mig
+// 053 — a coluna legada `qualification` foi dropada), side-effect na thread
+// (spec §4.11 + §4.1-4.2). É o ÚNICO caminho de escrita das rotas desde a Task 8
+// (o createOpportunity/patchOpportunity v2 saíram).
 // ---------------------------------------------------------------------------
 
 /**
@@ -246,10 +254,11 @@ export async function applyThreadLeadTrue(
 }
 
 /**
- * Cria oportunidade v3 sob o lock da conversa. Escreve as duas colunas de
- * qualificação (is_qualified + qualification derivada, DUAL WRITE até a Fase D)
- * e mantém os eventos `created` + `tag_added` (paridade v2). Tag inexistente no
- * workspace → null (nada é inserido; a transação do lock commita vazia).
+ * Cria oportunidade v3 sob o lock da conversa. v3 contract (mig 053): escreve
+ * SÓ is_qualified — a coluna legada `qualification` foi dropada (dual-write saiu
+ * junto com o trigger de sincronia da 051). Mantém os eventos `created` +
+ * `tag_added` (paridade v2). Tag inexistente no workspace → null (nada é
+ * inserido; a transação do lock commita vazia).
  *
  * `isQualified` aceita SÓ {null/undefined, true}:
  *  - `false` → OppInvariantError('invalid_value') ANTES de qualquer escrita. Regra v1:
@@ -297,9 +306,9 @@ export async function createOpportunityV3(pool: Pool, p: {
       for (const row of tags.rows) tagNames.set(Number(row.id), String(row.name));
     }
     const { rows } = await client.query(`INSERT INTO whatsapp_opportunities
-      (whatsapp_number_id, workspace_id, identifier, title, status, is_qualified, qualification, created_by)
-      VALUES ($1,$2,$3,$4,'em_andamento',$5,$6,$7) RETURNING id`,
-    [p.numberId, p.workspaceId, p.identifier, p.title ?? null, isQ, qualificationLabel(isQ), p.createdBy]);
+      (whatsapp_number_id, workspace_id, identifier, title, status, is_qualified, created_by)
+      VALUES ($1,$2,$3,$4,'em_andamento',$5,$6) RETURNING id`,
+    [p.numberId, p.workspaceId, p.identifier, p.title ?? null, isQ, p.createdBy]);
     const id = Number(rows[0].id);
     await insertEvent(client, { opportunityId: id, field: 'created', oldValue: null, newValue: null, changedBy: p.createdBy });
     for (const tagId of new Set(p.tagIds ?? [])) {
@@ -319,8 +328,9 @@ export async function createOpportunityV3(pool: Pool, p: {
 /**
  * Aplica UM patch v3 já validado no par pela via do kernel, DENTRO de uma
  * transação/lock já abertos, sobre o estado `cur` já relido. Concentra as escritas
- * de opp (UPDATE dual-write + eventos) e o side-effect de thread (§4.1-4.2) num só
- * lugar — reusado por `patchOpportunityGuarded` E por `moveOpportunity`, pra não
+ * de opp (UPDATE + eventos — v3 contract, mig 053: só is_qualified, sem a coluna
+ * legada `qualification`) e o side-effect de thread (§4.1-4.2) num só lugar —
+ * reusado por `patchOpportunityGuarded` E por `moveOpportunity`, pra não
  * duplicar o SQL do UPDATE/eventos. Lança `OppInvariantError` (do kernel) — quem
  * chama trata no catch. Devolve o que de fato mudou:
  *  - `oppChanged`: houve UPDATE/eventos de opp (transition.events > 0);
@@ -345,10 +355,10 @@ async function applyOppPatchInTx(
           : 'closed_at';
     await client.query(
       `UPDATE whatsapp_opportunities SET
-         status = $2, is_qualified = $3, qualification = $4, title = $5, loss_reason = $6,
+         status = $2, is_qualified = $3, title = $4, loss_reason = $5,
          closed_at = ${closedAtExpr}, updated_at = NOW()
        WHERE id = $1`,
-      [opportunityId, next.status, next.isQualified, qualificationLabel(next.isQualified), next.title, next.lossReason]);
+      [opportunityId, next.status, next.isQualified, next.title, next.lossReason]);
     for (const ev of transition.events) {
       await insertEvent(client, { opportunityId, field: ev.field, oldValue: ev.oldValue, newValue: ev.newValue, changedBy });
     }
@@ -374,10 +384,11 @@ export type PatchGuard = (client: PoolClient, current: OppStateV3) => Promise<bo
  * lock (mata o stale-snapshot do v2), chama `guard(client, current)` — se `false`,
  * devolve `{ok:false, error:'conflict'}` SEM escrever nada (a transação comita
  * vazia; equivalente a rollback, já que nenhum statement de escrita rodou) — roda
- * o kernel (`applyOppPatchV3`), escreve o UPDATE com colunas EXPLÍCITAS (dual-write
- * is_qualified + qualification, mais loss_reason e closed_at conforme
- * closedAtAction), grava os eventos e — quando o kernel emite
- * threadLeadAction='set_true' — o side-effect da thread. Tudo na mesma transação.
+ * o kernel (`applyOppPatchV3`), escreve o UPDATE com colunas EXPLÍCITAS (v3
+ * contract, mig 053: is_qualified, mais loss_reason e closed_at conforme
+ * closedAtAction — sem a coluna legada `qualification`), grava os eventos e —
+ * quando o kernel emite threadLeadAction='set_true' — o side-effect da thread.
+ * Tudo na mesma transação.
  * Erros de invariante viram o union de erro (não lançam).
  *
  * O guard existe pra jobs automáticos (ex.: auto-loss, Fase B) que decidem fechar

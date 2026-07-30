@@ -70,7 +70,7 @@ export function registerReadRoutes(
   // ── GET /whatsapp/threads ────────────────────────────────────────────────────
   // workspace_id + number_id in query; listThreads IS workspace-scoped → authz before DB.
   app.get('/whatsapp/threads', { preHandler: auth }, async (req: any, reply) => {
-    const { workspace_id, number_id, limit, cursor, kind, lead_status, lead_stage, lead_source, tag, temperature, include_first_inbound, since, until, period_basis, opp, opp_status, opp_qualification, opp_tag_id, opp_column } = req.query;
+    const { workspace_id, number_id, limit, cursor, kind, lead_status, lead_stage, lead_source, tag, temperature, include_first_inbound, since, until, period_basis, opp, opp_status, opp_tag_id, opp_column } = req.query;
     if (!workspace_id || !number_id) return reply.code(400).send({ error: 'workspace_id and number_id required' });
     if (Number.isNaN(Number(number_id))) return reply.code(400).send({ error: 'number_id must be numeric' });
     if (opp_tag_id !== undefined && opp_tag_id !== '' && Number.isNaN(Number(opp_tag_id))) return reply.code(400).send({ error: 'opp_tag_id must be numeric' });
@@ -101,7 +101,10 @@ export function registerReadRoutes(
       periodBasis,
       opp: opp === 'with' || opp === 'without' ? opp : undefined,
       oppStatus: emptyToUndefined(opp_status),
-      oppQualification: emptyToUndefined(opp_qualification),
+      // v3 contract (mig 053): alias legado `opp_qualification` REMOVIDO da aceitação
+      // HTTP — a chave, se enviada, é simplesmente ignorada (mesmo tratamento de
+      // qualquer outro query key desconhecido nesta rota). `listThreads` mantém o
+      // parâmetro `oppQualification` como capacidade interna (sem caller nesta rota).
       oppTagId: emptyToUndefined(opp_tag_id),
       oppColumn: oppColumn ?? undefined,
     });
@@ -258,7 +261,7 @@ export function registerReadRoutes(
   // ── GET /whatsapp/search ─────────────────────────────────────────────────────
   // workspace_id + number_id in query; searchThreads IS workspace-scoped → authz before DB.
   app.get('/whatsapp/search', { preHandler: auth }, async (req: any, reply) => {
-    const { workspace_id, number_id, query, since, until, kind, lead_status, limit, lead_stage, lead_source, tag, opp, opp_status, opp_qualification, opp_tag_id, opp_column } = req.query;
+    const { workspace_id, number_id, query, since, until, kind, lead_status, limit, lead_stage, lead_source, tag, opp, opp_status, opp_tag_id, opp_column } = req.query;
     if (!workspace_id || !number_id || !query) return reply.code(400).send({ error: 'workspace_id, number_id e query required' });
     if (Number.isNaN(Number(number_id))) return reply.code(400).send({ error: 'number_id must be numeric' });
     if (opp_tag_id !== undefined && opp_tag_id !== '' && Number.isNaN(Number(opp_tag_id))) return reply.code(400).send({ error: 'opp_tag_id must be numeric' });
@@ -277,7 +280,8 @@ export function registerReadRoutes(
       tag: emptyToUndefined(tag),
       opp: opp === 'with' || opp === 'without' ? opp : undefined,
       oppStatus: emptyToUndefined(opp_status),
-      oppQualification: emptyToUndefined(opp_qualification),
+      // v3 contract (mig 053): alias legado `opp_qualification` REMOVIDO da aceitação
+      // HTTP — mesmo racional do /whatsapp/threads acima.
       oppTagId: emptyToUndefined(opp_tag_id),
       oppColumn: oppColumn ?? undefined,
     });

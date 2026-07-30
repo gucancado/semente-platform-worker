@@ -3,8 +3,10 @@
  *
  * Testes PUROS (sem Postgres nem env de servidor) do data layer v3 de oportunidades:
  *   - mapOpportunity: snake→camel com as colunas novas (is_qualified/loss_reason) e
- *     qualification derivada (com fallback pra coluna legada quando is_qualified some).
- *   - resolveIsQualifiedFilter: alias tri-state qualification↔isQualified do filtro.
+ *     qualification SEMPRE derivada de is_qualified (v3 contract, mig 053 — a coluna
+ *     legada `qualification` foi dropada do banco; sem fallback).
+ *   - resolveIsQualifiedFilter: alias tri-state qualification↔isQualified do filtro
+ *     (helper de query interno — não é mais aceito como input HTTP em nenhuma rota).
  *   - countOpenOpportunities: SQL shape via client fake (só em_andamento do par).
  *   - countAnyOpportunities: idem, mas SEM filtro de status (qualquer opp do par) —
  *     usada pela re-checagem do poller (Fase B, skipIfAnyOpportunity).
@@ -84,15 +86,18 @@ test('mapOpportunity expõe isQualified/lossReason e deriva qualification de is_
   assert.equal(i.qualification, 'indefinido');
 });
 
-test('mapOpportunity sem coluna is_qualified cai na qualification legada', () => {
-  const legacy = mapOpportunity({
+test('mapOpportunity sem is_qualified no row → indefinido (v3 contract, mig 053: SEM fallback pra coluna legada)', () => {
+  // Mesmo que a row traga uma chave `qualification` solta (ex.: resquício de um
+  // client antigo em memória), o mapper NUNCA mais a lê — só is_qualified importa.
+  const row = {
     id: 1, identifier: 'c', title: null, status: 'em_andamento',
     qualification: 'qualificado', created_at: new Date(), updated_at: new Date(),
     closed_at: null, created_by: null, tags: [],
-  });
-  assert.equal(legacy.qualification, 'qualificado');
-  assert.equal(legacy.isQualified, null);
-  assert.equal(legacy.lossReason, null);
+  };
+  const opp = mapOpportunity(row);
+  assert.equal(opp.qualification, 'indefinido', 'is_qualified ausente → indefinido, ignora a chave qualification solta');
+  assert.equal(opp.isQualified, null);
+  assert.equal(opp.lossReason, null);
 });
 
 // =============================================================================
