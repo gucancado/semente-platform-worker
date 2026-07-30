@@ -292,16 +292,35 @@ export async function createOpportunityV3(pool: Pool, p: {
 }
 
 /**
- * Aplica um patch v3 INTEIRO sob o lock da conversa da opp: relê a row DENTRO do
- * lock (mata o stale-snapshot do v2), roda o kernel (`applyOppPatchV3`), escreve
- * o UPDATE com colunas EXPLÍCITAS (dual-write is_qualified + qualification, mais
- * loss_reason e closed_at conforme closedAtAction), grava os eventos e — quando o
- * kernel emite threadLeadAction='set_true' — o side-effect da thread. Tudo na
- * mesma transação. Erros de invariante viram o union de erro (não lançam).
+ * Guard avaliado DENTRO do lock, logo após o re-read do estado atual da opp e
+ * ANTES de qualquer escrita (kernel/UPDATE/eventos). Devolver `false` aborta o
+ * patch inteiro sem escrever nada — ver `patchOpportunityGuarded`.
  */
-export async function patchOpportunityV3(
-  pool: Pool, opportunityId: number, patch: OppPatchV3, changedBy: string,
-): Promise<{ ok: true; opportunity: Opportunity } | { ok: false; error: 'not_found' | 'desqualificar_ganho' | 'invalid_value' }> {
+export type PatchGuard = (client: PoolClient, current: OppStateV3) => Promise<boolean>;
+
+/**
+ * Aplica um patch v3 INTEIRO sob o lock da conversa da opp: relê a row DENTRO do
+ * lock (mata o stale-snapshot do v2), chama `guard(client, current)` — se `false`,
+ * devolve `{ok:false, error:'conflict'}` SEM escrever nada (a transação comita
+ * vazia; equivalente a rollback, já que nenhum statement de escrita rodou) — roda
+ * o kernel (`applyOppPatchV3`), escreve o UPDATE com colunas EXPLÍCITAS (dual-write
+ * is_qualified + qualification, mais loss_reason e closed_at conforme
+ * closedAtAction), grava os eventos e — quando o kernel emite
+ * threadLeadAction='set_true' — o side-effect da thread. Tudo na mesma transação.
+ * Erros de invariante viram o union de erro (não lançam).
+ *
+ * O guard existe pra jobs automáticos (ex.: auto-loss, Fase B) que decidem fechar
+ * uma opp com base num SELECT de candidatos feito FORA do lock: entre esse SELECT
+ * e o momento em que este patch toma o lock, um humano pode ter mudado o status
+ * (ex.: marcar ganho) ou uma mensagem nova pode ter chegado — o guard confirma,
+ * sob o MESMO lock que vai escrever, que a premissa que motivou o patch continua
+ * verdadeira. `patchOpportunityV3` é este mesmo código com um guard sempre-true
+ * (zero duplicação) — rotas humanas não têm essa janela de decisão externa, então
+ * nunca precisam de guard.
+ */
+export async function patchOpportunityGuarded(
+  pool: Pool, opportunityId: number, patch: OppPatchV3, changedBy: string, guard: PatchGuard,
+): Promise<{ ok: true; opportunity: Opportunity } | { ok: false; error: 'not_found' | 'desqualificar_ganho' | 'invalid_value' | 'conflict' }> {
   // Descobre o par (número, identifier) pra chave do lock. A leitura autoritativa
   // do estado é refeita DENTRO do lock; se a row sumir lá, devolve not_found.
   const head = await pool.query(`SELECT whatsapp_number_id, identifier FROM whatsapp_opportunities WHERE id = $1`, [opportunityId]);
@@ -309,7 +328,7 @@ export async function patchOpportunityV3(
   const numberId = Number(head.rows[0].whatsapp_number_id);
   const identifier = String(head.rows[0].identifier);
   try {
-    return await withConversationLock<{ ok: true; opportunity: Opportunity } | { ok: false; error: 'not_found' }>(
+    return await withConversationLock<{ ok: true; opportunity: Opportunity } | { ok: false; error: 'not_found' | 'conflict' }>(
       pool, numberId, identifier, async (client) => {
         const { rows } = await client.query(`${OPP_SELECT} WHERE o.id = $1`, [opportunityId]);
         const row = rows[0];
@@ -321,6 +340,7 @@ export async function patchOpportunityV3(
           title: row.title,
           lossReason: row.loss_reason ?? null,
         };
+        if (!(await guard(client, cur))) return { ok: false, error: 'conflict' };
         const transition = applyOppPatchV3(cur, patch); // lança OppInvariantError → catch abaixo
         if (transition.events.length > 0) {
           const next = transition.next;
@@ -350,6 +370,20 @@ export async function patchOpportunityV3(
     if (err instanceof OppInvariantError) return { ok: false, error: err.code };
     throw err;
   }
+}
+
+/**
+ * Patch v3 sem guard externo (uso das rotas humanas — não há SELECT-fora-do-lock
+ * a proteger). Delega inteiramente pra `patchOpportunityGuarded` com um guard
+ * sempre-true: 'conflict' nunca é alcançável por essa via, então o cast abaixo é
+ * seguro (o guard nunca devolve false).
+ */
+export async function patchOpportunityV3(
+  pool: Pool, opportunityId: number, patch: OppPatchV3, changedBy: string,
+): Promise<{ ok: true; opportunity: Opportunity } | { ok: false; error: 'not_found' | 'desqualificar_ganho' | 'invalid_value' }> {
+  return patchOpportunityGuarded(pool, opportunityId, patch, changedBy, async () => true) as Promise<
+    { ok: true; opportunity: Opportunity } | { ok: false; error: 'not_found' | 'desqualificar_ganho' | 'invalid_value' }
+  >;
 }
 
 /**

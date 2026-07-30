@@ -6,7 +6,7 @@
  * Postgres — o que os testes puros (tests/auto-loss.test.ts) não alcançam
  * (candidatos reais via whatsapp_opportunities/messages, o GREATEST/COALESCE
  * do LEFT JOIN LATERAL quando não há NENHUMA mensagem, e o fechamento real via
- * patchOpportunityV3 sob lock com CHECKs/eventos de verdade):
+ * patchOpportunityGuarded sob lock com CHECKs/eventos de verdade):
  *   1. Opp aberta cuja última mensagem (inbound, velha) passou de auto_loss_days
  *      → fecha 'perdido'/'atendente_nao_respondeu' + exatamente 2 eventos
  *      (status, loss_reason), changed_by='system'.
@@ -20,15 +20,23 @@
  *   6. Opp SEM mensagem nenhuma no par, criada há muito tempo → fecha
  *      'lead_nao_respondeu' (prova o fallback COALESCE(...,'epoch') quando o
  *      LEFT JOIN LATERAL não casa nenhuma row).
+ *   7. Opp em thread not_lead (is_lead=FALSE) → não é candidata (minor 2 do
+ *      review — simetria com o poller de criação, B1).
+ *   8. Fix round 1 (Important do review): opp marcada GANHA por um humano
+ *      DEPOIS do SELECT de candidatos mas ANTES do lock do patch (janela real
+ *      de corrida, reproduzida deterministicamente contra Postgres via um pool
+ *      proxy que injeta a escrita "humana" no meio do fluxo) → o guard recusa,
+ *      a opp CONTINUA ganha, sem eventos/clobber do sweep.
  */
 
 import { test, beforeEach, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { pool } from '../../src/db.js';
 import { runAutoLossSweep } from '../../src/whatsapp/auto-loss.js';
+import { patchOpportunityV3 } from '../../src/whatsapp/opportunities.js';
 
 const TRUNCATE = `TRUNCATE messages, whatsapp_numbers, whatsapp_opportunities, whatsapp_opportunity_events,
-  whatsapp_workspace_settings RESTART IDENTITY CASCADE`;
+  whatsapp_workspace_settings, whatsapp_thread_meta, whatsapp_thread_meta_log RESTART IDENTITY CASCADE`;
 
 beforeEach(async () => { await pool.query(TRUNCATE); });
 after(() => pool.end());
@@ -160,4 +168,57 @@ test('opp SEM mensagem nenhuma no par, criada há muito tempo → fecha lead_nao
   const opp = await getOpportunity(oppId);
   assert.equal(opp.status, 'perdido');
   assert.equal(opp.loss_reason, 'lead_nao_respondeu');
+});
+
+test('opp em thread not_lead (is_lead=FALSE) → não é candidata mesmo com atividade velha (minor 2 do review, simetria com o poller B1)', async () => {
+  await insertNumber(7, 'ws7');
+  await insertSettings('ws7', 7);
+  await insertMsg({ numberId: 7, workspaceId: 'ws7', identifier: 'c7', createdAt: '2026-01-01T00:00:00Z', direction: 'inbound' });
+  const oppId = await insertOpportunity({ numberId: 7, workspaceId: 'ws7', identifier: 'c7', createdAt: '2026-01-01T00:00:00Z' });
+  await pool.query(`INSERT INTO whatsapp_thread_meta (whatsapp_number_id, identifier, is_lead) VALUES (7,'c7',FALSE)`);
+
+  const r = await runAutoLossSweep(pool);
+  assert.deepEqual(r, { closed: 0 });
+  const opp = await getOpportunity(oppId);
+  assert.equal(opp.status, 'em_andamento');
+});
+
+test('fix round 1 (Important do review): opp marcada GANHA por um humano entre o SELECT de candidatos e o lock do patch → guard recusa, opp CONTINUA ganha, sem clobber', async () => {
+  await insertNumber(6, 'ws6');
+  await insertSettings('ws6', 7);
+  await insertMsg({ numberId: 6, workspaceId: 'ws6', identifier: 'c6', createdAt: '2026-01-01T00:00:00Z', direction: 'inbound' });
+  const oppId = await insertOpportunity({ numberId: 6, workspaceId: 'ws6', identifier: 'c6', createdAt: '2026-01-01T00:00:00Z' });
+
+  // Pool-proxy: deixa a query de candidatos rodar de VERDADE contra o Postgres
+  // (acha a opp ainda em_andamento — é a janela ANTES da ação humana). Antes de
+  // devolver o resultado pro sweep, injeta a ação humana real (marca ganho via
+  // patchOpportunityV3, SEM guard, na mesma pool real) — reproduz
+  // deterministicamente, contra Postgres de verdade, a janela de corrida entre
+  // o SELECT de candidatos (fora do lock) e o momento em que o patch do sweep
+  // toma o lock. Sem isso o teste dependeria de timing de Promise.all (flaky).
+  let injected = false;
+  const proxyPool = {
+    query: (text: string, params?: any[]) => pool.query(text, params as any[]).then(async (res: any) => {
+      if (!injected && /FROM whatsapp_opportunities o\b/.test(text)) {
+        injected = true;
+        const human = await patchOpportunityV3(pool, oppId, { status: 'ganho' }, 'human');
+        assert.equal(human.ok, true, 'a marcação humana de ganho deve ter sucesso (opp ainda existe e está em_andamento)');
+      }
+      return res;
+    }),
+    connect: () => pool.connect(),
+  } as any;
+
+  const result = await runAutoLossSweep(proxyPool);
+  assert.deepEqual(result, { closed: 0 }, 'o guard recusa — a opp já não é mais em_andamento quando o patch re-lê sob o lock');
+
+  const opp = await getOpportunity(oppId);
+  assert.equal(opp.status, 'ganho', 'a venda NÃO foi clobberada pra perdido');
+  assert.equal(opp.loss_reason, null);
+
+  const ev = await pool.query(
+    `SELECT field FROM whatsapp_opportunity_events WHERE opportunity_id=$1 ORDER BY id`, [oppId],
+  );
+  assert.equal(ev.rows.some((r: any) => r.field === 'loss_reason'), false,
+    'o sweep não deve ter gravado loss_reason — nenhuma escrita do lado do auto-loss');
 });

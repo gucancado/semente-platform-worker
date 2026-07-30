@@ -14,6 +14,12 @@
  *   - createOpportunityV3 com skipIfAnyOpportunity: a re-checagem "zero opps do par"
  *     roda DENTRO da tx, ANTES do INSERT (Fase B, Task B1); sem a flag, comportamento
  *     pré-existente intocado (nunca conta nada).
+ *   - patchOpportunityGuarded / patchOpportunityV3 (Fase B, Task B2 fix round 1):
+ *     o guard roda DENTRO do lock, depois do re-read, ANTES de qualquer escrita —
+ *     guard false → conflict sem UPDATE/eventos; guard recebe o estado ATUAL
+ *     relido (não um valor capturado antes do lock); guard true → fluxo idêntico
+ *     ao patch sem guard; patchOpportunityV3 delega pra guarded com guard
+ *     sempre-true (contrato pré-existente intocado, incl. not_found passthrough).
  *
  * opportunities.ts só importa TIPOS de 'pg' + módulos puros (opportunity-core /
  * conversation-lock), então não carrega o env do servidor — roda localmente.
@@ -29,6 +35,8 @@ import {
   applyThreadLeadTrue,
   createOpportunityV3,
   deleteOpportunityV3,
+  patchOpportunityGuarded,
+  patchOpportunityV3,
 } from '../src/whatsapp/opportunities.js';
 import { OppInvariantError } from '../src/whatsapp/opportunity-core.js';
 
@@ -343,4 +351,104 @@ test('deleteOpportunityV3: row sumiu entre a descoberta e o lock → not_found, 
   const result = await deleteOpportunityV3(pool, 7);
   assert.deepEqual(result, { ok: false, error: 'not_found' });
   assert.equal(clientCalls.filter((c) => isDelete(c.text)).length, 0, 'não deleta se a re-leitura não achou a row');
+});
+
+// =============================================================================
+// patchOpportunityGuarded / patchOpportunityV3 — guard sob o lock (Fase B,
+// Task B2 fix round 1): fecha a janela entre um SELECT de candidatos feito
+// FORA do lock (jobs automáticos) e o momento em que o patch toma o lock.
+// =============================================================================
+
+const baseOppRow = {
+  id: 1, identifier: 'c', title: null, status: 'em_andamento',
+  is_qualified: null, loss_reason: null, created_at: new Date(), updated_at: new Date(),
+  closed_at: null, created_by: 'system', tags: [], whatsapp_number_id: 9,
+};
+
+// fakePoolForPatch: pool.query resolve a descoberta do par (head, default derivado
+// de currentRow); connect() devolve um client cujo `SELECT o.*` SEMPRE devolve
+// `currentRow` (antes E depois da escrita — suficiente pra testar o guard e o
+// passthrough de erro; os testes end-to-end de mutação real já vivem em
+// tests/auto-loss.test.ts e no .db.test.ts).
+function fakePoolForPatch(opts: {
+  headRow?: { whatsapp_number_id: number; identifier: string } | null;
+  currentRow: any;
+}) {
+  const clientCalls: { text: string; params: any[] }[] = [];
+  const client = {
+    query(text: string, params: any[] = []) {
+      clientCalls.push({ text, params });
+      if (/^SELECT o\.\*/.test(text)) return Promise.resolve({ rows: [opts.currentRow], rowCount: 1 });
+      return Promise.resolve({ rows: [], rowCount: 0 }); // BEGIN / lock / UPDATE / INSERT events / COMMIT
+    },
+    release() {},
+  };
+  const pool = {
+    query(text: string) {
+      if (/SELECT whatsapp_number_id, identifier FROM whatsapp_opportunities WHERE id/.test(text)) {
+        const head = opts.headRow === undefined
+          ? { whatsapp_number_id: opts.currentRow.whatsapp_number_id, identifier: opts.currentRow.identifier }
+          : opts.headRow;
+        return Promise.resolve({ rows: head ? [head] : [], rowCount: head ? 1 : 0 });
+      }
+      return Promise.resolve({ rows: [], rowCount: 0 });
+    },
+    connect() { return Promise.resolve(client); },
+  } as any;
+  return { pool, clientCalls };
+}
+
+test('patchOpportunityGuarded: guard false → conflict, ZERO escrita (nem UPDATE nem eventos)', async () => {
+  const { pool, clientCalls } = fakePoolForPatch({ currentRow: baseOppRow });
+  const result = await patchOpportunityGuarded(pool, 1, { status: 'perdido', lossReason: 'x' }, 'system', async () => false);
+  assert.deepEqual(result, { ok: false, error: 'conflict' });
+  assert.equal(clientCalls.some((c) => /UPDATE whatsapp_opportunities SET/.test(c.text)), false,
+    'guard barra ANTES do UPDATE');
+  assert.equal(clientCalls.some((c) => /INSERT INTO whatsapp_opportunity_events/.test(c.text)), false);
+  // Nada escrito → o COMMIT final é um no-op (equivalente a rollback no efeito).
+  assert.equal(clientCalls.at(-1)!.text, 'COMMIT');
+});
+
+test('patchOpportunityGuarded: guard recebe o estado ATUAL relido dentro do lock, não um valor pré-lock', async () => {
+  const { pool } = fakePoolForPatch({ currentRow: { ...baseOppRow, status: 'ganho', is_qualified: true } });
+  let seen: { status: string; isQualified: boolean | null } | null = null;
+  await patchOpportunityGuarded(pool, 1, { title: 'novo título' }, 'system', async (_client, current) => {
+    seen = current;
+    return true;
+  });
+  assert.equal(seen?.status, 'ganho');
+  assert.equal(seen?.isQualified, true);
+});
+
+test('patchOpportunityGuarded: guard true → segue o fluxo normal (UPDATE + eventos), igual a um patch sem guard', async () => {
+  const { pool, clientCalls } = fakePoolForPatch({ currentRow: baseOppRow });
+  const result = await patchOpportunityGuarded(pool, 1, { status: 'perdido', lossReason: 'lead_nao_respondeu' }, 'system', async () => true);
+  assert.equal(result.ok, true);
+  assert.ok(clientCalls.some((c) => /UPDATE whatsapp_opportunities SET/.test(c.text)));
+  const eventCalls = clientCalls.filter((c) => /INSERT INTO whatsapp_opportunity_events/.test(c.text));
+  assert.equal(eventCalls.length, 2, 'status + loss_reason');
+});
+
+test('patchOpportunityGuarded: opp não encontrada no head → not_found, guard NUNCA é chamado (nem lock)', async () => {
+  const { pool } = fakePoolForPatch({ headRow: null, currentRow: baseOppRow });
+  let guardCalled = false;
+  const result = await patchOpportunityGuarded(pool, 999, { status: 'perdido', lossReason: 'x' }, 'system', async () => {
+    guardCalled = true;
+    return true;
+  });
+  assert.deepEqual(result, { ok: false, error: 'not_found' });
+  assert.equal(guardCalled, false, 'sem row no head, nem chega a abrir o lock/re-read');
+});
+
+test('patchOpportunityV3: delega pra patchOpportunityGuarded com guard sempre-true (comportamento idêntico ao pré-fix)', async () => {
+  const { pool, clientCalls } = fakePoolForPatch({ currentRow: baseOppRow });
+  const result = await patchOpportunityV3(pool, 1, { status: 'perdido', lossReason: 'lead_nao_respondeu' }, 'u1');
+  assert.equal(result.ok, true);
+  assert.ok(clientCalls.some((c) => /UPDATE whatsapp_opportunities SET/.test(c.text)));
+});
+
+test('patchOpportunityV3: not_found segue passthrough (o guard sempre-true não muda o contrato pré-existente)', async () => {
+  const { pool } = fakePoolForPatch({ headRow: null, currentRow: baseOppRow });
+  const result = await patchOpportunityV3(pool, 999, { status: 'perdido', lossReason: 'x' }, 'u1');
+  assert.deepEqual(result, { ok: false, error: 'not_found' });
 });

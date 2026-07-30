@@ -61,6 +61,11 @@ function fakePoolFull(opts: {
   candidatesByWorkspace: Record<string, { id: number; whatsapp_number_id: number; identifier: string; last_direction: string | null }[]>;
   missingOppIds?: Set<number>; // simula opp sumida entre o SELECT de candidatos e o patch → not_found
   failWorkspaces?: Set<string>;
+  // guard: por default a opp está 'em_andamento' e o re-check de inatividade
+  // devolve true (segue stale) — simula o "mundo não mudou" entre o SELECT de
+  // candidatos e o lock. Overrides simulam as 2 janelas de corrida do fix:
+  statusOverrideByOppId?: Record<number, string>; // (a) humano mudou o status (ex.: 'ganho') antes do lock
+  stillStaleByOppId?: Record<number, boolean>;    // (b) mensagem nova chegou → guard re-check acha false
 }) {
   const poolCalls: { text: string; params: any[] }[] = [];
   const clientCalls: { text: string; params: any[] }[] = [];
@@ -69,7 +74,7 @@ function fakePoolFull(opts: {
     for (const c of list) {
       store.set(c.id, {
         id: c.id, whatsapp_number_id: c.whatsapp_number_id, identifier: c.identifier,
-        title: null, status: 'em_andamento', is_qualified: null, loss_reason: null,
+        title: null, status: opts.statusOverrideByOppId?.[c.id] ?? 'em_andamento', is_qualified: null, loss_reason: null,
         created_at: new Date(), updated_at: new Date(), closed_at: null, created_by: 'system', tags: [],
       });
     }
@@ -80,6 +85,13 @@ function fakePoolFull(opts: {
       if (/^SELECT o\.\*/.test(text)) {
         const row = store.get(Number(params[0]));
         return Promise.resolve(row ? { rows: [row], rowCount: 1 } : { rows: [], rowCount: 0 });
+      }
+      if (/AS still_stale/.test(text)) {
+        // params: [numberId, identifier, createdAt, autoLossDays] — a opp buscada é
+        // a única com esse (numberId, identifier) no fixture de teste.
+        const row = [...store.values()].find((r) => r.whatsapp_number_id === params[0] && r.identifier === params[1]);
+        const stillStale = row ? (opts.stillStaleByOppId?.[row.id] ?? true) : true;
+        return Promise.resolve({ rows: [{ still_stale: stillStale }], rowCount: 1 });
       }
       if (/UPDATE whatsapp_opportunities SET/.test(text)) {
         const [id, status, isQualified, , title, lossReason] = params;
@@ -146,6 +158,10 @@ test('runAutoLossSweep: query de candidatos — GREATEST com created_at, desempa
   assert.match(candidatesCall!.text, /ARRAY_AGG\(m\.direction ORDER BY m\.created_at DESC, m\.id DESC\)/);
   assert.match(candidatesCall!.text, /o\.status = 'em_andamento'/);
   assert.match(candidatesCall!.text, /NOW\(\) - make_interval\(days => \$2\)/);
+  // Minor 2 do review: simetria com o poller B1 — opp órfã numa thread not_lead
+  // não vira "perda" com motivo.
+  assert.match(candidatesCall!.text, /LEFT JOIN whatsapp_thread_meta tm/);
+  assert.match(candidatesCall!.text, /tm\.is_lead IS DISTINCT FROM FALSE/);
 });
 
 test('runAutoLossSweep: workspace sem auto_loss_days não gera query de candidatos (filtro já é da SQL de settings)', async () => {
@@ -188,6 +204,69 @@ test('runAutoLossSweep: candidato com last_direction outbound → lead_nao_respo
   const result = await runAutoLossSweep(pool);
   assert.deepEqual(result, { closed: 1 });
   assert.equal(store.get(7).loss_reason, LEAD_NAO_RESPONDEU);
+});
+
+// =============================================================================
+// runAutoLossSweep — guard sob o lock (fix round 1): mata o clobber de ganho
+// (1b) e a corrida com mensagem nova (1a)
+// =============================================================================
+
+test('runAutoLossSweep: guard (a) — opp deixou de ser em_andamento (humano marcou ganho) → conflict, SEM UPDATE (não clobbera a venda)', async () => {
+  const infoCalls: unknown[][] = [];
+  const originalInfo = console.info;
+  console.info = (...args: unknown[]) => { infoCalls.push(args); };
+  try {
+    const { pool, clientCalls, store } = fakePoolFull({
+      settingsRows: [{ workspace_id: 'ws-1', auto_loss_days: 7 }],
+      candidatesByWorkspace: { 'ws-1': [{ id: 55, whatsapp_number_id: 9, identifier: 'c', last_direction: 'inbound' }] },
+      // simula: entre o SELECT de candidatos (fora do lock) e o patch, um humano
+      // marcou a opp como ganha — o re-read DENTRO do lock já vê 'ganho'.
+      statusOverrideByOppId: { 55: 'ganho' },
+    });
+    const result = await runAutoLossSweep(pool);
+    assert.deepEqual(result, { closed: 0 });
+    assert.equal(store.get(55).status, 'ganho', 'a venda NÃO foi clobberada pra perdido');
+    assert.equal(clientCalls.some((c) => /UPDATE whatsapp_opportunities SET/.test(c.text)), false,
+      'guard barra ANTES do UPDATE — nenhuma escrita quando a premissa já não vale');
+    assert.equal(clientCalls.some((c) => /INSERT INTO whatsapp_opportunity_events/.test(c.text)), false);
+    assert.equal(infoCalls.length, 1, 'conflict loga info, não warn/error (guard funcionando, não é bug)');
+    assert.match(String(infoCalls[0]![0]), /55/);
+  } finally {
+    console.info = originalInfo;
+  }
+});
+
+test('runAutoLossSweep: guard (b) — mensagem nova chegou depois do SELECT de candidatos (re-check acha not-stale) → conflict, SEM UPDATE', async () => {
+  const originalInfo = console.info;
+  console.info = () => {}; // guard (a) já cobre o log de conflict; aqui só o comportamento
+  try {
+    const { pool, clientCalls, store } = fakePoolFull({
+      settingsRows: [{ workspace_id: 'ws-1', auto_loss_days: 7 }],
+      candidatesByWorkspace: { 'ws-1': [{ id: 56, whatsapp_number_id: 9, identifier: 'c', last_direction: 'inbound' }] },
+      // simula: a leitura fresca (dentro do lock) do MAX(messages.created_at) já
+      // não bate mais o corte de auto_loss_days — uma mensagem nova chegou.
+      stillStaleByOppId: { 56: false },
+    });
+    const result = await runAutoLossSweep(pool);
+    assert.deepEqual(result, { closed: 0 });
+    assert.equal(store.get(56).status, 'em_andamento', 'não fechou — a conversa reativou');
+    assert.equal(clientCalls.some((c) => /UPDATE whatsapp_opportunities SET/.test(c.text)), false);
+  } finally {
+    console.info = originalInfo;
+  }
+});
+
+test('runAutoLossSweep: guard passa (status em_andamento + ainda stale) → fecha normalmente (não regride o caminho feliz)', async () => {
+  const { pool, store, clientCalls } = fakePoolFull({
+    settingsRows: [{ workspace_id: 'ws-1', auto_loss_days: 7 }],
+    candidatesByWorkspace: { 'ws-1': [{ id: 57, whatsapp_number_id: 9, identifier: 'c', last_direction: 'inbound' }] },
+  });
+  const result = await runAutoLossSweep(pool);
+  assert.deepEqual(result, { closed: 1 });
+  assert.equal(store.get(57).status, 'perdido');
+  const stillStaleCall = clientCalls.find((c) => /AS still_stale/.test(c.text));
+  assert.ok(stillStaleCall, 'o guard deve rodar o re-check de inatividade sob o lock');
+  assert.deepEqual(stillStaleCall!.params.slice(0, 2), [9, 'c']);
 });
 
 test('runAutoLossSweep: patch com {ok:false} (opp sumiu antes do patch) → loga warn e segue, sem incrementar closed', async () => {
