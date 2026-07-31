@@ -36,6 +36,15 @@ export interface Suggestion {
   resolvedBy: string | null;
 }
 
+export interface Insight {
+  id: number;
+  workspaceId: string;
+  runId: number | null;
+  runAt: string;
+  summary: string;
+  details: unknown;
+}
+
 /** timestamptz do pg vem como Date; toleramos string ISO (fakes/serialização). */
 function toISO(v: unknown): string | null {
   if (v == null) return null;
@@ -54,6 +63,17 @@ function mapSuggestion(row: any): Suggestion {
     createdAt: toISO(row.created_at) as string,
     resolvedAt: toISO(row.resolved_at),
     resolvedBy: row.resolved_by ?? null,
+  };
+}
+
+function mapInsight(row: any): Insight {
+  return {
+    id: Number(row.id),
+    workspaceId: row.workspace_id,
+    runId: row.run_id == null ? null : Number(row.run_id),
+    runAt: toISO(row.run_at) as string,
+    summary: row.summary,
+    details: row.details ?? null,
   };
 }
 
@@ -193,6 +213,19 @@ export async function insertInsight(
   return Number(rows[0].id);
 }
 
+/** Últimos N insights de um workspace, mais recentes primeiro (Task E4 — GET /whatsapp/insights). */
+export async function listInsights(pool: Pool, workspaceId: string, limit: number): Promise<Insight[]> {
+  const { rows } = await pool.query(
+    `SELECT id, workspace_id, run_id, run_at, summary, details
+       FROM whatsapp_ai_insights
+      WHERE workspace_id = $1
+      ORDER BY run_at DESC
+      LIMIT $2`,
+    [workspaceId, limit],
+  );
+  return rows.map(mapInsight);
+}
+
 /** Sugestões pendentes de um workspace, mais antigas primeiro (fila de revisão humana). */
 export async function listPendingSuggestions(pool: Pool, workspaceId: string): Promise<Suggestion[]> {
   const { rows } = await pool.query(
@@ -203,6 +236,22 @@ export async function listPendingSuggestions(pool: Pool, workspaceId: string): P
     [workspaceId],
   );
   return rows.map(mapSuggestion);
+}
+
+/**
+ * Lê uma sugestão por id, SEM filtro de workspace (Task E4 — a rota que consome
+ * isto é responsável por comparar `suggestion.workspaceId` contra o workspace
+ * derivado do `number_id` do request e responder 404 em caso de mismatch, pra
+ * não vazar existência de sugestão de outro workspace).
+ */
+export async function getSuggestion(pool: Pool, id: number): Promise<Suggestion | null> {
+  const { rows } = await pool.query(
+    `SELECT id, workspace_id, kind, payload, status, created_at, resolved_at, resolved_by
+       FROM whatsapp_ai_suggestions
+      WHERE id = $1`,
+    [id],
+  );
+  return rows[0] ? mapSuggestion(rows[0]) : null;
 }
 
 /**

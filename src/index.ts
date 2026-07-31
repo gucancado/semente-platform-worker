@@ -19,6 +19,7 @@ import { registerOpportunityRoutes } from './whatsapp/opportunity-routes.js';
 import { registerTagRoutes } from './whatsapp/tag-routes.js';
 import { registerLossReasonRoutes } from './whatsapp/loss-reason-routes.js';
 import { registerSettingsRoutes } from './whatsapp/settings-routes.js';
+import { registerSuggestionRoutes } from './whatsapp/suggestion-routes.js';
 import { registerMeetingsCollectRoutes } from './meetings-collect/routes.js';
 import { registerMeetingsReadRoutes } from './meetings-read/routes.js';
 import { registerAttributionRoutes } from './episodes/attribution-routes.js';
@@ -156,6 +157,10 @@ async function main() {
     registerTagRoutes(scope, { pool, panelToken: config.PANEL_TOKEN });
     registerLossReasonRoutes(scope, { pool, panelToken: config.PANEL_TOKEN });
     registerSettingsRoutes(scope, { pool, panelToken: config.PANEL_TOKEN });
+    // Sugestões da IA nível 2 (§8) + insights semanais: leitura por membro,
+    // aplicar/dispensar por admin — mesmo escopo de escrita das demais rotas
+    // deste bloco.
+    registerSuggestionRoutes(scope, { pool, panelToken: config.PANEL_TOKEN });
   });
 
   // Coleta de reuniões (Vexa): auth X-Panel-Token. Só registra se VEXA_* presentes.

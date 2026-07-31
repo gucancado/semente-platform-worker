@@ -18,6 +18,8 @@ import {
   insertInsight,
   listPendingSuggestions,
   resolveSuggestion,
+  getSuggestion,
+  listInsights,
 } from '../../src/whatsapp/ai-pattern-store.js';
 
 type Handler = (params: any[]) => { rows: any[]; rowCount?: number };
@@ -237,4 +239,53 @@ test('resolveSuggestion: id inexistente ou já resolvida → 0 rows → null', a
   const { pool } = makeFakePool([() => ({ rows: [] })]);
   const result = await resolveSuggestion(pool, 999, 'dismissed', 'user-uuid-1');
   assert.equal(result, null);
+});
+
+// ── getSuggestion (Task E4) ────────────────────────────────────────────────────
+
+test('getSuggestion: SELECT por id, sem filtro de workspace (rota decide o 404 cross-tenant)', async () => {
+  const row = {
+    id: 5, workspace_id: 'ws-1', kind: 'guidance_lead',
+    payload: { current: 'a', suggested: 'b', reason: 'r' },
+    status: 'pending', created_at: new Date('2026-07-27T10:00:00.000Z'),
+    resolved_at: null, resolved_by: null,
+  };
+  const { pool, calls } = makeFakePool([() => ({ rows: [row] })]);
+  const result = await getSuggestion(pool, 5);
+  assert.match(calls[0].sql, /FROM whatsapp_ai_suggestions/);
+  assert.match(calls[0].sql, /WHERE id\s*=\s*\$1/);
+  assert.equal(calls[0].sql.includes('workspace_id ='), false);
+  assert.deepEqual(calls[0].params, [5]);
+  assert.equal(result?.workspaceId, 'ws-1');
+});
+
+test('getSuggestion: id inexistente → null', async () => {
+  const { pool } = makeFakePool([() => ({ rows: [] })]);
+  const result = await getSuggestion(pool, 999);
+  assert.equal(result, null);
+});
+
+// ── listInsights (Task E4) ─────────────────────────────────────────────────────
+
+test('listInsights: SELECT ordenado por run_at DESC, LIMIT, mapeia snake_case → camelCase', async () => {
+  const row = {
+    id: 3, workspace_id: 'ws-1', run_id: 7, run_at: new Date('2026-07-27T05:00:00.000Z'),
+    summary: 'padrões da semana', details: { tagsCreated: ['bairro x'] },
+  };
+  const { pool, calls } = makeFakePool([() => ({ rows: [row] })]);
+  const result = await listInsights(pool, 'ws-1', 5);
+  assert.match(calls[0].sql, /FROM whatsapp_ai_insights/);
+  assert.match(calls[0].sql, /ORDER BY run_at DESC/);
+  assert.match(calls[0].sql, /LIMIT \$2/);
+  assert.deepEqual(calls[0].params, ['ws-1', 5]);
+  assert.deepEqual(result, [{
+    id: 3, workspaceId: 'ws-1', runId: 7, runAt: '2026-07-27T05:00:00.000Z',
+    summary: 'padrões da semana', details: { tagsCreated: ['bairro x'] },
+  }]);
+});
+
+test('listInsights: workspace sem insights → []', async () => {
+  const { pool } = makeFakePool([() => ({ rows: [] })]);
+  const result = await listInsights(pool, 'ws-1', 5);
+  assert.deepEqual(result, []);
 });
