@@ -7,8 +7,9 @@
 --    DO NOTHING (molde `claimNight`, src/lua/db.ts). status='failed' é retomável (E1 store:
 --    claimPatternRun re-tenta a mesma row); 'running'/'done' bloqueiam nova tentativa.
 --  - whatsapp_ai_suggestions: nível 2 → humano (edição de guidance). NUNCA aplicado
---    automaticamente — dedupe por (workspace, kind, status='pending') garante no máximo
---    1 pendente por kind/workspace.
+--    automaticamente — índice único parcial uq_ai_suggestions_pending (workspace, kind)
+--    WHERE status='pending' garante no máximo 1 pendente por kind/workspace, mesmo sob
+--    corrida (fast-path em código + fallback em 23505, ver comentário na tabela abaixo).
 --  - whatsapp_ai_insights: relatório semanal (texto curto + jsonb de detalhes),
 --    referencia o run que o produziu.
 --
@@ -44,10 +45,17 @@ CREATE TABLE IF NOT EXISTS whatsapp_ai_suggestions (
   resolved_by  TEXT
 );
 
--- Dedupe (nível 2 não cria 2ª sugestão pending do mesmo kind no workspace) é aplicado em
--- código (INSERT ... WHERE NOT EXISTS, src/whatsapp/ai-pattern-store.ts) — não em índice
--- parcial, porque 'pending' não é o único status possível ao longo do tempo (aplicada/
--- dispensada convivem com uma nova pendente).
+-- Dedupe (nível 2 não cria 2ª sugestão pending do mesmo kind no workspace) tem DUAS
+-- camadas: fast-path em código (INSERT ... WHERE NOT EXISTS, src/whatsapp/
+-- ai-pattern-store.ts) + a garantia de verdade abaixo — índice único PARCIAL (só sobre
+-- status='pending'; aplicada/dispensada convivem livremente com uma nova pendente,
+-- então a unicidade não pode ser sobre a tabela inteira). Fecha a corrida em que duas
+-- chamadas passam AMBAS pelo NOT EXISTS antes de qualquer uma commitar — a 2ª leva
+-- unique_violation (23505), tratado no store como dedupe (retorna null).
+CREATE UNIQUE INDEX IF NOT EXISTS uq_ai_suggestions_pending
+  ON whatsapp_ai_suggestions (workspace_id, kind) WHERE status = 'pending';
+
+-- Índice geral (todos os status) pra listagens/filtros que não se restringem a pending.
 CREATE INDEX IF NOT EXISTS idx_ai_suggestions_ws_kind_status
   ON whatsapp_ai_suggestions (workspace_id, kind, status);
 

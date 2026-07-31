@@ -93,13 +93,22 @@ export async function claimPatternRun(
     return null;
   }
 
+  // Guard `AND status = 'failed'` no UPDATE: SELECT+UPDATE são dois round-trips
+  // separados (sem transação/lock entre eles) — sem o guard, duas réplicas que leem
+  // 'failed' ao mesmo tempo (CLI manual + runner, ex.) ganhariam AMBAS o resume e
+  // disparariam 2 calls LLM pra mesma run. Com o guard, só quem chega primeiro casa
+  // a linha; a 2ª UPDATE afeta 0 rows (a row já não está mais 'failed') → corrida
+  // perdida, devolve null (não inventa um runId de uma retomada que não aconteceu).
   const upd = await pool.query(
     `UPDATE whatsapp_ai_pattern_runs
         SET status = 'running', started_at = now(), finished_at = NULL
-      WHERE id = $1
+      WHERE id = $1 AND status = 'failed'
       RETURNING id`,
     [existing.id],
   );
+  if (upd.rows.length === 0) {
+    return null;
+  }
   return { runId: Number(upd.rows[0].id), resumed: true };
 }
 
@@ -123,11 +132,21 @@ export async function failPatternRun(pool: Pool, runId: number): Promise<void> {
   );
 }
 
+/** Código do Postgres pra unique_violation (23505 — classe 23, integrity_constraint_violation). */
+function isUniqueViolation(err: unknown): boolean {
+  return typeof err === 'object' && err !== null && (err as { code?: unknown }).code === '23505';
+}
+
 /**
  * Insere uma sugestão de edição de guidance (nível 2 → humano; spec §8 "Não-autonomia").
- * Dedupe ATÔMICO (INSERT ... WHERE NOT EXISTS numa única query — sem race entre
- * SELECT-então-INSERT): não cria uma 2ª pendente do mesmo `kind` no workspace. Retorna
- * o id inserido, ou `null` se já havia uma pendente (nada foi escrito).
+ * Dedupe em DUAS camadas: (1) fast-path `INSERT ... WHERE NOT EXISTS` — evita a escrita
+ * na maioria dos casos sem round-trip de erro; (2) guarda de verdade = índice único
+ * parcial `uq_ai_suggestions_pending (workspace_id, kind) WHERE status='pending'`
+ * (migration 055) — se duas chamadas passarem AMBAS pelo NOT EXISTS antes de qualquer
+ * uma commitar (a mesma classe de corrida do finding do claim acima), o banco rejeita a
+ * 2ª com unique_violation (23505), que é tratada aqui como dedupe (retorna `null`, não
+ * propaga erro). Qualquer outro erro é relançado. Retorna o id inserido, ou `null` se já
+ * havia uma pendente do mesmo `kind` no workspace.
  */
 export async function insertSuggestion(
   pool: Pool,
@@ -135,17 +154,22 @@ export async function insertSuggestion(
   kind: SuggestionKind,
   payload: unknown,
 ): Promise<number | null> {
-  const { rows } = await pool.query(
-    `INSERT INTO whatsapp_ai_suggestions (workspace_id, kind, payload)
-     SELECT $1, $2, $3::jsonb
-      WHERE NOT EXISTS (
-        SELECT 1 FROM whatsapp_ai_suggestions
-         WHERE workspace_id = $1 AND kind = $2 AND status = 'pending'
-      )
-     RETURNING id`,
-    [workspaceId, kind, JSON.stringify(payload)],
-  );
-  return rows[0] ? Number(rows[0].id) : null;
+  try {
+    const { rows } = await pool.query(
+      `INSERT INTO whatsapp_ai_suggestions (workspace_id, kind, payload)
+       SELECT $1, $2, $3::jsonb
+        WHERE NOT EXISTS (
+          SELECT 1 FROM whatsapp_ai_suggestions
+           WHERE workspace_id = $1 AND kind = $2 AND status = 'pending'
+        )
+       RETURNING id`,
+      [workspaceId, kind, JSON.stringify(payload)],
+    );
+    return rows[0] ? Number(rows[0].id) : null;
+  } catch (err) {
+    if (isUniqueViolation(err)) return null;
+    throw err;
+  }
 }
 
 /**

@@ -93,6 +93,23 @@ test('failPatternRun: grava status=failed e finished_at', async () => {
   assert.ok(rows[0].finished_at != null);
 });
 
+test('claimPatternRun: duas retomadas CONCORRENTES da mesma run failed — só uma vence (guard fecha a corrida)', async () => {
+  const first = await claimPatternRun(pool, 'ws-1', '2026-07-20', '2026-07-26');
+  await failPatternRun(pool, first!.runId);
+
+  const [a, b] = await Promise.all([
+    claimPatternRun(pool, 'ws-1', '2026-07-20', '2026-07-26'),
+    claimPatternRun(pool, 'ws-1', '2026-07-20', '2026-07-26'),
+  ]);
+  const winners = [a, b].filter((r) => r != null);
+  assert.equal(winners.length, 1, 'sem o guard AND status=failed no UPDATE, as duas venceriam (2 calls LLM p/ a mesma run)');
+  assert.equal(winners[0]!.runId, first!.runId);
+  assert.equal(winners[0]!.resumed, true);
+
+  const { rows } = await pool.query('SELECT count(*)::int AS n FROM whatsapp_ai_pattern_runs');
+  assert.equal(rows[0].n, 1, 'segue 1 row só — nenhuma retomada cria row nova');
+});
+
 test('insertSuggestion: dedupe real — 2ª pendente do mesmo kind não é criada; após resolver, nova pode nascer', async () => {
   const id1 = await insertSuggestion(pool, 'ws-1', 'guidance_lead', { current: 'a', suggested: 'b', reason: 'r1' });
   assert.ok(id1 != null);
@@ -104,9 +121,24 @@ test('insertSuggestion: dedupe real — 2ª pendente do mesmo kind não é criad
   const id3 = await insertSuggestion(pool, 'ws-1', 'guidance_qualified', { current: 'x', suggested: 'y', reason: 'r3' });
   assert.ok(id3 != null);
 
+  const { rows } = await pool.query(`SELECT count(*)::int AS n FROM whatsapp_ai_suggestions WHERE status = 'pending'`);
+  assert.equal(rows[0].n, 2, 'só as 2 pendentes de kinds distintos — a 2ª tentativa do mesmo kind não gravou nada');
+
   await resolveSuggestion(pool, id1!, 'dismissed', 'user-1');
   const id4 = await insertSuggestion(pool, 'ws-1', 'guidance_lead', { current: 'a', suggested: 'd', reason: 'r4' });
   assert.ok(id4 != null, 'após resolver a pendente antiga, uma nova pode ser criada');
+});
+
+test('insertSuggestion: duas inserções CONCORRENTES do mesmo kind/workspace — só uma vence (índice único parcial + catch 23505)', async () => {
+  const [a, b] = await Promise.all([
+    insertSuggestion(pool, 'ws-1', 'guidance_lead', { current: 'a', suggested: 'x', reason: 'r' }),
+    insertSuggestion(pool, 'ws-1', 'guidance_lead', { current: 'a', suggested: 'y', reason: 'r' }),
+  ]);
+  const winners = [a, b].filter((v) => v != null);
+  assert.equal(winners.length, 1, 'sem o índice único parcial, o WHERE NOT EXISTS sozinho deixaria as duas passarem');
+
+  const { rows } = await pool.query(`SELECT count(*)::int AS n FROM whatsapp_ai_suggestions WHERE workspace_id='ws-1' AND kind='guidance_lead' AND status='pending'`);
+  assert.equal(rows[0].n, 1);
 });
 
 test('insertInsight + FK run_id; listPendingSuggestions/resolveSuggestion end-to-end', async () => {

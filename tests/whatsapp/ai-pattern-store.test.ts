@@ -65,7 +65,20 @@ test('claimPatternRun: conflito + status=failed → SELECT então UPDATE pra run
   assert.match(calls[2].sql, /status\s*=\s*'running'/);
   assert.match(calls[2].sql, /started_at\s*=\s*now\(\)/i);
   assert.match(calls[2].sql, /finished_at\s*=\s*NULL/i);
+  assert.match(calls[2].sql, /WHERE id\s*=\s*\$1 AND status\s*=\s*'failed'/, 'UPDATE tem guard de status (fecha a corrida)');
   assert.deepEqual(calls[2].params, [7]);
+});
+
+test('claimPatternRun: retomada perde a corrida — UPDATE 0 rows (status já não é failed) → null, sem inventar runId', async () => {
+  const { pool, calls } = makeFakePool([
+    () => ({ rows: [] }), // INSERT conflito
+    () => ({ rows: [{ id: 7, status: 'failed' }] }), // SELECT lê failed...
+    () => ({ rows: [] }), // ...mas outra réplica já mudou o status entre o SELECT e o UPDATE
+  ]);
+  const res = await claimPatternRun(pool, 'ws-1', '2026-07-20', '2026-07-26');
+  assert.equal(res, null);
+  assert.equal(calls.length, 3, 'chegou a tentar o UPDATE, mas perdeu');
+  assert.match(calls[2].sql, /WHERE id\s*=\s*\$1 AND status\s*=\s*'failed'/);
 });
 
 test('claimPatternRun: conflito + status=running → null, sem UPDATE (não retoma run alheia em progresso)', async () => {
@@ -134,6 +147,33 @@ test('insertSuggestion: já existe pendente do mesmo kind → WHERE NOT EXISTS n
   const { pool } = makeFakePool([() => ({ rows: [] })]); // dedupe bloqueou
   const id = await insertSuggestion(pool, 'ws-1', 'guidance_qualified', { x: 1 });
   assert.equal(id, null);
+});
+
+test('insertSuggestion: corrida real (23505 unique_violation do índice parcial) → dedupe, retorna null', async () => {
+  const { pool, calls } = makeFakePool([
+    () => {
+      const err: any = new Error('duplicate key value violates unique constraint "uq_ai_suggestions_pending"');
+      err.code = '23505';
+      throw err;
+    },
+  ]);
+  const id = await insertSuggestion(pool, 'ws-1', 'guidance_lead', { a: 1 });
+  assert.equal(id, null);
+  assert.equal(calls.length, 1, 'não retenta nem faz query extra — só engole o erro');
+});
+
+test('insertSuggestion: erro que NÃO é 23505 propaga (não é engolido como dedupe)', async () => {
+  const { pool } = makeFakePool([
+    () => {
+      const err: any = new Error('connection terminated unexpectedly');
+      err.code = '57P01';
+      throw err;
+    },
+  ]);
+  await assert.rejects(
+    () => insertSuggestion(pool, 'ws-1', 'guidance_lead', { a: 1 }),
+    /connection terminated unexpectedly/,
+  );
 });
 
 // ── insertInsight ─────────────────────────────────────────────────────────────
