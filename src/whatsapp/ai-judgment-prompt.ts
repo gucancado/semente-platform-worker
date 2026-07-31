@@ -69,8 +69,12 @@ function fmtBool(v: boolean | null): string {
  *    e qualquer forja de tag futura (mais robusto que blacklist dos tokens).
  * A ordem entre as substituições é irrelevante (conjuntos de caracteres disjuntos:
  * `\r\n`, `[]`, `<>`); documentado por precaução.
+ *
+ * Exportado (Task E2): o analista de padrões nível 2 (ai-pattern-context.ts) reusa o
+ * MESMO sanitizador nos rationales — eles são derivados, mas podem ecoar texto de
+ * cliente, então recebem o mesmo tratamento anti-injeção (‹›).
  */
-function sanitizeMessageText(text: string): string {
+export function sanitizeMessageText(text: string): string {
   return text
     .replace(/[\r\n]+/g, ' ')
     .replace(/\[/g, '(')
