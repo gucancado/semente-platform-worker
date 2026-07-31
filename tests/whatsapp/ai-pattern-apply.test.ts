@@ -33,6 +33,7 @@ function routeKey(sql: string): string {
   if (sql.includes('/* pat_apply:loss_update */')) return 'loss_update';
   if (sql.includes('/* pat_apply:opp_pair */')) return 'opp_pair';
   if (sql.includes('/* pat_apply:retro_tag_insert */')) return 'retro_tag_insert';
+  if (sql.includes('/* pat_apply:backfill_state */')) return 'backfill_state';
   return 'other';
 }
 
@@ -65,6 +66,7 @@ function baseCtx(over: Partial<PatternContext> = {}): PatternContext {
     guidances: { lead: null, qualified: null },
     triageCounts: { judged: 0, toLead: 0, toNotLead: 0 },
     opportunityIds: [],
+    lossBackfillCandidates: [],
     ...over,
   };
 }
@@ -72,7 +74,7 @@ function baseCtx(over: Partial<PatternContext> = {}): PatternContext {
 function baseDecision(over: Partial<PatternDecision> = {}): PatternDecision {
   return {
     newTags: [], editTags: [], newLossReasons: [], editLossReasons: [],
-    guidanceSuggestions: [], insightSummary: 'resumo da semana', ...over,
+    guidanceSuggestions: [], backfillLossReasons: [], insightSummary: 'resumo da semana', ...over,
   };
 }
 
@@ -82,12 +84,15 @@ function makeDeps(over: {
   stickyByOpp?: Record<number, StickyFlags>;
   suggestionResult?: (kind: string) => number | null;
   insightId?: number;
+  validLoss?: boolean;
+  patchResult?: { oppChanged: boolean; threadChanged: boolean };
 } = {}) {
   const log = {
     suggestions: [] as { ws: string; kind: string; payload: any }[],
     insights: [] as { ws: string; runId: number | null; summary: string; details: any }[],
     events: [] as any[],
     stickyCalls: [] as any[],
+    patches: [] as { oppId: number; cur: any; patch: any; changedBy: string; pair: any }[],
   };
   const deps: ApplyPatternDeps = {
     runId: over.runId === undefined ? 7 : over.runId,
@@ -100,6 +105,11 @@ function makeDeps(over: {
       return fn(client);
     }) as any,
     insertEvent: (async (_client: any, p: any) => { log.events.push(p); }) as any,
+    applyOppPatchInTx: (async (_client: any, oppId: number, cur: any, patch: any, changedBy: string, pair: any) => {
+      log.patches.push({ oppId, cur, patch, changedBy, pair });
+      return over.patchResult ?? { oppChanged: true, threadChanged: false };
+    }) as any,
+    isValidLossReason: (async () => over.validLoss ?? true) as any,
     insertSuggestion: (async (_pool: any, ws: string, kind: string, payload: any) => {
       log.suggestions.push({ ws, kind, payload });
       return over.suggestionResult ? over.suggestionResult(kind) : 100;
@@ -318,9 +328,93 @@ test('insight: insertInsight com runId + summary; applied inclui insight:id', as
   assert.equal(log.insights[0].summary, 'semana forte');
 });
 
-test('backfill de loss_reason: skip note explícito (não implementado nesta v1)', async () => {
-  const { pool } = makeFakePool({});
-  const { deps } = makeDeps();
-  const res = await applyPatternDecision(pool, baseCtx(), baseDecision(), deps);
-  assert.ok(res.skipped.includes('backfill_loss_reason:not_implemented'));
+// =============================================================================
+// backfill de loss_reason (spec §8) — patch via kernel sob o lock do par
+// =============================================================================
+
+test('backfill: opp perdido + loss_reason NULL + sem sticky → applyOppPatchInTx {lossReason} changedBy=ai', async () => {
+  const { pool, client } = makeFakePool({
+    opp_pair: () => ({ rows: [{ whatsapp_number_id: 1, identifier: 'c', workspace_id: 'ws' }] }),
+    backfill_state: () => ({ rows: [{ status: 'perdido', is_qualified: null, closed_at: new Date('2026-07-15T00:00:00Z'), title: null, loss_reason: null }] }),
+  });
+  wireLockClient(pool, client);
+  const { deps, log } = makeDeps();
+  const res = await applyPatternDecision(pool, baseCtx(), baseDecision({
+    backfillLossReasons: [{ opportunityId: 71, code: 'preco' }],
+  }), deps);
+  assert.ok(res.applied.includes('backfill_loss:71:preco'));
+  assert.equal(log.patches.length, 1);
+  assert.deepEqual(log.patches[0].patch, { lossReason: 'preco' });
+  assert.equal(log.patches[0].changedBy, 'ai');
+  assert.equal(log.patches[0].cur.status, 'perdido');
+  assert.equal(log.patches[0].cur.lossReason, null);
+});
+
+test('backfill: sticky com evento humano de loss_reason → skip human_owned, sem patch', async () => {
+  const { pool, client } = makeFakePool({
+    opp_pair: () => ({ rows: [{ whatsapp_number_id: 1, identifier: 'c', workspace_id: 'ws' }] }),
+    backfill_state: () => ({ rows: [{ status: 'perdido', is_qualified: null, closed_at: null, title: null, loss_reason: null }] }),
+  });
+  wireLockClient(pool, client);
+  const { deps, log } = makeDeps({ stickyByOpp: { 71: { ...NO_STICKY, lossReason: true } } });
+  const res = await applyPatternDecision(pool, baseCtx(), baseDecision({
+    backfillLossReasons: [{ opportunityId: 71, code: 'preco' }],
+  }), deps);
+  assert.ok(res.skipped.includes('backfill_loss:71:human_owned'));
+  assert.equal(log.patches.length, 0, 'não aplica patch quando humano já mexeu no motivo');
+});
+
+test('backfill: opp NÃO-perdida no re-read (reaberta) → skip not_perdido', async () => {
+  const { pool, client } = makeFakePool({
+    opp_pair: () => ({ rows: [{ whatsapp_number_id: 1, identifier: 'c', workspace_id: 'ws' }] }),
+    backfill_state: () => ({ rows: [{ status: 'em_andamento', is_qualified: null, closed_at: null, title: null, loss_reason: null }] }),
+  });
+  wireLockClient(pool, client);
+  const { deps, log } = makeDeps();
+  const res = await applyPatternDecision(pool, baseCtx(), baseDecision({
+    backfillLossReasons: [{ opportunityId: 71, code: 'preco' }],
+  }), deps);
+  assert.ok(res.skipped.includes('backfill_loss:71:not_perdido'));
+  assert.equal(log.patches.length, 0);
+});
+
+test('backfill: loss_reason já preenchido no re-read → skip already_set', async () => {
+  const { pool, client } = makeFakePool({
+    opp_pair: () => ({ rows: [{ whatsapp_number_id: 1, identifier: 'c', workspace_id: 'ws' }] }),
+    backfill_state: () => ({ rows: [{ status: 'perdido', is_qualified: null, closed_at: null, title: null, loss_reason: 'ja_tem' }] }),
+  });
+  wireLockClient(pool, client);
+  const { deps, log } = makeDeps();
+  const res = await applyPatternDecision(pool, baseCtx(), baseDecision({
+    backfillLossReasons: [{ opportunityId: 71, code: 'preco' }],
+  }), deps);
+  assert.ok(res.skipped.includes('backfill_loss:71:already_set'));
+  assert.equal(log.patches.length, 0);
+});
+
+test('backfill: código desativado sob o lock (isValidLossReason false) → skip invalid_code', async () => {
+  const { pool, client } = makeFakePool({
+    opp_pair: () => ({ rows: [{ whatsapp_number_id: 1, identifier: 'c', workspace_id: 'ws' }] }),
+    backfill_state: () => ({ rows: [{ status: 'perdido', is_qualified: null, closed_at: null, title: null, loss_reason: null }] }),
+  });
+  wireLockClient(pool, client);
+  const { deps, log } = makeDeps({ validLoss: false });
+  const res = await applyPatternDecision(pool, baseCtx(), baseDecision({
+    backfillLossReasons: [{ opportunityId: 71, code: 'preco' }],
+  }), deps);
+  assert.ok(res.skipped.includes('backfill_loss:71:invalid_code'));
+  assert.equal(log.patches.length, 0);
+});
+
+test('backfill: opp de outro workspace → skip not_found sem abrir estado', async () => {
+  const { pool, client } = makeFakePool({
+    opp_pair: () => ({ rows: [{ whatsapp_number_id: 1, identifier: 'c', workspace_id: 'OUTRO' }] }),
+  });
+  wireLockClient(pool, client);
+  const { deps, log } = makeDeps();
+  const res = await applyPatternDecision(pool, baseCtx(), baseDecision({
+    backfillLossReasons: [{ opportunityId: 71, code: 'preco' }],
+  }), deps);
+  assert.ok(res.skipped.includes('backfill_loss:71:not_found'));
+  assert.equal(log.patches.length, 0);
 });

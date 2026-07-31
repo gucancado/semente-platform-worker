@@ -10,12 +10,11 @@
  *   (d) motivos editados (guard humano);
  *   (e) retro-etiquetagem das opps recentes que exibem o padrão, sob o lock do PAR
  *       (§4.11), add-only e respeitando o sticky de tags removidas por humano DAQUELA opp;
+ *   (f) BACKFILL de loss_reason em opps perdidas sem motivo (§8): sob o lock do par, via
+ *       kernel (applyOppPatchInTx {lossReason}), só onde loss_reason IS NULL e sem evento
+ *       humano de motivo (sticky) — as perdidas migradas da v1 vêm sem motivo esperando isto;
  *   (g) sugestões de guidance → whatsapp_ai_suggestions (humano aplica; nunca automático);
  *   (h) insight semanal → whatsapp_ai_insights.
- *
- * (f) BACKFILL de loss_reason em opps fechadas (§8) NÃO é implementado nesta v1 (YAGNI —
- * o nível 1 já grava o motivo ao fechar a opp; um backfill L2 só onde IS NULL e sem evento
- * humano é dívida marginal). Fica registrado no report como skip note.
  *
  * Diferente do aplicador do nível 1 (D4, por-conversa sob um único lock), este é
  * WORKSPACE-LEVEL: catálogos/sugestões/insight escrevem direto no `pool`; APENAS a
@@ -27,7 +26,9 @@ import type { Pool, PoolClient } from 'pg';
 import { TAG_COLORS } from './tags.js';
 import { slugifyLossCode } from './loss-reasons.js';
 import { computeSticky, humanActorSql } from './ai-sticky.js';
-import { insertEvent } from './opportunities.js';
+import { insertEvent, applyOppPatchInTx } from './opportunities.js';
+import { isValidLossReason } from './loss-reasons.js';
+import { OppInvariantError, type OppStateV3 } from './opportunity-core.js';
 import { withConversationLock } from './conversation-lock.js';
 import { insertSuggestion, insertInsight } from './ai-pattern-store.js';
 import type { PatternContext } from './ai-pattern-context.js';
@@ -47,6 +48,8 @@ export interface ApplyPatternDeps {
   computeSticky?: typeof computeSticky;
   withConversationLock?: typeof withConversationLock;
   insertEvent?: typeof insertEvent;
+  applyOppPatchInTx?: typeof applyOppPatchInTx;
+  isValidLossReason?: typeof isValidLossReason;
   insertSuggestion?: typeof insertSuggestion;
   insertInsight?: typeof insertInsight;
 }
@@ -56,6 +59,8 @@ interface ResolvedDeps {
   computeSticky: typeof computeSticky;
   withConversationLock: typeof withConversationLock;
   insertEvent: typeof insertEvent;
+  applyOppPatchInTx: typeof applyOppPatchInTx;
+  isValidLossReason: typeof isValidLossReason;
   insertSuggestion: typeof insertSuggestion;
   insertInsight: typeof insertInsight;
 }
@@ -66,9 +71,19 @@ function resolveDeps(deps: ApplyPatternDeps): ResolvedDeps {
     computeSticky: deps.computeSticky ?? computeSticky,
     withConversationLock: deps.withConversationLock ?? withConversationLock,
     insertEvent: deps.insertEvent ?? insertEvent,
+    applyOppPatchInTx: deps.applyOppPatchInTx ?? applyOppPatchInTx,
+    isValidLossReason: deps.isValidLossReason ?? isValidLossReason,
     insertSuggestion: deps.insertSuggestion ?? insertSuggestion,
     insertInsight: deps.insertInsight ?? insertInsight,
   };
+}
+
+/** timestamptz do pg vem como Date; toleramos string ISO (fakes/serialização). */
+function toISO(v: unknown): string | null {
+  if (v == null) return null;
+  if (v instanceof Date) return v.toISOString();
+  if (typeof (v as { toISOString?: unknown })?.toISOString === 'function') return (v as Date).toISOString();
+  return String(v);
 }
 
 // Guard IN-SQL das edições de catálogo: só permite editar quando `updated_by` NÃO é humano
@@ -269,9 +284,63 @@ export async function applyPatternDecision(
     });
   }
 
-  // ── (f) backfill de loss_reason: NÃO implementado nesta v1 (YAGNI — o nível 1 já grava
-  // o motivo ao fechar). Registrado como skip note pra deixar a decisão explícita no report.
-  skipped.push('backfill_loss_reason:not_implemented');
+  // ── (f) backfill de loss_reason (spec §8): opps perdidas sem motivo → patch via kernel ──
+  // Sob o lock do par, RE-LÊ o estado fresco (humano pode ter reaberto/preenchido no
+  // intervalo) e o sticky (evento humano de loss_reason trava). Aplica {lossReason:code} via
+  // applyOppPatchInTx: opp `perdido` + lossReason novo → evento loss_reason 'ai', closed_at
+  // intacto (kernel regra 7). Só onde loss_reason IS NULL e sem evento humano de motivo.
+  for (const bf of decision.backfillLossReasons) {
+    const pairRes = await pool.query(
+      `/* pat_apply:opp_pair */ SELECT whatsapp_number_id, identifier, workspace_id
+         FROM whatsapp_opportunities WHERE id = $1`,
+      [bf.opportunityId],
+    );
+    const pair = pairRes.rows[0];
+    if (!pair || pair.workspace_id !== ws) {
+      skipped.push(`backfill_loss:${bf.opportunityId}:not_found`);
+      continue;
+    }
+    const numberId = Number(pair.whatsapp_number_id);
+    const identifier = String(pair.identifier);
+
+    await d.withConversationLock(pool, numberId, identifier, async (client: PoolClient) => {
+      const st = await client.query(
+        `/* pat_apply:backfill_state */ SELECT status, is_qualified, closed_at, title, loss_reason
+           FROM whatsapp_opportunities WHERE id = $1`,
+        [bf.opportunityId],
+      );
+      const row = st.rows[0];
+      if (!row) { skipped.push(`backfill_loss:${bf.opportunityId}:not_found`); return; }
+      if (row.status !== 'perdido') { skipped.push(`backfill_loss:${bf.opportunityId}:not_perdido`); return; }
+      if (row.loss_reason != null) { skipped.push(`backfill_loss:${bf.opportunityId}:already_set`); return; }
+      // Sticky: humano já escreveu o motivo desta opp (mesmo que depois limpo) → não toca.
+      const sticky = await d.computeSticky(client, { numberId, identifier, opportunityId: bf.opportunityId });
+      if (sticky.lossReason) { skipped.push(`backfill_loss:${bf.opportunityId}:human_owned`); return; }
+      // Re-valida o código contra o catálogo FRESCO (humano pode ter desativado sob o lock).
+      if (!(await d.isValidLossReason(client, ws, bf.code))) {
+        skipped.push(`backfill_loss:${bf.opportunityId}:invalid_code`);
+        return;
+      }
+      const cur: OppStateV3 = {
+        status: 'perdido',
+        isQualified: row.is_qualified == null ? null : row.is_qualified === true,
+        closedAt: toISO(row.closed_at),
+        title: row.title ?? null,
+        lossReason: null,
+      };
+      try {
+        const res = await d.applyOppPatchInTx(
+          client, bf.opportunityId, cur, { lossReason: bf.code }, 'ai', { numberId, identifier },
+        );
+        if (res.oppChanged) applied.push(`backfill_loss:${bf.opportunityId}:${bf.code}`);
+        else skipped.push(`backfill_loss:${bf.opportunityId}:noop`);
+      } catch (err) {
+        // Invariante de kernel (pura, throw antes de qualquer SQL) → pula só este backfill.
+        if (err instanceof OppInvariantError) skipped.push(`backfill_loss:${bf.opportunityId}:${err.code}`);
+        else throw err;
+      }
+    });
+  }
 
   // ── (g) sugestões de guidance (humano aplica; dedupe por kind pending) ────────
   for (const gs of decision.guidanceSuggestions) {

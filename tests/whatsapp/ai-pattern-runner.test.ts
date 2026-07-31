@@ -50,6 +50,7 @@ function ctx(over: Partial<PatternContext> = {}): PatternContext {
     guidances: { lead: null, qualified: null },
     triageCounts: { judged: 0, toLead: 0, toNotLead: 0 },
     opportunityIds: [],
+    lossBackfillCandidates: [],
     ...over,
   };
 }
@@ -62,7 +63,7 @@ function judgments(n: number): PatternContext['judgments'] {
 function decision(over: Partial<PatternDecision> = {}): PatternDecision {
   return {
     newTags: [], editTags: [], newLossReasons: [], editLossReasons: [],
-    guidanceSuggestions: [], insightSummary: 'resumo', ...over,
+    guidanceSuggestions: [], backfillLossReasons: [], insightSummary: 'resumo', ...over,
   };
 }
 

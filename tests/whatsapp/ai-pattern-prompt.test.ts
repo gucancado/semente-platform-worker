@@ -24,6 +24,7 @@ function ctx(over: Partial<PatternContext> = {}): PatternContext {
     guidances: { lead: null, qualified: null },
     triageCounts: { judged: 0, toLead: 0, toNotLead: 0 },
     opportunityIds: [],
+    lossBackfillCandidates: [],
     ...over,
   };
 }
@@ -311,6 +312,62 @@ test('validador: campos ausentes viram listas vazias (com insight presente)', ()
     newLossReasons: [],
     editLossReasons: [],
     guidanceSuggestions: [],
+    backfillLossReasons: [],
     insightSummary: 'só o resumo',
   });
+});
+
+// ── backfill de loss_reason (spec §8) ─────────────────────────────────────────
+
+test('prompt: seção de backfill só aparece quando há candidatas', () => {
+  const semCand = buildPatternPrompt(ctx(), NOW).user;
+  assert.doesNotMatch(semCand, /OPORTUNIDADES PERDIDAS SEM MOTIVO/);
+  const comCand = buildPatternPrompt(
+    ctx({ lossBackfillCandidates: [{ opportunityId: 71, rationale: 'lead sumiu após orçamento' }] }),
+    NOW,
+  ).user;
+  assert.match(comCand, /OPORTUNIDADES PERDIDAS SEM MOTIVO/);
+  assert.match(comCand, /opp 71/);
+  assert.match(comCand, /lead sumiu após orçamento/);
+});
+
+test('validador: backfill só de opp ∈ candidatas e code ∈ catálogo ativo (nunca nao_lead); dedupe + cap', () => {
+  const c = ctx({
+    lossBackfillCandidates: [
+      { opportunityId: 71, rationale: 'x' }, { opportunityId: 72, rationale: null }, { opportunityId: 73, rationale: 'y' },
+    ],
+    lossReasons: [
+      { id: 5, code: 'preco', label: 'Preço', description: null, active: true, system: false, humanOwned: false },
+      { id: 6, code: 'inativo', label: 'Inativo', description: null, active: false, system: false, humanOwned: false },
+      { code: 'lead_nao_respondeu', label: 'Lead não respondeu', description: null, active: true, system: true, humanOwned: false },
+    ],
+  });
+  const r = parsePatternDecision(
+    mk({
+      backfill_loss_reasons: [
+        { opportunity_id: 71, code: 'PRECO' },          // ok (case-insensitive) → preco
+        { opportunity_id: 71, code: 'lead_nao_respondeu' }, // dup opp → dropado
+        { opportunity_id: 72, code: 'inativo' },         // code inativo → dropado
+        { opportunity_id: 99, code: 'preco' },           // opp fora das candidatas → dropado
+        { opportunity_id: 73, code: 'nao_lead' },        // cascata → dropado
+      ],
+    }),
+    c,
+  );
+  assert.ok(r.ok);
+  assert.deepEqual(r.decision.backfillLossReasons, [{ opportunityId: 71, code: 'preco' }]);
+});
+
+test('validador: backfill respeita cap 10', () => {
+  const cands = Array.from({ length: 15 }, (_, i) => ({ opportunityId: 100 + i, rationale: 'r' }));
+  const c = ctx({
+    lossBackfillCandidates: cands,
+    lossReasons: [{ id: 5, code: 'preco', label: 'Preço', description: null, active: true, system: false, humanOwned: false }],
+  });
+  const r = parsePatternDecision(
+    mk({ backfill_loss_reasons: cands.map((x) => ({ opportunity_id: x.opportunityId, code: 'preco' })) }),
+    c,
+  );
+  assert.ok(r.ok);
+  assert.equal(r.decision.backfillLossReasons.length, 10);
 });

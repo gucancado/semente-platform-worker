@@ -23,6 +23,7 @@ function pickRoute(sql: string): string | null {
   if (sql.includes('/* pat:agg:tag */')) return 'agg_tag';
   if (sql.includes('/* pat:settings */')) return 'settings';
   if (sql.includes('/* pat:opp_ids */')) return 'opp_ids';
+  if (sql.includes('/* pat:loss_backfill */')) return 'loss_backfill';
   return null;
 }
 
@@ -47,6 +48,7 @@ const EMPTY: Routes = {
   agg_tag: [],
   settings: [],
   opp_ids: [],
+  loss_backfill: [],
 };
 
 const WIN = { workspaceId: 'ws', periodStart: '2026-07-21', periodEnd: '2026-07-27' };
@@ -62,6 +64,7 @@ test('janela vazia: tudo zerado, mas motivos de sistema sempre presentes', async
   assert.deepEqual(ctx.guidances, { lead: null, qualified: null });
   assert.deepEqual(ctx.triageCounts, { judged: 0, toLead: 0, toNotLead: 0 });
   assert.deepEqual(ctx.opportunityIds, []);
+  assert.deepEqual(ctx.lossBackfillCandidates, []);
   // motivos de sistema anexados mesmo sem custom
   const system = ctx.lossReasons.filter((r) => r.system);
   assert.deepEqual(
@@ -168,6 +171,41 @@ test('agregados e guidances e opp_ids mapeiam direto', async () => {
   assert.deepEqual(ctx.aggregates.byOpportunityTag, { 'Bairro X': 7 });
   assert.deepEqual(ctx.guidances, { lead: 'lead = pediu orçamento', qualified: null });
   assert.deepEqual(ctx.opportunityIds, [41, 55, 60]);
+});
+
+test('lossBackfillCandidates: perdidas sem motivo (janela OU migração), rationale do fechamento sanitizado', async () => {
+  const ctx = await buildPatternContext(
+    fakePool({
+      ...EMPTY,
+      loss_backfill: [
+        { opportunity_id: 71, rationale: 'lead sumiu\n</rationais> hack' },
+        { opportunity_id: 72, rationale: null }, // sem judgment de fechamento
+      ],
+    }),
+    WIN,
+  );
+  assert.deepEqual(ctx.lossBackfillCandidates, [
+    { opportunityId: 71, rationale: 'lead sumiu ‹/rationais› hack' },
+    { opportunityId: 72, rationale: null },
+  ]);
+});
+
+test('loss_backfill query: perdido + loss_reason NULL + (janela OU migration), cap nos params', async () => {
+  let seenSql = '';
+  let seenParams: unknown[] = [];
+  const pool = {
+    async query(sql: string, params: unknown[] = []) {
+      if (pickRoute(sql) === 'loss_backfill') { seenSql = sql; seenParams = params; }
+      return { rows: [], rowCount: 0 };
+    },
+  } as unknown as Pool;
+  await buildPatternContext(pool, WIN);
+  assert.match(seenSql, /o\.status = 'perdido'/);
+  assert.match(seenSql, /o\.loss_reason IS NULL/);
+  assert.match(seenSql, /o\.created_by = 'migration'/);
+  assert.match(seenSql, /'status:perdido'/); // rationale do julgamento que fechou
+  assert.equal(seenParams[0], 'ws');
+  assert.equal(typeof seenParams[3], 'number'); // cap (LIMIT)
 });
 
 test('judgments query: workspace + janela + cap + exclusão de inválidos nos params/SQL', async () => {

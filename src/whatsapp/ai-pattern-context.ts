@@ -26,6 +26,8 @@ import { SYSTEM_LOSS_REASONS } from './loss-reasons.js';
 const MAX_JUDGMENTS = 200;
 /** Teto de ids de oportunidades citáveis pra retro-etiquetagem (evita prompt gigante). */
 const MAX_OPPORTUNITY_IDS = 300;
+/** Teto de opps perdidas sem motivo candidatas a backfill de loss_reason (spec §8). */
+const MAX_LOSS_BACKFILL_CANDIDATES = 20;
 
 export interface PatternJudgment {
   identifier: string;
@@ -73,6 +75,18 @@ export interface PatternTriageCounts {
   toNotLead: number;
 }
 
+/**
+ * Candidata a backfill de loss_reason (spec §8): opp `perdido` com loss_reason NULL, criada
+ * na janela OU migrada da v1 (created_by='migration'), sem evento humano de motivo (o sticky
+ * é re-checado no aplicador sob o lock — aqui a lista é só sugestiva pro prompt). `rationale`
+ * = do julgamento nível 1 que fechou a opp como perdida (quando houver), sanitizado (‹›): é a
+ * evidência textual que o nível 2 usa pra escolher o código — na ausência, a IA deve omitir.
+ */
+export interface PatternLossBackfillCandidate {
+  opportunityId: number;
+  rationale: string | null;
+}
+
 export interface PatternContext {
   workspaceId: string;
   periodStart: string;
@@ -86,6 +100,8 @@ export interface PatternContext {
   triageCounts: PatternTriageCounts;
   /** Opps da janela (excl. nao_lead) citáveis pra retro-etiquetagem — whitelist do validador. */
   opportunityIds: number[];
+  /** Opps perdidas sem motivo (janela OU migração) candidatas a backfill — whitelist do validador. */
+  lossBackfillCandidates: PatternLossBackfillCandidate[];
 }
 
 /** timestamptz do pg vem como Date; toleramos string ISO (fakes/serialização). */
@@ -215,11 +231,49 @@ async function fetchOpportunityIds(pool: Pool, workspaceId: string, periodStart:
   return rows.map((r: any) => Number(r.id));
 }
 
+/**
+ * Candidatas a backfill de loss_reason: opps `perdido` com loss_reason NULL, na janela OU
+ * migradas da v1 (`created_by='migration'` — a migração deixou as perdidas históricas sem
+ * motivo, exatamente o que o nível 2 preenche). LEFT JOIN LATERAL pro rationale do julgamento
+ * que aplicou `status:perdido` no par (mais recente), sanitizado (‹›). O guard-final (sticky
+ * sem evento humano de loss_reason + status ainda 'perdido') é re-checado no aplicador sob o
+ * lock — aqui só listamos a matéria pro prompt. `nao_lead` já está fora (loss_reason NULL).
+ */
+async function fetchLossBackfillCandidates(
+  pool: Pool, workspaceId: string, periodStart: string, periodEnd: string,
+): Promise<PatternLossBackfillCandidate[]> {
+  const { rows } = await pool.query(
+    `/* pat:loss_backfill */
+     SELECT o.id AS opportunity_id, j.rationale
+       FROM whatsapp_opportunities o
+       LEFT JOIN LATERAL (
+         SELECT jj.rationale
+           FROM whatsapp_ai_judgments jj
+          WHERE jj.whatsapp_number_id = o.whatsapp_number_id AND jj.identifier = o.identifier
+            AND jsonb_typeof(jj.applied -> 'applied') = 'array'
+            AND (jj.applied -> 'applied') ? 'status:perdido'
+          ORDER BY jj.decided_at DESC, jj.id DESC
+          LIMIT 1
+       ) j ON TRUE
+      WHERE o.workspace_id = $1
+        AND o.status = 'perdido'
+        AND o.loss_reason IS NULL
+        AND ( ${WINDOW} OR o.created_by = 'migration' )
+      ORDER BY o.created_at DESC, o.id DESC
+      LIMIT $4`,
+    [workspaceId, periodStart, periodEnd, MAX_LOSS_BACKFILL_CANDIDATES],
+  );
+  return rows.map((r: any) => ({
+    opportunityId: Number(r.opportunity_id),
+    rationale: r.rationale == null ? null : sanitizeMessageText(String(r.rationale)),
+  }));
+}
+
 export async function buildPatternContext(
   pool: Pool,
   { workspaceId, periodStart, periodEnd }: { workspaceId: string; periodStart: string; periodEnd: string },
 ): Promise<PatternContext> {
-  const [judgments, tags, lossReasons, byOpportunityStatus, byLossReason, byOpportunityTag, guidances, opportunityIds] =
+  const [judgments, tags, lossReasons, byOpportunityStatus, byLossReason, byOpportunityTag, guidances, opportunityIds, lossBackfillCandidates] =
     await Promise.all([
       fetchJudgments(pool, workspaceId, periodStart, periodEnd),
       fetchTags(pool, workspaceId),
@@ -261,6 +315,7 @@ export async function buildPatternContext(
       ),
       fetchGuidances(pool, workspaceId),
       fetchOpportunityIds(pool, workspaceId, periodStart, periodEnd),
+      fetchLossBackfillCandidates(pool, workspaceId, periodStart, periodEnd),
     ]);
 
   // triageCounts derivados dos julgamentos coletados (cap MAX_JUDGMENTS) — os rótulos
@@ -283,5 +338,6 @@ export async function buildPatternContext(
     guidances,
     triageCounts: { judged: judgments.length, toLead, toNotLead },
     opportunityIds,
+    lossBackfillCandidates,
   };
 }
