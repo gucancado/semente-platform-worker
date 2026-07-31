@@ -33,6 +33,7 @@ import {
   startJudgmentRunner,
   type PendingConversation,
   type RunJudgmentDeps,
+  type RunSweepDeps,
 } from '../../src/whatsapp/ai-judgment-runner.js';
 import type { JudgmentContext } from '../../src/whatsapp/ai-judgment-context.js';
 import type { JudgmentLlm } from '../../src/whatsapp/ai-llm.js';
@@ -160,12 +161,23 @@ test('isWithinJudgmentWindow: só [03:00, 04:00) BRT é dentro', () => {
 // resolveTickIntervalMs / resolveMaxConversationsPerRun — explicit > env > default
 // =============================================================================
 
-test('resolveTickIntervalMs: explicit vence; env válida; default 1h', () => {
-  withEnv('CRM_AI_TICK_MS', '999', () => assert.equal(resolveTickIntervalMs(1234), 1234));
-  withEnv('CRM_AI_TICK_MS', '60000', () => assert.equal(resolveTickIntervalMs(), 60_000));
+test('resolveTickIntervalMs: explicit vence (sem clamp); env válida ≥15min; default 1h', () => {
+  withEnv('CRM_AI_TICK_MS', '999', () => assert.equal(resolveTickIntervalMs(1234), 1234)); // explicit não clampa
+  withEnv('CRM_AI_TICK_MS', '1800000', () => assert.equal(resolveTickIntervalMs(), 1_800_000)); // 30min
   withEnv('CRM_AI_TICK_MS', undefined, () => assert.equal(resolveTickIntervalMs(), 60 * 60_000));
   withEnv('CRM_AI_TICK_MS', 'lixo', () => assert.equal(resolveTickIntervalMs(), 60 * 60_000));
   withEnv('CRM_AI_TICK_MS', '0', () => assert.equal(resolveTickIntervalMs(), 60 * 60_000));
+});
+
+test('resolveTickIntervalMs: CRM_AI_TICK_MS válido porém < 15min é clampado pra 15min com warn (anti-runaway)', () => {
+  const warns: unknown[][] = [];
+  const orig = console.warn;
+  console.warn = (...a: unknown[]) => { warns.push(a); };
+  try {
+    withEnv('CRM_AI_TICK_MS', '60000', () => assert.equal(resolveTickIntervalMs(), 15 * 60_000)); // 1min → 15min
+  } finally { console.warn = orig; }
+  assert.equal(warns.length, 1, 'clamp loga warn no boot');
+  assert.match(String(warns[0][0]), /abaixo do mínimo/);
 });
 
 test('resolveMaxConversationsPerRun: explicit vence; env válida; default 200', () => {
@@ -212,23 +224,42 @@ test('runJudgmentForConversation: decisão VÁLIDA aplica (applyFn chamado) + re
   assert.ok(Number(metrics[0][4]) > 0, 'cost_usd > 0');
 });
 
-test('runJudgmentForConversation: decisão INVÁLIDA → skip + AINDA registra custo (o custo aconteceu)', async () => {
+test('runJudgmentForConversation: decisão INVÁLIDA → skip + custo + grava judgment NÃO-aplicado (watermark avança)', async () => {
   const { pool, metrics } = metricsPool();
   let applyCalled = false;
+  let unappliedArgs: any[] | null = null;
   const captured = await captureConsole('warn', async () => {
     const deps: RunJudgmentDeps = {
       buildContext: async () => baseCtx(),
       buildPrompt: () => ({ system: 'S', user: 'U' }),
       parseDecision: () => ({ ok: false, error: 'output não é JSON' }),
       applyFn: (async () => { applyCalled = true; return { applied: [], skipped: [], stale: false }; }) as any,
+      recordUnapplied: (async (...args: any[]) => { unappliedArgs = args; return { recorded: true, stale: false }; }) as any,
     };
-    const r = await runJudgmentForConversation(pool, fakeProvider(), { numberId: 1, identifier: 'c', workspaceId: 'ws', watermark: null }, deps);
+    const r = await runJudgmentForConversation(pool, fakeProvider({ raw: 'não-json' }), { numberId: 1, identifier: 'c', workspaceId: 'ws', watermark: null }, deps);
     assert.deepEqual(r.skipped, ['invalid_decision']);
     assert.equal(r.judged, true);
+    assert.equal(r.stale, false);
   });
   assert.equal(applyCalled, false, 'não aplica quando a decisão é inválida');
+  assert.ok(unappliedArgs, 'recordUnapplied chamado no ramo inválido (crava o watermark, anti-runaway)');
+  assert.equal(unappliedArgs![2], 'não-json', 'passa o raw do LLM');
+  assert.equal(unappliedArgs![3], 'output não é JSON', 'passa o motivo (reason)');
+  assert.deepEqual(unappliedArgs![4], { model: 'gpt-4o-mini' }, 'passa o modelo');
   assert.equal(metrics.length, 1, 'custo registrado mesmo com decisão inválida');
   assert.equal(captured.length, 1, 'loga a decisão inválida');
+});
+
+test('runJudgmentForConversation: recordUnapplied stale=true propaga pro resultado (mensagem nova sob o lock)', async () => {
+  const { pool } = metricsPool();
+  const deps: RunJudgmentDeps = {
+    buildContext: async () => baseCtx(),
+    buildPrompt: () => ({ system: 'S', user: 'U' }),
+    parseDecision: () => ({ ok: false, error: 'x' }),
+    recordUnapplied: (async () => ({ recorded: false, stale: true })) as any,
+  };
+  const r = await runJudgmentForConversation(pool, fakeProvider({ raw: 'z' }), { numberId: 1, identifier: 'c', workspaceId: 'ws', watermark: null }, deps);
+  assert.equal(r.stale, true);
 });
 
 test('runJudgmentForConversation: contexto SEM mensagem → não chama LLM nem registra custo', async () => {
@@ -363,6 +394,29 @@ test('runJudgmentSweep: conta applied e stale por conversa', async () => {
   assert.equal(result.applied, 1);
   assert.equal(result.stale, 1);
   assert.equal(result.errors, 0);
+});
+
+test('2 runs: decisão inválida grava judgment → 2º run NÃO re-chama o LLM (watermark avançou, anti-runaway)', async () => {
+  const pool = {} as unknown as Pool;
+  const conv = pending(1, '2026-07-30T05:00:00Z'); // identifier 'c1'
+  const judged = new Set<string>(); // pares já julgados (o recordUnapplied fake "crava" o watermark)
+  let judgeCalls = 0;
+  const provider = fakeProvider({
+    judge: async () => { judgeCalls += 1; return { raw: 'não-json', usage: { inputTokens: 1, outputTokens: 1 } }; },
+  });
+  const deps: RunSweepDeps = {
+    fetchWorkspaces: async () => [{ workspaceId: 'ws', pipelineSince: 'PS' }],
+    // fetchPending reflete o watermark: uma vez gravado o julgamento, a conversa some da fila.
+    fetchPending: async () => (judged.has(`${conv.numberId}:${conv.identifier}`) ? [] : [conv]),
+    buildContext: (async (_p: any, a: any) => baseCtx({ numberId: a.numberId, identifier: a.identifier, lastMessageAt: conv.lastMessageAt })) as any,
+    buildPrompt: () => ({ system: 'S', user: 'U' }),
+    parseDecision: () => ({ ok: false, error: 'não é JSON' }),
+    recordUnapplied: (async (_p: any, ctx: any) => { judged.add(`${ctx.numberId}:${ctx.identifier}`); return { recorded: true, stale: false }; }) as any,
+    recordMetrics: async () => {},
+  };
+  await runJudgmentSweep(pool, provider, deps); // 1º run: julga (inválido) + crava watermark
+  await runJudgmentSweep(pool, provider, deps); // 2º run: conversa fora da fila → sem LLM
+  assert.equal(judgeCalls, 1, 'o LLM foi chamado uma única vez apesar de 2 runs');
 });
 
 // =============================================================================

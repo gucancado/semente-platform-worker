@@ -50,10 +50,9 @@ test('2 patches ganho simultâneos serializam: estado determinístico + 2 evento
   assert.equal(b.ok, true);
 
   const { rows } = await pool.query(
-    `SELECT status, is_qualified, qualification, closed_at FROM whatsapp_opportunities WHERE id=$1`, [id]);
+    `SELECT status, is_qualified, closed_at FROM whatsapp_opportunities WHERE id=$1`, [id]);
   assert.equal(rows[0].status, 'ganho');
   assert.equal(rows[0].is_qualified, true);
-  assert.equal(rows[0].qualification, 'qualificado');
   assert.ok(rows[0].closed_at, 'closed_at setado');
 
   // Só a 1ª transição real gera eventos (status + qualification); a 2ª chamada

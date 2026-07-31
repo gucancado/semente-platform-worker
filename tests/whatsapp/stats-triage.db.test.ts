@@ -15,7 +15,7 @@ beforeEach(async () => {
   // DM lead (is_lead=TRUE) COM opp em_andamento → NÃO conta na fila (já triado)
   await pool.query(`INSERT INTO messages (whatsapp_number_id, workspace_id, channel, identifier, direction, text, created_at) VALUES (1,'ws','whatsapp','dm_qual','inbound','oi',NOW())`);
   await pool.query(`INSERT INTO whatsapp_thread_meta (whatsapp_number_id, identifier, is_lead) VALUES (1,'dm_qual',TRUE)`);
-  await pool.query(`INSERT INTO whatsapp_opportunities (whatsapp_number_id, workspace_id, identifier, status, is_qualified, qualification, created_by) VALUES (1,'ws','dm_qual','em_andamento',TRUE,'qualificado','test')`);
+  await pool.query(`INSERT INTO whatsapp_opportunities (whatsapp_number_id, workspace_id, identifier, status, is_qualified, created_by) VALUES (1,'ws','dm_qual','em_andamento',TRUE,'test')`);
   // DM not_lead sem opp aberta → NÃO conta (não é indefinido)
   await pool.query(`INSERT INTO messages (whatsapp_number_id, workspace_id, channel, identifier, direction, text, created_at) VALUES (1,'ws','whatsapp','dm_nl','inbound','oi',NOW())`);
   await pool.query(`INSERT INTO whatsapp_thread_meta (whatsapp_number_id, identifier, is_lead) VALUES (1,'dm_nl',FALSE)`);

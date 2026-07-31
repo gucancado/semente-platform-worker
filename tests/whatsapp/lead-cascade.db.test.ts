@@ -3,7 +3,7 @@
 // Prova as garantias transacionais da cascata não-lead (spec §4.8) que os testes
 // puros não alcançam (Postgres real: lock + transação + CHECKs das opps):
 //   1. Marcar não-lead fecha TODAS as opps abertas do par como perdido/nao_lead,
-//      com is_qualified/qualification INTACTAS e 2 eventos 'system' por opp.
+//      com is_qualified INTACTA e 2 eventos 'system' por opp.
 //   2. Par com opp GANHA → rota devolve 409 possui_ganho e NADA muda (rollback):
 //      nem a opp ganha, nem thread_meta (sem row nova), nem log.
 //   3. Re-marcar not_lead idêntico → no-op sem log novo (guard de mudança efetiva).
@@ -33,12 +33,12 @@ beforeEach(async () => {
 after(() => pool.end());
 
 /** Insere uma opp direto (controle preciso de status/is_qualified). Devolve o id. */
-async function insertOpp(p: { status: string; isQualified: boolean | null; qualification: string }): Promise<number> {
+async function insertOpp(p: { status: string; isQualified: boolean | null }): Promise<number> {
   const { rows } = await pool.query(
     `INSERT INTO whatsapp_opportunities
-       (whatsapp_number_id, workspace_id, identifier, status, is_qualified, qualification, created_by)
-     VALUES (1,'ws','c',$1,$2,$3,'seed') RETURNING id`,
-    [p.status, p.isQualified, p.qualification],
+       (whatsapp_number_id, workspace_id, identifier, status, is_qualified, created_by)
+     VALUES (1,'ws','c',$1,$2,'seed') RETURNING id`,
+    [p.status, p.isQualified],
   );
   return Number(rows[0].id);
 }
@@ -52,24 +52,22 @@ async function events(oppId: number): Promise<{ field: string; old_value: string
 
 test('cascata fecha 2 opps abertas como perdido/nao_lead, is_qualified intacta, 2 eventos system cada', async () => {
   // Uma qualificada, uma indefinida — ambas em_andamento; prova intactness em 2 valores.
-  const a = await insertOpp({ status: 'em_andamento', isQualified: true, qualification: 'qualificado' });
-  const b = await insertOpp({ status: 'em_andamento', isQualified: null, qualification: 'indefinido' });
+  const a = await insertOpp({ status: 'em_andamento', isQualified: true });
+  const b = await insertOpp({ status: 'em_andamento', isQualified: null });
 
   await setLeadStatus(pool, { numberId: 1, identifier: 'c', isLead: false, updatedBy: 'u1' });
 
   const { rows } = await pool.query(
-    `SELECT id, status, loss_reason, is_qualified, qualification, closed_at FROM whatsapp_opportunities WHERE id = ANY($1::bigint[]) ORDER BY id`,
+    `SELECT id, status, loss_reason, is_qualified, closed_at FROM whatsapp_opportunities WHERE id = ANY($1::bigint[]) ORDER BY id`,
     [[a, b]]);
   for (const r of rows) {
     assert.equal(r.status, 'perdido');
     assert.equal(r.loss_reason, 'nao_lead');
     assert.ok(r.closed_at, 'closed_at setado');
   }
-  // is_qualified/qualification INTACTAS (a cascata não as toca).
+  // is_qualified INTACTA (a cascata não a toca).
   assert.equal(rows.find((r) => Number(r.id) === a)!.is_qualified, true);
-  assert.equal(rows.find((r) => Number(r.id) === a)!.qualification, 'qualificado');
   assert.equal(rows.find((r) => Number(r.id) === b)!.is_qualified, null);
-  assert.equal(rows.find((r) => Number(r.id) === b)!.qualification, 'indefinido');
 
   for (const id of [a, b]) {
     const ev = await events(id);
@@ -86,8 +84,8 @@ test('cascata fecha 2 opps abertas como perdido/nao_lead, is_qualified intacta, 
 });
 
 test('par com opp ganha → rota 409 possui_ganho e NADA muda (rollback)', async () => {
-  const ganho = await insertOpp({ status: 'ganho', isQualified: true, qualification: 'qualificado' });
-  const openBefore = await insertOpp({ status: 'em_andamento', isQualified: null, qualification: 'indefinido' });
+  const ganho = await insertOpp({ status: 'ganho', isQualified: true });
+  const openBefore = await insertOpp({ status: 'em_andamento', isQualified: null });
 
   const app = buildApp();
   const res = await app.inject({

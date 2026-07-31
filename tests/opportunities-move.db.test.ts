@@ -35,7 +35,7 @@ async function newOpp(over: { isQualified?: boolean | null } = {}): Promise<numb
 }
 
 const oppRow = async (id: number) =>
-  (await pool.query(`SELECT status, is_qualified, qualification, loss_reason, closed_at FROM whatsapp_opportunities WHERE id=$1`, [id])).rows[0];
+  (await pool.query(`SELECT status, is_qualified, loss_reason, closed_at FROM whatsapp_opportunities WHERE id=$1`, [id])).rows[0];
 const threadLead = async () =>
   (await pool.query(`SELECT is_lead FROM whatsapp_thread_meta WHERE whatsapp_number_id=1 AND identifier='c'`)).rows[0];
 const leadLogCount = async () =>
@@ -59,7 +59,6 @@ test('mover PERDIDA → negociacoes reabre: em_andamento+qualificado, loss/close
   const row = await oppRow(id);
   assert.equal(row.status, 'em_andamento');
   assert.equal(row.is_qualified, true);
-  assert.equal(row.qualification, 'qualificado');
   assert.equal(row.loss_reason, null, 'reabertura limpa o motivo');
   assert.equal(row.closed_at, null, 'reabertura limpa closed_at');
 

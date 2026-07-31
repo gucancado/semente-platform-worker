@@ -30,10 +30,11 @@ import {
   type JudgmentContext,
 } from './ai-judgment-context.js';
 import { buildJudgmentPrompt, parseJudgmentDecision } from './ai-judgment-prompt.js';
-import { applyJudgment, type ApplyJudgmentResult } from './ai-judgment-apply.js';
+import { applyJudgment, recordUnappliedJudgment, type ApplyJudgmentResult } from './ai-judgment-apply.js';
 import { judgmentCost, type JudgmentLlm } from './ai-llm.js';
 
 const DEFAULT_TICK_MS = 60 * 60_000; // 1h
+const MIN_TICK_MS = 15 * 60_000; // clamp de segurança: env abaixo disso vira 15min (anti-runaway de custo)
 const DEFAULT_MAX_PER_RUN = 200;
 
 // Janela de execução [03:00, 04:00) horário de São Paulo (spec: coleta diária ~03:00 BRT).
@@ -41,15 +42,23 @@ const WINDOW_START_HOUR = 3;
 const WINDOW_END_HOUR = 4;
 
 /**
- * Resolve o intervalo do tick: param explícito (`intervalMs`) vence; senão lê
- * `CRM_AI_TICK_MS` de process.env; ausente/vazio/inválido (não-numérico, <=0) → 1h.
+ * Resolve o intervalo do tick: param explícito (`intervalMs`) vence SEM clamp (knob
+ * interno/teste); senão lê `CRM_AI_TICK_MS` de process.env; ausente/vazio/inválido
+ * (não-numérico, <=0) → 1h. **Clamp anti-runaway**: um `CRM_AI_TICK_MS` válido porém <15min
+ * é forçado a 15min com warn no boot — env mal configurada (ex.: 1min) faria o runner varrer
+ * 200 conversas ~toda hora dentro da janela e queimar custo de LLM em loop.
  */
 export function resolveTickIntervalMs(explicit?: number): number {
   if (explicit !== undefined) return explicit;
   const raw = process.env.CRM_AI_TICK_MS;
   if (raw === undefined || raw.trim() === '') return DEFAULT_TICK_MS;
   const n = Number(raw);
-  return Number.isFinite(n) && n > 0 ? n : DEFAULT_TICK_MS;
+  if (!(Number.isFinite(n) && n > 0)) return DEFAULT_TICK_MS;
+  if (n < MIN_TICK_MS) {
+    console.warn(`[ai-judgment] CRM_AI_TICK_MS=${n}ms abaixo do mínimo ${MIN_TICK_MS}ms — usando ${MIN_TICK_MS}ms (proteção anti-runaway de custo)`);
+    return MIN_TICK_MS;
+  }
+  return n;
 }
 
 /**
@@ -181,6 +190,7 @@ export interface RunJudgmentDeps {
   buildPrompt?: typeof buildJudgmentPrompt;
   parseDecision?: typeof parseJudgmentDecision;
   applyFn?: typeof applyJudgment;
+  recordUnapplied?: typeof recordUnappliedJudgment;
   recordMetrics?: typeof recordLlmMetrics;
   /** Relógio injetável (default new Date().toISOString()) — o prompt precisa do "agora". */
   now?: () => string;
@@ -206,6 +216,7 @@ export async function runJudgmentForConversation(
   const buildPrompt = deps.buildPrompt ?? buildJudgmentPrompt;
   const parseDecision = deps.parseDecision ?? parseJudgmentDecision;
   const applyFn = deps.applyFn ?? applyJudgment;
+  const recordUnapplied = deps.recordUnapplied ?? recordUnappliedJudgment;
   const recordMetrics = deps.recordMetrics ?? recordLlmMetrics;
   const nowIso = deps.now ?? (() => new Date().toISOString());
 
@@ -238,7 +249,12 @@ export async function runJudgmentForConversation(
   const parsed = parseDecision(llm.raw, ctx);
   if (!parsed.ok) {
     console.warn(`[ai-judgment] decisão inválida (${conv.numberId}:${conv.identifier}): ${parsed.error}`);
-    return { applied: [], skipped: ['invalid_decision'], stale: false, judged: true };
+    // Grava o julgamento NÃO-APLICADO (mesmo claim, sem escrita de opp/thread): avança o
+    // watermark do par pra que o LLM não seja re-chamado a cada tick pra a mesma conversa
+    // (anti-runaway de custo). Se mensagem nova chegou sob o lock, recordUnapplied devolve
+    // stale=true e NÃO crava — a conversa volta como pendente com o input novo.
+    const rec = await recordUnapplied(pool, ctx, llm.raw, parsed.error, { model: provider.model });
+    return { applied: [], skipped: ['invalid_decision'], stale: rec.stale, judged: true };
   }
 
   const result = await applyFn(pool, ctx, parsed.decision, { model: provider.model });

@@ -13,7 +13,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { Pool } from 'pg';
-import { applyJudgment, type ApplyJudgmentDeps } from '../../src/whatsapp/ai-judgment-apply.js';
+import { applyJudgment, recordUnappliedJudgment, type ApplyJudgmentDeps } from '../../src/whatsapp/ai-judgment-apply.js';
 import type { JudgmentContext, OppSnapshot } from '../../src/whatsapp/ai-judgment-context.js';
 import type { JudgmentDecision } from '../../src/whatsapp/ai-judgment-prompt.js';
 import type { StickyFlags } from '../../src/whatsapp/ai-sticky.js';
@@ -175,7 +175,7 @@ test('claim conflito (já julgado) → already_judged, nenhuma aplicação', asy
   assert.ok(!order.includes('applied_update'), 'não sobrescreve applied (não aplicou nada)');
 });
 
-test('ordem: lock → watermark → open_opp → claim → sticky → aplicações → commit', async () => {
+test('ordem: lock → watermark → open_opp → last_closed → claim → sticky → aplicações → commit', async () => {
   const order: string[] = [];
   const { pool } = makeFakePool({
     watermark: () => ({ rows: [{ m: new Date('2026-07-30T10:00:00.000Z') }] }),
@@ -186,8 +186,9 @@ test('ordem: lock → watermark → open_opp → claim → sticky → aplicaçõ
   const { deps } = makeDeps(order);
   const res = await applyJudgment(pool, baseCtx(), baseDecision({ triage: 'lead' }), deps);
   assert.deepEqual(res, { applied: ['triage:lead'], skipped: [], stale: false });
+  // last_closed agora é lido no stale-check 2b (ANTES do claim) e reusado no sticky (uma leitura só).
   assert.deepEqual(order, [
-    'begin', 'lock', 'watermark', 'open_opp', 'claim', 'last_closed',
+    'begin', 'lock', 'watermark', 'open_opp', 'last_closed', 'claim',
     'computeSticky', 'applyLeadUpdate', 'applied_update', 'commit',
   ]);
 });
@@ -246,7 +247,9 @@ test('closed_action=criar_nova sem opp aberta → cria opp ai + tags vão pra el
     watermark: () => ({ rows: [{ m: new Date('2026-07-30T10:00:00.000Z') }] }),
     open_opp: () => ({ rows: [] }),
     claim: () => ({ rows: [{ id: 99 }] }),
-    last_closed: () => ({ rows: [{ id: 3, updated_at: new Date('2026-07-29T00:00:00Z'), status: 'perdido', is_qualified: null, closed_at: new Date('2026-07-29T00:00:00Z'), title: null, loss_reason: 'x' }] }),
+    // updated_at CASA o snapshot (openSnapshot default 09:00) — senão o stale-check 2b da
+    // fechada dispararia. closed_at pode divergir (o stale só compara id+updated_at).
+    last_closed: () => ({ rows: [{ id: 3, updated_at: new Date('2026-07-30T09:00:00.000Z'), status: 'perdido', is_qualified: null, closed_at: new Date('2026-07-29T00:00:00Z'), title: null, loss_reason: 'x' }] }),
     tag_name: () => ({ rows: [{ name: 'VIP' }] }),
     tag_insert: (p) => { insertedTags.push({ opp: p[0], tag: p[1] }); return { rows: [{ tag_id: p[1] }], rowCount: 1 }; },
   }, order);
@@ -259,4 +262,103 @@ test('closed_action=criar_nova sem opp aberta → cria opp ai + tags vão pra el
   assert.ok(res.applied.includes('criar_nova'));
   assert.ok(res.applied.includes('tag:10'), 'tag entra na opp NOVA (sem histórico de remoção)');
   assert.deepEqual(insertedTags, [{ opp: 77, tag: 10 }]);
+});
+
+// =============================================================================
+// STALE 2b: a última opp FECHADA mudou/surgiu durante a call LLM (fix do runaway de opp)
+// =============================================================================
+
+test('stale por opp FECHADA que MUDOU (updated_at) desde o snapshot → stale, sem claim', async () => {
+  const order: string[] = [];
+  const { pool, calls } = makeFakePool({
+    watermark: () => ({ rows: [{ m: new Date('2026-07-30T10:00:00.000Z') }] }),
+    open_opp: () => ({ rows: [] }), // segue sem aberta (casa ctx.openOpp null)
+    // snapshot tinha a fechada id=3 em 09:00; sob o lock veio 09:30 → foi mutada.
+    last_closed: () => ({ rows: [{ id: 3, updated_at: new Date('2026-07-30T09:30:00.000Z'), status: 'perdido', is_qualified: null, closed_at: new Date('2026-07-29T00:00:00Z'), title: null, loss_reason: 'x' }] }),
+  }, order);
+  const ctx = baseCtx({ openOpp: null, lastClosedOpp: openSnapshot({ id: 3, status: 'perdido', updatedAt: '2026-07-30T09:00:00.000Z' }) });
+  const { deps } = makeDeps(order);
+  const res = await applyJudgment(pool, ctx, baseDecision({ closedAction: 'criar_nova' }), deps);
+  assert.deepEqual(res, { applied: [], skipped: [], stale: true });
+  assert.ok(!calls.some((c) => c.key === 'claim'), 'claim NÃO roda: stale de fechada antes do claim (não cria 3ª opp)');
+});
+
+test('stale por opp FECHADA que SURGIU (snapshot não tinha, agora há) → stale, sem claim', async () => {
+  const order: string[] = [];
+  const { pool, calls } = makeFakePool({
+    watermark: () => ({ rows: [{ m: new Date('2026-07-30T10:00:00.000Z') }] }),
+    open_opp: () => ({ rows: [] }),
+    last_closed: () => ({ rows: [{ id: 9, updated_at: new Date('2026-07-30T09:00:00.000Z'), status: 'perdido', is_qualified: null, closed_at: new Date('2026-07-29T00:00:00Z'), title: null, loss_reason: null }] }),
+  }, order);
+  const ctx = baseCtx({ openOpp: null, lastClosedOpp: null });
+  const { deps } = makeDeps(order);
+  const res = await applyJudgment(pool, ctx, baseDecision({ closedAction: 'criar_nova' }), deps);
+  assert.deepEqual(res, { applied: [], skipped: [], stale: true });
+  assert.ok(!calls.some((c) => c.key === 'claim'));
+});
+
+// =============================================================================
+// recordUnappliedJudgment — claim de decisão inválida SEM escrita de opp/thread
+// (fix do runaway de custo: crava o watermark p/ o LLM não re-rodar a cada tick)
+// =============================================================================
+
+test('recordUnappliedJudgment: grava claim (decision.invalid) SEM tocar opp/thread; watermark ok', async () => {
+  const order: string[] = [];
+  const { pool, calls } = makeFakePool({
+    watermark: () => ({ rows: [{ m: new Date('2026-07-30T10:00:00.000Z') }] }),
+    claim: () => ({ rows: [{ id: 42 }] }),
+  }, order);
+  const res = await recordUnappliedJudgment(pool, baseCtx(), '{lixo', 'output não é JSON', { model: 'gpt-4o-mini' });
+  assert.deepEqual(res, { recorded: true, stale: false });
+  const claimCall = calls.find((c) => c.key === 'claim');
+  assert.ok(claimCall, 'faz o claim ON CONFLICT DO NOTHING');
+  const decisionJson = JSON.parse(claimCall!.params[4]);
+  assert.equal(decisionJson.invalid, true);
+  assert.equal(decisionJson.reason, 'output não é JSON');
+  assert.equal(decisionJson.raw, '{lixo');
+  assert.equal(claimCall!.params[5], 'output não é JSON', 'rationale = reason');
+  assert.equal(claimCall!.params[6], 'gpt-4o-mini', 'model');
+  // NENHUMA escrita/leitura de opp/thread: sem open_opp/last_closed/tag_*/applied_update/sticky.
+  assert.ok(!order.includes('applied_update'));
+  assert.ok(!order.includes('computeSticky'));
+  assert.ok(!calls.some((c) => ['open_opp', 'last_closed', 'tag_insert', 'tag_name', 'tag_target'].includes(c.key)));
+});
+
+test('recordUnappliedJudgment: mensagem nova sob o lock → stale, NÃO grava claim (não crava watermark velho)', async () => {
+  const order: string[] = [];
+  const { pool, calls } = makeFakePool({
+    watermark: () => ({ rows: [{ m: new Date('2026-07-30T10:05:00.000Z') }] }), // > ctx.lastMessageAt (10:00)
+  }, order);
+  const res = await recordUnappliedJudgment(pool, baseCtx(), 'x', 'y');
+  assert.deepEqual(res, { recorded: false, stale: true });
+  assert.ok(!calls.some((c) => c.key === 'claim'), 'input mudou → não crava; re-julga no próximo run');
+});
+
+test('recordUnappliedJudgment: lastMessageAt null → no-op sem lock nem query', async () => {
+  const order: string[] = [];
+  const { pool, calls } = makeFakePool({}, order);
+  const res = await recordUnappliedJudgment(pool, baseCtx({ lastMessageAt: null }), 'x', 'y');
+  assert.deepEqual(res, { recorded: false, stale: false });
+  assert.equal(calls.length, 0);
+});
+
+test('recordUnappliedJudgment: raw gigante é truncado em decision.raw', async () => {
+  const order: string[] = [];
+  const { pool, calls } = makeFakePool({
+    watermark: () => ({ rows: [{ m: new Date('2026-07-30T10:00:00.000Z') }] }),
+    claim: () => ({ rows: [{ id: 1 }] }),
+  }, order);
+  await recordUnappliedJudgment(pool, baseCtx(), 'z'.repeat(5000), 'r');
+  const claimCall = calls.find((c) => c.key === 'claim')!;
+  assert.equal(JSON.parse(claimCall.params[4]).raw.length, 2000, 'raw truncado no teto');
+});
+
+test('recordUnappliedJudgment: claim conflito (já julgado) → recorded:false, stale:false', async () => {
+  const order: string[] = [];
+  const { pool } = makeFakePool({
+    watermark: () => ({ rows: [{ m: new Date('2026-07-30T10:00:00.000Z') }] }),
+    claim: () => ({ rows: [], rowCount: 0 }), // ON CONFLICT DO NOTHING sem id
+  }, order);
+  const res = await recordUnappliedJudgment(pool, baseCtx(), 'x', 'y');
+  assert.deepEqual(res, { recorded: false, stale: false });
 });

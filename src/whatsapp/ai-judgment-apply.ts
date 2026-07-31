@@ -140,11 +140,15 @@ async function readLastClosedOpp(client: PoolClient, ctx: JudgmentContext): Prom
 }
 
 /**
- * A opp aberta mudou desde o snapshot? (spec §7 stale-recheck):
- *  - snapshot sem aberta, mas agora existe → stale (surgiu uma);
- *  - snapshot com aberta, mas sumiu / virou outra (id) / foi mutada (updated_at) → stale.
+ * Um snapshot de opp (aberta OU última fechada) ficou obsoleto sob o lock?
+ * (spec §7 stale-recheck):
+ *  - snapshot sem opp, mas agora existe → stale (surgiu uma);
+ *  - snapshot com opp, mas sumiu / virou outra (id) / foi mutada (updated_at) → stale.
+ * Usado pros DOIS alvos: a opp ABERTA (que a IA patcharia) e a última FECHADA (alvo de
+ * closed_action e base do sticky quando não há aberta) — uma opp criada+fechada durante
+ * a call LLM tornaria criar_nova/reabrir uma decisão sobre estado velho.
  */
-function isOpenOppStale(snap: OppSnapshot | null, fresh: FreshOpp | null): boolean {
+function oppSnapshotStale(snap: OppSnapshot | null, fresh: FreshOpp | null): boolean {
   if (snap == null) return fresh != null;
   if (fresh == null) return true;
   if (fresh.id !== snap.id) return true;
@@ -193,7 +197,17 @@ export async function applyJudgment(
 
     // ── 2. STALE: a opp aberta mudou/sumiu/apareceu? ──
     const freshOpen = await readOpenOpp(client, ctx);
-    if (isOpenOppStale(ctx.openOpp, freshOpen)) {
+    if (oppSnapshotStale(ctx.openOpp, freshOpen)) {
+      return { applied, skipped, stale: true };
+    }
+
+    // ── 2b. STALE: a última opp FECHADA mudou/sumiu/apareceu? Quando o snapshot não tinha
+    // aberta, checar só "segue sem aberta" não basta: uma opp criada E fechada durante a
+    // call LLM faria o closed_action=criar_nova nascer sobre uma base fechada velha (3ª opp
+    // indevida). Relê a última fechada e compara id+updated_at (mesmo toISO ms). Reusa
+    // `freshClosed` no sticky abaixo (evita reler). ──
+    const freshClosed = await readLastClosedOpp(client, ctx);
+    if (oppSnapshotStale(ctx.lastClosedOpp, freshClosed)) {
       return { applied, skipped, stale: true };
     }
 
@@ -213,9 +227,8 @@ export async function applyJudgment(
     }
     const judgmentId = Number(claim.rows[0].id);
 
-    // ── 4. Sticky recomputado sob o lock (defesa em profundidade) ──
-    const lastClosedForSticky = await readLastClosedOpp(client, ctx);
-    const stickyOppId = freshOpen?.id ?? lastClosedForSticky?.id ?? null;
+    // ── 4. Sticky recomputado sob o lock (defesa em profundidade) — reusa freshClosed (2b) ──
+    const stickyOppId = freshOpen?.id ?? freshClosed?.id ?? null;
     const sticky = await d.computeSticky(client, {
       numberId: ctx.numberId, identifier: ctx.identifier, opportunityId: stickyOppId,
     });
@@ -364,5 +377,65 @@ export async function applyJudgment(
     );
 
     return { applied, skipped, stale: false };
+  });
+}
+
+/** Teto do texto bruto gravado em decision.raw (evita persistir um output gigante do LLM). */
+const UNAPPLIED_RAW_MAX = 2000;
+
+export interface RecordUnappliedResult {
+  /** true = row de julgamento criada (claim ganho); false = já havia julgamento p/ esse watermark. */
+  recorded: boolean;
+  /** true = chegou mensagem nova sob o lock → NÃO cravou o watermark velho (re-julga no próximo run). */
+  stale: boolean;
+}
+
+/**
+ * Grava um julgamento NÃO-APLICADO (decisão do LLM inválida/irrecuperável) na
+ * whatsapp_ai_judgments — MESMO claim que o applyJudgment usa, mas SEM nenhuma escrita de
+ * opp/thread. Fix de runaway de custo: sem esta gravação, o watermark do par não avança e o
+ * runner re-chama o LLM a cada tick pra a mesma conversa (custo repetido, potencialmente
+ * milhares de calls/janela com CRM_AI_TICK_MS curto). Com ela, o UNIQUE (número, identifier,
+ * input_last_message_at) marca o input como já visto e a query de pendentes não re-seleciona
+ * a conversa até chegar mensagem nova.
+ *
+ * Contrato: lock do par → stale MÍNIMO (só watermark: se mensagem nova chegou, o input mudou
+ * e NÃO se crava o watermark velho — re-julga no próximo run) → CLAIM (decision={raw truncado,
+ * invalid:true, reason}, applied='[]', rationale=reason) ON CONFLICT DO NOTHING. Nenhuma
+ * mutação de opp/thread; não recomputa sticky nem relê opps.
+ */
+export async function recordUnappliedJudgment(
+  pool: Pool,
+  ctx: JudgmentContext,
+  rawDecision: string,
+  reason: string,
+  opts: { model?: string | null } = {},
+): Promise<RecordUnappliedResult> {
+  if (ctx.lastMessageAt == null) {
+    return { recorded: false, stale: false };
+  }
+  const ctxLastMs = new Date(ctx.lastMessageAt).getTime();
+  return withConversationLock<RecordUnappliedResult>(pool, ctx.numberId, ctx.identifier, async (client) => {
+    const wm = await client.query(
+      `/* apply:watermark */ SELECT MAX(created_at) AS m FROM messages
+        WHERE whatsapp_number_id = $1 AND identifier = $2 AND workspace_id = $3`,
+      [ctx.numberId, ctx.identifier, ctx.workspaceId],
+    );
+    const freshLast = wm.rows[0]?.m ?? null;
+    const freshLastMs = freshLast ? new Date(freshLast).getTime() : null;
+    if (freshLastMs == null || freshLastMs > ctxLastMs) {
+      return { recorded: false, stale: true };
+    }
+    const raw = rawDecision.length > UNAPPLIED_RAW_MAX ? rawDecision.slice(0, UNAPPLIED_RAW_MAX) : rawDecision;
+    const decision = JSON.stringify({ raw, invalid: true, reason });
+    const claim = await client.query(
+      `/* apply:claim */ INSERT INTO whatsapp_ai_judgments
+         (whatsapp_number_id, identifier, workspace_id, input_last_message_at, decision, applied, rationale, model)
+       VALUES ($1, $2, $3, $4::timestamptz, $5::jsonb, '[]'::jsonb, $6, $7)
+       ON CONFLICT (whatsapp_number_id, identifier, input_last_message_at) DO NOTHING
+       RETURNING id`,
+      [ctx.numberId, ctx.identifier, ctx.workspaceId, ctx.lastMessageAt, decision, reason, opts.model ?? null],
+    );
+    return { recorded: claim.rows.length > 0, stale: false };
   });
 }

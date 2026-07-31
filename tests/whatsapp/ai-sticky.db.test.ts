@@ -25,8 +25,8 @@ after(() => pool.end());
 async function insertOpp(identifier = 'c'): Promise<number> {
   const { rows } = await pool.query(
     `INSERT INTO whatsapp_opportunities
-       (whatsapp_number_id, workspace_id, identifier, status, is_qualified, qualification, created_by)
-     VALUES (1,'ws',$1,'em_andamento',NULL,'indefinido','seed') RETURNING id`,
+       (whatsapp_number_id, workspace_id, identifier, status, is_qualified, created_by)
+     VALUES (1,'ws',$1,'em_andamento',NULL,'seed') RETURNING id`,
     [identifier],
   );
   return Number(rows[0].id);
