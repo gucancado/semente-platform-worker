@@ -132,17 +132,26 @@ export async function claimPatternRun(
   return { runId: Number(upd.rows[0].id), resumed: true };
 }
 
-/** Fecha a run com sucesso: status='done' + output (jsonb) + finished_at=now(). */
+/**
+ * Fecha a run com sucesso: status='done' + finished_at=now() + MERGE do output.
+ * O merge (`COALESCE(output,'{}') || $2`) — não overwrite cego — PRESERVA a `decision`
+ * persistida por `persistPatternDecision` ANTES do apply (retomada idempotente, Task E3
+ * fix): finish grava `{applied, skipped}` por cima, resultando em `{decision, applied,
+ * skipped}`. `output` não-objeto quebraria o `||`; todos os chamadores passam objetos.
+ */
 export async function finishPatternRun(pool: Pool, runId: number, output: unknown): Promise<void> {
   await pool.query(
     `UPDATE whatsapp_ai_pattern_runs
-        SET status = 'done', output = $2::jsonb, finished_at = now()
+        SET status = 'done',
+            output = COALESCE(output, '{}'::jsonb) || $2::jsonb,
+            finished_at = now()
       WHERE id = $1`,
-    [runId, JSON.stringify(output ?? null)],
+    [runId, JSON.stringify(output ?? {})],
   );
 }
 
-/** Fecha a run com falha: status='failed' + finished_at=now() (output preservado). */
+/** Fecha a run com falha: status='failed' + finished_at=now() (output preservado — a
+ *  `decision` persistida sobrevive pra retomada re-aplicar A MESMA na próxima semana). */
 export async function failPatternRun(pool: Pool, runId: number): Promise<void> {
   await pool.query(
     `UPDATE whatsapp_ai_pattern_runs
@@ -150,6 +159,63 @@ export async function failPatternRun(pool: Pool, runId: number): Promise<void> {
       WHERE id = $1`,
     [runId],
   );
+}
+
+/**
+ * Persiste a decisão VALIDADA no output da run ANTES do apply (Task E3 fix — retry
+ * idempotente). `status` segue 'running' (a run não terminou). Merge (`|| jsonb_build_object`)
+ * pra não apagar nada já gravado. Se um crash interromper o apply, a retomada (claim de
+ * 'failed') lê esta decisão e RE-APLICA A MESMA (upserts/guards do aplicador toleram
+ * re-execução) em vez de re-chamar o LLM — que poderia decidir DIFERENTE sobre efeitos
+ * parciais já escritos.
+ */
+export async function persistPatternDecision(pool: Pool, runId: number, decision: unknown): Promise<void> {
+  await pool.query(
+    `UPDATE whatsapp_ai_pattern_runs
+        SET output = COALESCE(output, '{}'::jsonb) || jsonb_build_object('decision', $2::jsonb)
+      WHERE id = $1`,
+    [runId, JSON.stringify(decision)],
+  );
+}
+
+/** Lê o jsonb `output` de uma run (retomada usa `output.decision` pra re-aplicar sem LLM). */
+export async function getPatternRunOutput(pool: Pool, runId: number): Promise<unknown> {
+  const { rows } = await pool.query(
+    `SELECT output FROM whatsapp_ai_pattern_runs WHERE id = $1`,
+    [runId],
+  );
+  return rows[0] ? (rows[0].output ?? null) : null;
+}
+
+export interface FailedPatternRun {
+  runId: number;
+  workspaceId: string;
+  periodStart: string;
+  periodEnd: string;
+}
+
+/**
+ * Runs 'failed' de um workspace (mais recentes primeiro, cap `limit`) — Task E3 fix
+ * (BLOQUEADOR 2): o sweep só calcula a semana CORRENTE; sem isto, uma run que falhou numa
+ * semana passada nunca seria retomada (o claim daquela semana nunca mais é chamado). O
+ * runner retoma cada uma via `claimPatternRun` do período dela (CAS de resume). `::text`
+ * nas datas devolve 'YYYY-MM-DD' estável (o driver converteria `date` pra Date com shift).
+ */
+export async function fetchFailedPatternRuns(pool: Pool, workspaceId: string, limit: number): Promise<FailedPatternRun[]> {
+  const { rows } = await pool.query(
+    `SELECT id, workspace_id, period_start::text AS period_start, period_end::text AS period_end
+       FROM whatsapp_ai_pattern_runs
+      WHERE workspace_id = $1 AND status = 'failed'
+      ORDER BY period_start DESC
+      LIMIT $2`,
+    [workspaceId, limit],
+  );
+  return rows.map((r: any) => ({
+    runId: Number(r.id),
+    workspaceId: r.workspace_id,
+    periodStart: r.period_start,
+    periodEnd: r.period_end,
+  }));
 }
 
 /** Código do Postgres pra unique_violation (23505 — classe 23, integrity_constraint_violation). */
@@ -193,9 +259,12 @@ export async function insertSuggestion(
 }
 
 /**
- * Grava o relatório semanal (spec §8 "Saída de insights"). `runId` null é aceito
- * (defensivo), mas o uso real sempre associa ao run corrente. "1 por run" é convenção
- * do chamador (E3 chama uma vez por run) — não há UNIQUE em `run_id` no DDL (§3.2).
+ * Grava o relatório semanal (spec §8 "Saída de insights"). "1 por run" agora é INVARIANTE
+ * DO BANCO (Task E3 fix — migration 056: índice único parcial `uq_ai_insights_run (run_id)
+ * WHERE run_id IS NOT NULL`), não mais convenção do chamador: uma retomada que re-aplica a
+ * decisão NÃO duplica o insight. `ON CONFLICT ... DO NOTHING` + fallback 23505 → retorna
+ * `null` quando já existe insight pra este run. `runId` null é aceito (defensivo) e nunca
+ * conflita (fora do índice parcial).
  */
 export async function insertInsight(
   pool: Pool,
@@ -203,14 +272,20 @@ export async function insertInsight(
   runId: number | null,
   summary: string,
   details: unknown = null,
-): Promise<number> {
-  const { rows } = await pool.query(
-    `INSERT INTO whatsapp_ai_insights (workspace_id, run_id, summary, details)
-     VALUES ($1, $2, $3, $4::jsonb)
-     RETURNING id`,
-    [workspaceId, runId, summary, details == null ? null : JSON.stringify(details)],
-  );
-  return Number(rows[0].id);
+): Promise<number | null> {
+  try {
+    const { rows } = await pool.query(
+      `INSERT INTO whatsapp_ai_insights (workspace_id, run_id, summary, details)
+       VALUES ($1, $2, $3, $4::jsonb)
+       ON CONFLICT (run_id) WHERE run_id IS NOT NULL DO NOTHING
+       RETURNING id`,
+      [workspaceId, runId, summary, details == null ? null : JSON.stringify(details)],
+    );
+    return rows[0] ? Number(rows[0].id) : null;
+  } catch (err) {
+    if (isUniqueViolation(err)) return null;
+    throw err;
+  }
 }
 
 /** Últimos N insights de um workspace, mais recentes primeiro (Task E4 — GET /whatsapp/insights). */
@@ -274,4 +349,19 @@ export async function resolveSuggestion(
     [id, status, resolvedBy],
   );
   return rows[0] ? mapSuggestion(rows[0]) : null;
+}
+
+/**
+ * Rollback best-effort de um APPLY que ganhou o CAS mas cujo `patchSettings` falhou depois
+ * (Task E3 fix — IMPORTANT B): devolve a sugestão 'applied' pra 'pending' pra que um retry
+ * possa reaplicar. Guard `status = 'applied'` torna idempotente e impede reverter uma
+ * sugestão dispensada/aplicada por OUTRO fluxo. `resolved_at/by` voltam a NULL.
+ */
+export async function revertSuggestionApplied(pool: Pool, id: number): Promise<void> {
+  await pool.query(
+    `UPDATE whatsapp_ai_suggestions
+        SET status = 'pending', resolved_at = NULL, resolved_by = NULL
+      WHERE id = $1 AND status = 'applied'`,
+    [id],
+  );
 }

@@ -352,11 +352,14 @@ export async function applyPatternDecision(
     else skipped.push(`suggestion:${gs.kind}:dedupe`);
   }
 
-  // ── (h) insight semanal (1 por run) ───────────────────────────────────────────
+  // ── (h) insight semanal (1 por run — UNIQUE(run_id), mig 056) ─────────────────
+  // Numa RETOMADA que re-aplica a mesma decisão, o insight já existe → insertInsight
+  // devolve null (ON CONFLICT DO NOTHING). Não é erro: registra como dedupe.
   const insightId = await d.insertInsight(pool, ws, d.runId, decision.insightSummary, {
     applied: [...applied], skipped: [...skipped],
   });
-  applied.push(`insight:${insightId}`);
+  if (insightId != null) applied.push(`insight:${insightId}`);
+  else skipped.push('insight:dedupe');
 
   return { applied, skipped };
 }

@@ -14,10 +14,14 @@ import {
   claimPatternRun,
   finishPatternRun,
   failPatternRun,
+  persistPatternDecision,
+  getPatternRunOutput,
+  fetchFailedPatternRuns,
   insertSuggestion,
   insertInsight,
   listPendingSuggestions,
   resolveSuggestion,
+  revertSuggestionApplied,
   getSuggestion,
   listInsights,
 } from '../../src/whatsapp/ai-pattern-store.js';
@@ -105,20 +109,51 @@ test('claimPatternRun: conflito + status=done → null (semana já processada)',
 
 // ── finishPatternRun / failPatternRun ────────────────────────────────────────
 
-test('finishPatternRun: UPDATE status=done + output serializado + finished_at=now()', async () => {
+test('finishPatternRun: UPDATE status=done + MERGE do output (preserva decision persistida) + finished_at=now()', async () => {
   const { pool, calls } = makeFakePool([() => ({ rows: [] })]);
-  await finishPatternRun(pool, 7, { tagsCreated: 2, insightId: 3 });
+  await finishPatternRun(pool, 7, { applied: ['insight:9'], skipped: [] });
   assert.equal(calls.length, 1);
   assert.match(calls[0].sql, /UPDATE whatsapp_ai_pattern_runs/);
   assert.match(calls[0].sql, /status\s*=\s*'done'/);
+  assert.match(calls[0].sql, /COALESCE\(output, '\{\}'::jsonb\)\s*\|\|\s*\$2::jsonb/, 'MERGE, não overwrite cego');
   assert.match(calls[0].sql, /finished_at\s*=\s*now\(\)/i);
-  assert.deepEqual(calls[0].params, [7, JSON.stringify({ tagsCreated: 2, insightId: 3 })]);
+  assert.deepEqual(calls[0].params, [7, JSON.stringify({ applied: ['insight:9'], skipped: [] })]);
 });
 
-test('finishPatternRun: output null vira JSON null explícito', async () => {
+test('finishPatternRun: output null vira objeto vazio (merge é no-op, não apaga a decision)', async () => {
   const { pool, calls } = makeFakePool([() => ({ rows: [] })]);
   await finishPatternRun(pool, 7, null);
-  assert.deepEqual(calls[0].params, [7, 'null']);
+  assert.deepEqual(calls[0].params, [7, '{}']);
+});
+
+test('persistPatternDecision: MERGE de {decision} no output SEM mudar o status (segue running)', async () => {
+  const { pool, calls } = makeFakePool([() => ({ rows: [] })]);
+  const decision = { newTags: [], insightSummary: 'x' };
+  await persistPatternDecision(pool, 7, decision);
+  assert.equal(calls.length, 1);
+  assert.match(calls[0].sql, /UPDATE whatsapp_ai_pattern_runs/);
+  assert.match(calls[0].sql, /jsonb_build_object\('decision', \$2::jsonb\)/);
+  assert.equal(calls[0].sql.includes("status ="), false, 'não muda status (run segue running)');
+  assert.deepEqual(calls[0].params, [7, JSON.stringify(decision)]);
+});
+
+test('getPatternRunOutput: lê output; ausência de row → null', async () => {
+  const { pool: p1 } = makeFakePool([() => ({ rows: [{ output: { decision: { a: 1 } } }] })]);
+  assert.deepEqual(await getPatternRunOutput(p1, 7), { decision: { a: 1 } });
+  const { pool: p2 } = makeFakePool([() => ({ rows: [] })]);
+  assert.equal(await getPatternRunOutput(p2, 7), null);
+});
+
+test('fetchFailedPatternRuns: só status=failed, datas ::text, ordem DESC, cap', async () => {
+  const { pool, calls } = makeFakePool([() => ({ rows: [
+    { id: 5, workspace_id: 'ws-1', period_start: '2026-07-06', period_end: '2026-07-12' },
+  ] })]);
+  const rows = await fetchFailedPatternRuns(pool, 'ws-1', 2);
+  assert.match(calls[0].sql, /status = 'failed'/);
+  assert.match(calls[0].sql, /period_start::text/);
+  assert.match(calls[0].sql, /ORDER BY period_start DESC/);
+  assert.deepEqual(calls[0].params, ['ws-1', 2]);
+  assert.deepEqual(rows, [{ runId: 5, workspaceId: 'ws-1', periodStart: '2026-07-06', periodEnd: '2026-07-12' }]);
 });
 
 test('failPatternRun: UPDATE status=failed + finished_at=now(), sem mexer em output', async () => {
@@ -192,6 +227,34 @@ test('insertInsight: runId null e details omitido → params com null/null', asy
   const { pool, calls } = makeFakePool([() => ({ rows: [{ id: 10 }] })]);
   await insertInsight(pool, 'ws-1', null, 'sem run associado');
   assert.deepEqual(calls[0].params, ['ws-1', null, 'sem run associado', null]);
+});
+
+test('insertInsight: ON CONFLICT(run_id) DO NOTHING → 0 rows (insight da run já existe) → null', async () => {
+  const { pool, calls } = makeFakePool([() => ({ rows: [], rowCount: 0 })]);
+  const id = await insertInsight(pool, 'ws-1', 7, 'retomada não duplica', null);
+  assert.equal(id, null, 'retomada re-aplicando a decisão NÃO cria 2º insight');
+  assert.match(calls[0].sql, /ON CONFLICT \(run_id\) WHERE run_id IS NOT NULL DO NOTHING/);
+});
+
+test('insertInsight: corrida real (23505) → dedupe, retorna null', async () => {
+  const { pool } = makeFakePool([() => {
+    const err: any = new Error('duplicate key value violates unique constraint "uq_ai_insights_run"');
+    err.code = '23505';
+    throw err;
+  }]);
+  assert.equal(await insertInsight(pool, 'ws-1', 7, 's'), null);
+});
+
+// ── revertSuggestionApplied (Task E3 fix — IMPORTANT B) ────────────────────────
+
+test('revertSuggestionApplied: UPDATE volta pra pending com guard status=applied', async () => {
+  const { pool, calls } = makeFakePool([() => ({ rows: [], rowCount: 1 })]);
+  await revertSuggestionApplied(pool, 5);
+  assert.match(calls[0].sql, /UPDATE whatsapp_ai_suggestions/);
+  assert.match(calls[0].sql, /status\s*=\s*'pending'/);
+  assert.match(calls[0].sql, /resolved_at\s*=\s*NULL/);
+  assert.match(calls[0].sql, /WHERE id\s*=\s*\$1 AND status\s*=\s*'applied'/, 'guard idempotente');
+  assert.deepEqual(calls[0].params, [5]);
 });
 
 // ── listPendingSuggestions ────────────────────────────────────────────────────

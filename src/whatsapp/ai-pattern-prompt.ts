@@ -480,6 +480,13 @@ export function parsePatternDecision(
   const validLossCodes = new Set(
     ctx.lossReasons.filter((r) => r.active && r.code.toLowerCase() !== CASCADE_LOSS_REASON).map((r) => r.code.toLowerCase()),
   );
+  // + motivos criados NA MESMA decisão (IMPORTANT A): o aplicador cria os newLossReasons
+  // ANTES do backfill, então um code que a IA acabou de propor é domínio válido. Slug do
+  // label = o `code` que o INSERT vai gerar (slugifyLossCode, mesma função do aplicador).
+  for (const lr of newLossReasons) {
+    const code = slugifyLossCode(lr.label);
+    if (code !== '' && code !== CASCADE_LOSS_REASON) validLossCodes.add(code);
+  }
   const backfillLossReasons: PatternDecision['backfillLossReasons'] = [];
   const seenBackfillOpps = new Set<number>();
   for (const item of r.backfill_loss_reasons) {

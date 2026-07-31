@@ -358,6 +358,23 @@ test('validador: backfill só de opp ∈ candidatas e code ∈ catálogo ativo (
   assert.deepEqual(r.decision.backfillLossReasons, [{ opportunityId: 71, code: 'preco' }]);
 });
 
+test('validador: backfill aceita code de motivo criado NA MESMA decisão (IMPORTANT A)', () => {
+  // O motivo 'sem_orcamento' NÃO está no catálogo (ctx.lossReasons vazio de custom), mas é
+  // criado nesta mesma decisão (new_loss_reasons) → o aplicador o cria ANTES do backfill,
+  // então o backfill que o referencia deve PASSAR (sem o fix, seria descartado).
+  const c = ctx({ lossBackfillCandidates: [{ opportunityId: 71, rationale: 'sem verba' }] });
+  const r = parsePatternDecision(
+    mk({
+      new_loss_reasons: [{ label: 'Sem orçamento', description: 'cliente sem verba' }],
+      backfill_loss_reasons: [{ opportunity_id: 71, code: 'sem_orcamento' }],
+    }),
+    c,
+  );
+  assert.ok(r.ok);
+  assert.deepEqual(r.decision.newLossReasons, [{ label: 'Sem orçamento', description: 'cliente sem verba' }]);
+  assert.deepEqual(r.decision.backfillLossReasons, [{ opportunityId: 71, code: 'sem_orcamento' }]);
+});
+
 test('validador: backfill respeita cap 10', () => {
   const cands = Array.from({ length: 15 }, (_, i) => ({ opportunityId: 100 + i, rationale: 'r' }));
   const c = ctx({

@@ -83,7 +83,7 @@ function makeDeps(over: {
   runId?: number | null;
   stickyByOpp?: Record<number, StickyFlags>;
   suggestionResult?: (kind: string) => number | null;
-  insightId?: number;
+  insightId?: number | null;
   validLoss?: boolean;
   patchResult?: { oppChanged: boolean; threadChanged: boolean };
 } = {}) {
@@ -116,7 +116,7 @@ function makeDeps(over: {
     }) as any,
     insertInsight: (async (_pool: any, ws: string, runId: number | null, summary: string, details: any) => {
       log.insights.push({ ws, runId, summary, details });
-      return over.insightId ?? 999;
+      return over.insightId === undefined ? 999 : over.insightId;
     }) as any,
   };
   return { deps, log };
@@ -326,6 +326,14 @@ test('insight: insertInsight com runId + summary; applied inclui insight:id', as
   assert.equal(log.insights.length, 1);
   assert.equal(log.insights[0].runId, 42);
   assert.equal(log.insights[0].summary, 'semana forte');
+});
+
+test('insight: insertInsight null (retomada, insight da run já existe) → skip insight:dedupe', async () => {
+  const { pool } = makeFakePool({});
+  const { deps } = makeDeps({ insightId: null }); // ON CONFLICT DO NOTHING devolveu null
+  const res = await applyPatternDecision(pool, baseCtx(), baseDecision({ insightSummary: 's' }), deps);
+  assert.ok(res.skipped.includes('insight:dedupe'));
+  assert.ok(!res.applied.some((a) => a.startsWith('insight:')), 'nenhum insight:id aplicado');
 });
 
 // =============================================================================

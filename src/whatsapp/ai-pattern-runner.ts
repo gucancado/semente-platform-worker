@@ -22,12 +22,23 @@
  * falha de um não aborta os demais.
  */
 import type { Pool } from 'pg';
-import { claimPatternRun, finishPatternRun, failPatternRun } from './ai-pattern-store.js';
+import {
+  claimPatternRun,
+  finishPatternRun,
+  failPatternRun,
+  persistPatternDecision,
+  getPatternRunOutput,
+  fetchFailedPatternRuns,
+  type FailedPatternRun,
+} from './ai-pattern-store.js';
 import { buildPatternContext } from './ai-pattern-context.js';
-import { buildPatternPrompt, parsePatternDecision } from './ai-pattern-prompt.js';
+import { buildPatternPrompt, parsePatternDecision, type PatternDecision } from './ai-pattern-prompt.js';
 import { applyPatternDecision } from './ai-pattern-apply.js';
 import { judgmentCost, type JudgmentLlm } from './ai-llm.js';
 import { fetchAiWorkspaces, resolveTickIntervalMs, saoPauloHour } from './ai-judgment-runner.js';
+
+/** Default de runs 'failed' antigas retomadas por workspace num sweep (BLOQUEADOR 2). */
+const DEFAULT_MAX_FAILED_RESUME = 2;
 
 /** Matéria-prima mínima: sem ao menos N julgamentos na semana, não há padrão a extrair. */
 const MIN_JUDGMENTS = 5;
@@ -126,6 +137,8 @@ export interface RunPatternDeps {
   applyDecision?: typeof applyPatternDecision;
   finishRun?: typeof finishPatternRun;
   failRun?: typeof failPatternRun;
+  persistDecision?: typeof persistPatternDecision;
+  getRunOutput?: typeof getPatternRunOutput;
   recordMetrics?: typeof recordPatternLlmMetrics;
   /** Relógio injetável (default new Date().toISOString()) — o prompt precisa do "agora". */
   now?: () => string;
@@ -154,6 +167,8 @@ export async function runPatternForWorkspace(
   const applyDecision = deps.applyDecision ?? applyPatternDecision;
   const finishRun = deps.finishRun ?? finishPatternRun;
   const failRun = deps.failRun ?? failPatternRun;
+  const persistDecision = deps.persistDecision ?? persistPatternDecision;
+  const getRunOutput = deps.getRunOutput ?? getPatternRunOutput;
   const recordMetrics = deps.recordMetrics ?? recordPatternLlmMetrics;
   const nowIso = deps.now ?? (() => new Date().toISOString());
   const minJudgments = deps.minJudgments ?? MIN_JUDGMENTS;
@@ -166,6 +181,26 @@ export async function runPatternForWorkspace(
   const runId = claim.runId;
 
   try {
+    // ── RETOMADA IDEMPOTENTE (BLOQUEADOR 1): se a run retomada de 'failed' já tem a
+    // decisão persistida (crashou no meio do apply), RE-APLICA A MESMA decisão — os
+    // upserts/guards do aplicador toleram re-execução — SEM re-chamar o LLM (que decidiria
+    // diferente sobre efeitos parciais + pagaria custo de novo).
+    if (claim.resumed) {
+      const output = await getRunOutput(pool, runId);
+      const persisted = output && typeof output === 'object'
+        ? (output as { decision?: unknown }).decision : null;
+      if (persisted != null) {
+        const ctx = await buildContext(pool, {
+          workspaceId: target.workspaceId, periodStart: target.periodStart, periodEnd: target.periodEnd,
+        });
+        const res = await applyDecision(pool, ctx, persisted as PatternDecision, { runId });
+        await finishRun(pool, runId, { applied: res.applied, skipped: res.skipped, resumed: true });
+        return { status: 'applied', runId, applied: res.applied, skipped: res.skipped };
+      }
+      // Sem decisão persistida → crashou ANTES do apply → segue o fluxo normal (re-LLM ok:
+      // nenhum efeito parcial foi escrito).
+    }
+
     const ctx = await buildContext(pool, {
       workspaceId: target.workspaceId, periodStart: target.periodStart, periodEnd: target.periodEnd,
     });
@@ -194,8 +229,13 @@ export async function runPatternForWorkspace(
       return { status: 'invalid', runId };
     }
 
+    // Persiste a decisão VALIDADA ANTES do apply (status segue running): se crashar no meio
+    // do apply, a retomada re-aplica ESTA decisão (acima), não uma nova (BLOQUEADOR 1).
+    await persistDecision(pool, runId, parsed.decision);
+
     const res = await applyDecision(pool, ctx, parsed.decision, { runId });
-    await finishRun(pool, runId, { decision: parsed.decision, applied: res.applied, skipped: res.skipped });
+    // finishRun faz MERGE do output → { decision (persistida), applied, skipped }.
+    await finishRun(pool, runId, { applied: res.applied, skipped: res.skipped });
     return { status: 'applied', runId, applied: res.applied, skipped: res.skipped };
   } catch (err) {
     // Erro transitório (LLM down, DB hiccup): marca failed → a próxima semana retoma a MESMA
@@ -213,40 +253,44 @@ export interface PatternSweepResult {
   skippedNoMateria: number;
   skippedClaim: number;
   failed: number;
+  /** Nº de runs 'failed' de semanas passadas re-tentadas neste ciclo (BLOQUEADOR 2). */
+  resumedFailed: number;
 }
 
 export interface RunPatternSweepDeps extends RunPatternDeps {
   provider: JudgmentLlm;
   fetchWorkspaces?: typeof fetchAiWorkspaces;
+  fetchFailedRuns?: typeof fetchFailedPatternRuns;
   /** Relógio (Date) pro cálculo da semana anterior; default new Date(). */
   clock?: () => Date;
+  /** Cap de runs 'failed' antigas retomadas por workspace (default 2). */
+  maxFailedResume?: number;
 }
 
 /**
- * 1 ciclo do runner semanal. Varre os workspaces com IA habilitada e processa cada um na
- * MESMA semana anterior (calculada uma vez do relógio → determinístico). Best-effort: erro
- * ao coletar workspaces aborta (nada a fazer); erro por workspace é isolado pelo próprio
- * runPatternForWorkspace (marca fail, não relança).
+ * 1 ciclo do runner semanal. Por workspace com IA habilitada:
+ *  1. RETOMA runs 'failed' de semanas passadas (cap `maxFailedResume`) — sem isto o sweep,
+ *     que só calcula a semana corrente, abandonaria pra sempre uma run que falhou numa
+ *     semana já superada (BLOQUEADOR 2). A do PERÍODO CORRENTE é pulada aqui (o passo 2 a
+ *     retoma via claim). Cada retomada re-aplica a decisão persistida (ou re-roda o LLM se
+ *     crashou antes de persistir).
+ *  2. Processa a SEMANA CORRENTE (calculada uma vez do relógio → determinístico).
+ * Best-effort: erro ao coletar workspaces aborta; erro por workspace/run é isolado (o
+ * runPatternForWorkspace marca fail e não relança; o try/catch aqui pega falha do claim).
  */
 export async function runPatternSweep(pool: Pool, deps: RunPatternSweepDeps): Promise<PatternSweepResult> {
   const fetchWorkspaces = deps.fetchWorkspaces ?? fetchAiWorkspaces;
+  const fetchFailedRuns = deps.fetchFailedRuns ?? fetchFailedPatternRuns;
   const clock = deps.clock ?? (() => new Date());
+  const maxFailedResume = deps.maxFailedResume ?? DEFAULT_MAX_FAILED_RESUME;
   const { periodStart, periodEnd } = previousCompleteWeek(clock());
 
   const workspaces = await fetchWorkspaces(pool);
   const result: PatternSweepResult = {
-    workspaces: workspaces.length, applied: 0, invalid: 0, skippedNoMateria: 0, skippedClaim: 0, failed: 0,
+    workspaces: workspaces.length, applied: 0, invalid: 0, skippedNoMateria: 0, skippedClaim: 0, failed: 0, resumedFailed: 0,
   };
-  for (const ws of workspaces) {
-    let outcome: PatternRunOutcome;
-    try {
-      outcome = await runPatternForWorkspace(pool, deps.provider, { workspaceId: ws.workspaceId, periodStart, periodEnd }, deps);
-    } catch (err) {
-      // runPatternForWorkspace já isola erros pós-claim; isto só pega falha do próprio claim.
-      console.warn(`[ai-pattern] workspace ${ws.workspaceId} falhou no claim: ${(err as Error).message}`);
-      result.failed += 1;
-      continue;
-    }
+
+  const tally = (outcome: PatternRunOutcome): void => {
     switch (outcome.status) {
       case 'applied': result.applied += 1; break;
       case 'invalid': result.invalid += 1; break;
@@ -254,6 +298,33 @@ export async function runPatternSweep(pool: Pool, deps: RunPatternSweepDeps): Pr
       case 'skipped_claim': result.skippedClaim += 1; break;
       case 'failed': result.failed += 1; break;
     }
+  };
+  const runOne = async (target: { workspaceId: string; periodStart: string; periodEnd: string }): Promise<void> => {
+    try {
+      tally(await runPatternForWorkspace(pool, deps.provider, target, deps));
+    } catch (err) {
+      // runPatternForWorkspace já isola erros pós-claim; isto só pega falha do próprio claim.
+      console.warn(`[ai-pattern] workspace ${target.workspaceId} (${target.periodStart}) falhou no claim: ${(err as Error).message}`);
+      result.failed += 1;
+    }
+  };
+
+  for (const ws of workspaces) {
+    // 1. Retomar runs 'failed' de semanas passadas.
+    let failed: FailedPatternRun[] = [];
+    try {
+      failed = await fetchFailedRuns(pool, ws.workspaceId, maxFailedResume);
+    } catch (err) {
+      console.warn(`[ai-pattern] coleta de runs failed falhou (ws=${ws.workspaceId}): ${(err as Error).message}`);
+    }
+    for (const f of failed) {
+      if (f.periodStart === periodStart) continue; // corrente → tratada no passo 2
+      result.resumedFailed += 1;
+      console.info(`[ai-pattern] retomando run failed ws=${ws.workspaceId} período=${f.periodStart}..${f.periodEnd}`);
+      await runOne({ workspaceId: ws.workspaceId, periodStart: f.periodStart, periodEnd: f.periodEnd });
+    }
+    // 2. Semana corrente.
+    await runOne({ workspaceId: ws.workspaceId, periodStart, periodEnd });
   }
   return result;
 }

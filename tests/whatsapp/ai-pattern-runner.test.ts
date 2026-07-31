@@ -154,29 +154,78 @@ test('runPatternForWorkspace: matéria < N → finish {skipped:sem_materia} SEM 
   assert.equal(finished.out.skipped, 'sem_materia');
 });
 
-test('runPatternForWorkspace: decisão VÁLIDA → apply + finish {decision,applied,skipped} + custo', async () => {
+test('runPatternForWorkspace: decisão VÁLIDA → persistDecision ANTES do apply + finish {applied,skipped} + custo', async () => {
   const metrics: any[] = [];
   let applied: any = null;
   let finished: any = null;
+  let persisted: any = null;
+  const order: string[] = [];
   const dec = decision({ insightSummary: 'ok' });
   const deps: RunPatternDeps = {
     claimRun: async () => ({ runId: 9, resumed: false }),
     buildContext: (async () => ctx({ judgments: judgments(10) })) as any,
     buildPrompt: () => ({ system: 'S', user: 'U' }),
     parseDecision: () => ({ ok: true, decision: dec }),
-    applyDecision: (async (_p: any, _c: any, d: any, opts: any) => { applied = { d, opts }; return { applied: ['insight:1'], skipped: ['backfill_loss_reason:not_implemented'] }; }) as any,
-    finishRun: (async (_p: any, id: number, out: any) => { finished = { id, out }; }) as any,
+    persistDecision: (async (_p: any, runId: number, d: any) => { order.push('persist'); persisted = { runId, d }; }) as any,
+    applyDecision: (async (_p: any, _c: any, d: any, opts: any) => { order.push('apply'); applied = { d, opts }; return { applied: ['insight:1'], skipped: ['backfill_loss:71:preco'] }; }) as any,
+    finishRun: (async (_p: any, id: number, out: any) => { order.push('finish'); finished = { id, out }; }) as any,
     recordMetrics: (async (_p: any, a: any) => { metrics.push(a); }) as any,
     now: () => '2026-07-27T04:00:00.000Z',
   };
   const r = await runPatternForWorkspace(okPool, fakeProvider(), target, deps);
   assert.equal(r.status, 'applied');
+  assert.deepEqual(order, ['persist', 'apply', 'finish'], 'persiste a decisão ANTES de aplicar');
+  assert.equal(persisted.runId, 9);
+  assert.equal(persisted.d, dec, 'persiste A decisão validada');
   assert.equal(applied.opts.runId, 9, 'apply recebe o runId');
   assert.equal(metrics.length, 1, 'custo registrado 1x');
   assert.ok(Number(metrics[0].costUsd) > 0);
   assert.equal(finished.id, 9);
   assert.deepEqual(finished.out.applied, ['insight:1']);
-  assert.deepEqual(finished.out.skipped, ['backfill_loss_reason:not_implemented']);
+  assert.deepEqual(finished.out.skipped, ['backfill_loss:71:preco']);
+});
+
+test('runPatternForWorkspace: RETOMADA com decisão persistida → RE-APLICA a mesma SEM LLM', async () => {
+  let judgeCalls = 0;
+  let applyArg: any = null;
+  let finished: any = null;
+  const persistedDecision = decision({ newTags: [{ name: 'X', description: 'd', retroOpportunityIds: [] }], insightSummary: 'ok' });
+  const provider = fakeProvider({ judge: async () => { judgeCalls += 1; return { raw: '{}', usage: { inputTokens: 1, outputTokens: 1 } }; } });
+  const deps: RunPatternDeps = {
+    claimRun: async () => ({ runId: 9, resumed: true }), // retomada de failed
+    getRunOutput: (async () => ({ decision: persistedDecision })) as any,
+    buildContext: (async () => ctx({ judgments: judgments(10) })) as any,
+    applyDecision: (async (_p: any, _c: any, d: any, opts: any) => { applyArg = { d, opts }; return { applied: ['tag_created:1', 'insight:dedupe'], skipped: [] }; }) as any,
+    finishRun: (async (_p: any, id: number, out: any) => { finished = { id, out }; }) as any,
+    // buildPrompt/parseDecision/persistDecision NÃO devem ser chamados no resume.
+    buildPrompt: () => { throw new Error('não deve montar prompt no resume'); },
+    persistDecision: (async () => { throw new Error('não deve re-persistir no resume'); }) as any,
+  };
+  const r = await runPatternForWorkspace(okPool, provider, target, deps);
+  assert.equal(r.status, 'applied');
+  assert.equal(judgeCalls, 0, 'LLM NÃO é chamado na retomada (evita decisão diferente + double cost)');
+  assert.equal(applyArg.d, persistedDecision, 're-aplica a decisão persistida');
+  assert.equal(applyArg.opts.runId, 9);
+  assert.equal(finished.out.resumed, true);
+});
+
+test('runPatternForWorkspace: RETOMADA SEM decisão persistida (crashou antes de persistir) → segue fluxo normal (LLM)', async () => {
+  let judgeCalls = 0;
+  const provider = fakeProvider({ judge: async () => { judgeCalls += 1; return { raw: '{}', usage: { inputTokens: 1, outputTokens: 1 } }; } });
+  const deps: RunPatternDeps = {
+    claimRun: async () => ({ runId: 9, resumed: true }),
+    getRunOutput: (async () => ({})) as any, // sem decision persistida
+    buildContext: (async () => ctx({ judgments: judgments(10) })) as any,
+    buildPrompt: () => ({ system: 'S', user: 'U' }),
+    parseDecision: () => ({ ok: true, decision: decision({ insightSummary: 'ok' }) }),
+    persistDecision: (async () => {}) as any,
+    applyDecision: (async () => ({ applied: [], skipped: [] })) as any,
+    finishRun: (async () => {}) as any,
+    recordMetrics: (async () => {}) as any,
+  };
+  const r = await runPatternForWorkspace(okPool, provider, target, deps);
+  assert.equal(r.status, 'applied');
+  assert.equal(judgeCalls, 1, 'sem decisão persistida → re-roda o LLM (nenhum efeito parcial escrito)');
 });
 
 test('runPatternForWorkspace: decisão INVÁLIDA → finish {invalid} SEM apply, mas COM custo', async () => {
@@ -234,6 +283,7 @@ test('runPatternSweep: processa todos os workspaces na MESMA semana e agrega des
       { workspaceId: 'ws-2', pipelineSince: 'x' },
       { workspaceId: 'ws-3', pipelineSince: 'x' },
     ],
+    fetchFailedRuns: async () => [], // sem runs failed antigas
     claimRun: (async (_p: any, ws: string, ps: string, pe: string) => {
       seenPeriods.add(`${ps}..${pe}`);
       claimN += 1;
@@ -247,6 +297,7 @@ test('runPatternSweep: processa todos os workspaces na MESMA semana e agrega des
   assert.equal(r.workspaces, 3);
   assert.equal(r.skippedClaim, 1, 'ws-2 pulou o claim');
   assert.equal(r.skippedNoMateria, 2, 'ws-1 e ws-3 sem matéria');
+  assert.equal(r.resumedFailed, 0);
   assert.deepEqual([...seenPeriods], ['2026-07-13..2026-07-19'], 'todos na mesma semana anterior');
 });
 
@@ -260,6 +311,7 @@ test('runPatternSweep: erro no claim de um workspace → failed++ e segue', asyn
         { workspaceId: 'ws-bad', pipelineSince: 'x' },
         { workspaceId: 'ws-ok', pipelineSince: 'x' },
       ],
+      fetchFailedRuns: async () => [],
       claimRun: (async (_p: any, ws: string) => {
         if (ws === 'ws-bad') throw new Error('claim DB down');
         return { runId: 1, resumed: false };
@@ -271,6 +323,59 @@ test('runPatternSweep: erro no claim de um workspace → failed++ e segue', asyn
     assert.equal(r.failed, 1);
     assert.equal(r.skippedNoMateria, 1, 'o outro workspace segue');
   } finally { console.warn = orig; }
+});
+
+test('runPatternSweep: RETOMA runs failed de semanas passadas (BLOQUEADOR 2) além da corrente', async () => {
+  const orig = console.info; console.info = () => {};
+  const seenPeriods: string[] = [];
+  try {
+    const deps: RunPatternSweepDeps = {
+      provider: fakeProvider(),
+      clock: () => new Date('2026-07-26T07:00:00Z'), // corrente = [07-13, 07-19]
+      fetchWorkspaces: async () => [{ workspaceId: 'ws-1', pipelineSince: 'x' }],
+      // uma failed de semana passada + uma failed que É a corrente (deve ser pulada no passo 1).
+      fetchFailedRuns: async () => [
+        { runId: 50, workspaceId: 'ws-1', periodStart: '2026-07-06', periodEnd: '2026-07-12' },
+        { runId: 51, workspaceId: 'ws-1', periodStart: '2026-07-13', periodEnd: '2026-07-19' }, // corrente
+      ],
+      claimRun: (async (_p: any, _ws: string, ps: string, pe: string) => {
+        seenPeriods.push(`${ps}..${pe}`);
+        return { runId: ps === '2026-07-06' ? 50 : 1, resumed: ps === '2026-07-06' };
+      }) as any,
+      getRunOutput: (async () => ({ decision: decision({ insightSummary: 'ok' }) })) as any,
+      buildContext: (async () => ctx({ judgments: judgments(10) })) as any,
+      buildPrompt: () => ({ system: 'S', user: 'U' }),
+      parseDecision: () => ({ ok: true, decision: decision({ insightSummary: 'ok' }) }),
+      persistDecision: (async () => {}) as any,
+      applyDecision: (async () => ({ applied: ['insight:1'], skipped: [] })) as any,
+      finishRun: (async () => {}) as any,
+      recordMetrics: (async () => {}) as any,
+    };
+    const r = await runPatternSweep(okPool, deps);
+    // passo 1 retoma SÓ a de 07-06 (a de 07-13 é a corrente, pulada); passo 2 roda a corrente.
+    assert.equal(r.resumedFailed, 1, 'só a failed de semana PASSADA conta como resumedFailed');
+    assert.deepEqual(seenPeriods, ['2026-07-06..2026-07-12', '2026-07-13..2026-07-19'],
+      'retoma a passada e depois a corrente (a corrente-failed não é reprocessada 2x)');
+    assert.equal(r.applied, 2, 'a retomada e a corrente aplicaram');
+  } finally { console.info = orig; }
+});
+
+test('runPatternSweep: fetchFailedRuns falhando não aborta (warn + segue pra corrente)', async () => {
+  const origW = console.warn; console.warn = () => {};
+  try {
+    const deps: RunPatternSweepDeps = {
+      provider: fakeProvider(),
+      clock: () => new Date('2026-07-26T07:00:00Z'),
+      fetchWorkspaces: async () => [{ workspaceId: 'ws-1', pipelineSince: 'x' }],
+      fetchFailedRuns: async () => { throw new Error('DB down'); },
+      claimRun: (async () => ({ runId: 1, resumed: false })) as any,
+      buildContext: (async () => ctx({ judgments: judgments(3) })) as any,
+      finishRun: (async () => {}) as any,
+    };
+    const r = await runPatternSweep(okPool, deps);
+    assert.equal(r.skippedNoMateria, 1, 'a corrente roda mesmo com a coleta de failed falhando');
+    assert.equal(r.resumedFailed, 0);
+  } finally { console.warn = origW; }
 });
 
 // =============================================================================

@@ -7,13 +7,15 @@
  * semanais (`whatsapp_ai_insights`), Task E4. Molde: loss-reason-routes.ts /
  * settings-routes.ts (mesmo padrão de `loadNumber` por `number_id` + gates).
  *
- * Ordem de POST /:id/apply — DELIBERADA (ver comentário no handler): aplica a
- * guidance via `patchSettings` PRIMEIRO, resolve a sugestão DEPOIS. Se o resolve
- * falhar (crash/timeout entre as duas escritas), a guidance já está aplicada e a
- * sugestão continua 'pending' — um retry do mesmo POST reaplica o MESMO texto
- * (idempotente no efeito) e desta vez o resolve completa. A ordem inversa
- * deixaria uma sugestão 'applied' cuja guidance nunca foi escrita, o que é pior
- * (o painel mostraria "aplicado" sem o efeito real).
+ * Ordem de POST /:id/apply — CAS-FIRST (Task E3 fix, IMPORTANT B): `resolveSuggestion`
+ * (CAS atômico pending→applied) roda PRIMEIRO; só quem vence escreve a guidance via
+ * `patchSettings`. Motivo: com a ordem inversa (patchSettings antes), um `dismiss`
+ * concorrente podia vencer o resolve DEPOIS de a guidance já ter sido escrita —
+ * deixando a sugestão 'dismissed' porém com o texto aplicado (o estado mente). Com
+ * CAS-first, um apply que perde a corrida (0 rows) devolve 409 SEM tocar settings. O
+ * risco que motivava a ordem antiga ('applied' sem guidance, se o patchSettings falhar)
+ * é coberto por um REVERT best-effort: patchSettings falhou → a sugestão volta pra
+ * 'pending' (`revertSuggestionApplied`), habilitando retry.
  */
 import type { FastifyInstance } from 'fastify';
 import type { Pool } from 'pg';
@@ -28,6 +30,7 @@ import {
   listInsights,
   listPendingSuggestions,
   resolveSuggestion,
+  revertSuggestionApplied,
   type Insight,
   type Suggestion,
   type SuggestionKind,
@@ -146,27 +149,31 @@ export function registerSuggestionRoutes(app: FastifyInstance, deps: {
       return reply.code(500).send({ error: 'invalid suggestion payload' });
     }
     const field = SUGGESTION_KIND_TO_SETTINGS_FIELD[suggestion.kind];
-    // Garante a row antes do UPDATE (mesmo racional de settings-routes.ts): não
-    // deveria faltar (guidance vem do runner que já leu settings), mas defensivo.
-    await getOrCreateSettings(deps.pool, num.workspaceId);
-    const settings = await patchSettings(deps.pool, num.workspaceId, { [field]: payload.suggested } as SettingsPatch, req.actingUser);
+    // CAS-FIRST: reivindica a sugestão (pending→applied) ANTES de escrever a guidance.
+    // Perdeu a corrida (0 rows: um dismiss/apply concorrente resolveu no intervalo entre
+    // loadScopedSuggestion e aqui) → 409 SEM tocar settings (o estado não mente).
     const resolved = await resolveSuggestion(deps.pool, id, 'applied', req.actingUser);
-    logAccess(deps.pool, { actor: req.actingUser, action: 'apply_suggestion', workspaceId: num.workspaceId, numberId: num.id });
     if (!resolved) {
-      // Corrida perdida ENTRE o check de status acima e este resolve (outro
-      // request resolveu primeiro) — a guidance já foi escrita (idempotente:
-      // mesmo texto que o vencedor da corrida também teria escrito, já que é o
-      // mesmo suggestion.payload). Reporta conflito, mas o settings já refletem
-      // o texto sugerido.
-      return reply.code(409).send({
-        schema: 'whatsapp_v1', context: tenantContext(num),
-        error: 'suggestion already resolved', settings: toWireSettings(settings),
-      });
+      return reply.code(409).send({ error: 'suggestion already resolved' });
     }
-    return reply.send({
-      schema: 'whatsapp_v1', context: tenantContext(num), applied: true,
-      suggestion: toWireSuggestion(resolved), settings: toWireSettings(settings),
-    });
+    // Ganhou o CAS → escreve a guidance. Se o patchSettings falhar, REVERTE o CAS pra
+    // 'pending' (best-effort) — senão a sugestão ficaria 'applied' sem a guidance escrita
+    // (o painel mostraria "aplicado" sem o efeito real). O revert habilita um retry.
+    try {
+      // Garante a row antes do UPDATE (mesmo racional de settings-routes.ts): não deveria
+      // faltar (guidance vem do runner que já leu settings), mas defensivo.
+      await getOrCreateSettings(deps.pool, num.workspaceId);
+      const settings = await patchSettings(deps.pool, num.workspaceId, { [field]: payload.suggested } as SettingsPatch, req.actingUser);
+      logAccess(deps.pool, { actor: req.actingUser, action: 'apply_suggestion', workspaceId: num.workspaceId, numberId: num.id });
+      return reply.send({
+        schema: 'whatsapp_v1', context: tenantContext(num), applied: true,
+        suggestion: toWireSuggestion(resolved), settings: toWireSettings(settings),
+      });
+    } catch (err) {
+      await revertSuggestionApplied(deps.pool, id).catch(() => {});
+      req.log?.error?.({ err: (err as Error).message }, 'apply_suggestion: patchSettings falhou — sugestão revertida pra pending');
+      return reply.code(500).send({ error: 'failed to apply guidance' });
+    }
   });
 
   // POST /whatsapp/suggestions/:id/dismiss — admin. Não toca settings.

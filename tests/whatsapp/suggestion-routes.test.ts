@@ -220,6 +220,63 @@ test('POST apply id inexistente → 404', async () => {
   await app.close();
 });
 
+// ── IMPORTANT B: CAS-first ─────────────────────────────────────────────────────
+
+const numberRow = (id: number, workspaceId: string) => ({
+  id, workspace_id: workspaceId, phone: '+5511', evolution_instance: 'i', label: 'N',
+  status: 'connected', mode: 'monitored', expose_groups_in_mcp: false, created_by: null,
+  created_at: new Date(), updated_at: new Date(), removed_at: null,
+});
+const pendingSuggestionRow = {
+  id: 1, workspace_id: 'ws-1', kind: 'guidance_lead',
+  payload: { current: 'antiga', suggested: 'nova', reason: 'r' },
+  status: 'pending', created_at: new Date('2026-07-27T10:00:00.000Z'), resolved_at: null, resolved_by: null,
+};
+
+test('POST apply: CAS perde a corrida (resolve 0 rows) → 409 SEM tocar settings', async () => {
+  // Sugestão pending no load, mas o CAS pending→applied volta 0 rows (um dismiss concorrente
+  // resolveu no intervalo). NÃO deve escrever guidance — qualquer SQL de settings estoura.
+  let settingsTouched = false;
+  const pool = {
+    query: async (text: string, params: any[] = []) => {
+      if (/FROM whatsapp_numbers WHERE id/.test(text)) return { rows: [numberRow(Number(params[0]), 'ws-1')], rowCount: 1 };
+      if (/UPDATE whatsapp_ai_suggestions\s+SET/.test(text)) return { rows: [], rowCount: 0 }; // CAS perdeu
+      if (/FROM whatsapp_ai_suggestions/.test(text) && /WHERE id = \$1/.test(text)) return { rows: [pendingSuggestionRow], rowCount: 1 };
+      if (/whatsapp_workspace_settings/.test(text)) { settingsTouched = true; return { rows: [], rowCount: 0 }; }
+      throw new Error(`unexpected SQL: ${text}`);
+    },
+  } as any;
+  const app = appFor(pool);
+  const res = await app.inject({ method: 'POST', url: '/whatsapp/suggestions/1/apply', headers, payload: { number_id: 1 } });
+  assert.equal(res.statusCode, 409);
+  assert.equal(settingsTouched, false, 'CAS-first: perdeu a corrida → não escreve guidance (estado não mente)');
+  await app.close();
+});
+
+test('POST apply: CAS ganha mas patchSettings falha → 500 + REVERTE a sugestão pra pending', async () => {
+  let reverted = false;
+  const pool = {
+    query: async (text: string, params: any[] = []) => {
+      if (/FROM whatsapp_numbers WHERE id/.test(text)) return { rows: [numberRow(Number(params[0]), 'ws-1')], rowCount: 1 };
+      // revert (SET status='pending') — CHECAR ANTES do CAS genérico.
+      if (/UPDATE whatsapp_ai_suggestions\s+SET status = 'pending'/.test(text)) { reverted = true; return { rows: [], rowCount: 1 }; }
+      // CAS resolve (SET status=$2) ganha.
+      if (/UPDATE whatsapp_ai_suggestions\s+SET status = \$2/.test(text)) {
+        return { rows: [{ ...pendingSuggestionRow, status: 'applied', resolved_by: params[2], resolved_at: new Date() }], rowCount: 1 };
+      }
+      if (/FROM whatsapp_ai_suggestions/.test(text) && /WHERE id = \$1/.test(text)) return { rows: [pendingSuggestionRow], rowCount: 1 };
+      if (/INSERT INTO whatsapp_workspace_settings/.test(text)) return { rows: [], rowCount: 0 };
+      if (/UPDATE whatsapp_workspace_settings SET/.test(text)) throw new Error('patchSettings boom');
+      throw new Error(`unexpected SQL: ${text}`);
+    },
+  } as any;
+  const app = appFor(pool);
+  const res = await app.inject({ method: 'POST', url: '/whatsapp/suggestions/1/apply', headers, payload: { number_id: 1 } });
+  assert.equal(res.statusCode, 500);
+  assert.equal(reverted, true, 'patchSettings falhou → revert best-effort pra pending (habilita retry)');
+  await app.close();
+});
+
 // ── POST /:id/dismiss ─────────────────────────────────────────────────────────────
 
 test('POST dismiss como member não-admin → 403', async () => {
