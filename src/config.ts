@@ -215,6 +215,12 @@ const EnvSchema = z.object({
   // demais parâmetros do runner (CRM_AI_TICK_MS, CRM_AI_MAX_CONVERSATIONS_PER_RUN) são
   // lidos direto de process.env pelo runner (módulo config-free, pureza dos testes).
   CRM_AI_MODEL: z.string().default('gpt-4o-mini'),
+
+  // ── CRM WhatsApp v3 (Fase E) — motor de padrões IA nível 2 (semanal). Modelo LLM da
+  // análise de padrões; ausente → cai no CRM_AI_MODEL (mesma família barata). A call é
+  // única e maior que a do nível 1, mas 1x/workspace/semana — pode-se subir pra um modelo
+  // mais capaz sem impacto de custo relevante. Resolvido na borda (index.ts / CLI).
+  CRM_AI_PATTERN_MODEL: z.string().optional(),
 });
 
 export const config = EnvSchema.parse(process.env);

@@ -39,6 +39,7 @@ import { r2Configured } from './integrations/r2.js';
 import { startCreationPoller } from './whatsapp/opportunity-pipeline.js';
 import { startAutoLossPoller } from './whatsapp/auto-loss.js';
 import { startJudgmentRunner } from './whatsapp/ai-judgment-runner.js';
+import { startPatternPoller } from './whatsapp/ai-pattern-runner.js';
 import { OpenAIJudgmentLlm } from './whatsapp/ai-llm.js';
 
 async function main() {
@@ -267,6 +268,15 @@ async function main() {
       const provider = new OpenAIJudgmentLlm({ apiKey: config.OPENAI_API_KEY, model: config.CRM_AI_MODEL });
       startJudgmentRunner(pool, provider, { log: app.log });
       app.log.info({ model: config.CRM_AI_MODEL }, 'crm-ai-judgment: runner iniciado (janela 03:00–04:00 BRT)');
+
+      // Runner do motor de PADRÕES IA nível 2 (Fase E): tick horário + gate de janela
+      // DOMINGO 04:00–05:00 BRT (pós-julgamento diário). Análise semanal por workspace,
+      // 1 call LLM maior/workspace/semana. Modelo próprio (CRM_AI_PATTERN_MODEL, fallback
+      // CRM_AI_MODEL). Mesmo kill-switch (CRM_PIPELINE_ENABLED) e mesma OPENAI_API_KEY.
+      const patternModel = config.CRM_AI_PATTERN_MODEL ?? config.CRM_AI_MODEL;
+      const patternProvider = new OpenAIJudgmentLlm({ apiKey: config.OPENAI_API_KEY, model: patternModel });
+      startPatternPoller(pool, patternProvider, { log: app.log });
+      app.log.info({ model: patternModel }, 'crm-ai-pattern: poller iniciado (domingo 04:00–05:00 BRT)');
     } else {
       app.log.info('crm-ai-judgment: runner NÃO iniciado (OPENAI_API_KEY ausente)');
     }

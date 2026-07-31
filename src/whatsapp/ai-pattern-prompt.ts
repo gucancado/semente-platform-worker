@@ -267,8 +267,15 @@ export function parsePatternDecision(
   // ── editTags (explícitos primeiro; conversões de colisão anexam depois, dedupe por id) ──
   const editTags: Array<{ id: number; description: string }> = [];
   const editedTagIds = new Set<number>();
+  // Cap de EDIÇÃO simétrico à criação (CAP_NEW_TAGS) — anti-drift: sem teto, edit_tags
+  // (explícitos + conversões de colisão) cresceria sem limite e a IA reescreveria o
+  // catálogo inteiro toda semana. Trunca com warn, igual ao lado da criação.
   const pushEditTag = (id: number, description: string): void => {
     if (editedTagIds.has(id)) return;
+    if (editTags.length >= CAP_NEW_TAGS) {
+      warn('editTags acima do limite — descartada');
+      return;
+    }
     editedTagIds.add(id);
     editTags.push({ id, description });
   };
@@ -336,8 +343,13 @@ export function parsePatternDecision(
   // ── editLossReasons (explícitos primeiro) ──
   const editLossReasons: Array<{ id: number; description: string }> = [];
   const editedLossIds = new Set<number>();
+  // Cap de EDIÇÃO simétrico à criação (CAP_NEW_LOSS) — anti-drift (ver pushEditTag).
   const pushEditLoss = (id: number, description: string): void => {
     if (editedLossIds.has(id)) return;
+    if (editLossReasons.length >= CAP_NEW_LOSS) {
+      warn('editLossReasons acima do limite — descartada');
+      return;
+    }
     editedLossIds.add(id);
     editLossReasons.push({ id, description });
   };

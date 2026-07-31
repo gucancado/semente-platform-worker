@@ -134,6 +134,47 @@ test('validador: caps newTags≤5, newLossReasons≤3, guidance≤2', () => {
   assert.equal(r.decision.guidanceSuggestions.length, 2);
 });
 
+test('validador: cap de EDIÇÃO editTags≤5 (simétrico à criação, anti-drift) — trunca com warn', () => {
+  // 8 tags editáveis no contexto; 8 edições pedidas → só 5 sobrevivem.
+  const c = ctx({
+    tags: Array.from({ length: 8 }, (_, i) => ({ id: 10 + i, name: `T${i}`, description: null, humanOwned: false })),
+  });
+  const warns: unknown[][] = [];
+  const orig = console.warn;
+  console.warn = (...a: unknown[]) => { warns.push(a); };
+  let r: ReturnType<typeof parsePatternDecision>;
+  try {
+    r = parsePatternDecision(
+      mk({ edit_tags: Array.from({ length: 8 }, (_, i) => ({ id: 10 + i, description: `d${i}` })) }),
+      c,
+    );
+  } finally { console.warn = orig; }
+  assert.ok(r.ok);
+  assert.equal(r.decision.editTags.length, 5, 'editTags truncado no cap 5');
+  assert.ok(warns.some((w) => /editTags acima do limite/.test(String(w[0]))), 'loga warn no truncamento');
+});
+
+test('validador: cap de EDIÇÃO editLossReasons≤3 (simétrico à criação, anti-drift) — trunca com warn', () => {
+  const c = ctx({
+    lossReasons: Array.from({ length: 6 }, (_, i) => ({
+      id: 5 + i, code: `c${i}`, label: `L${i}`, description: null, active: true, system: false, humanOwned: false,
+    })),
+  });
+  const warns: unknown[][] = [];
+  const orig = console.warn;
+  console.warn = (...a: unknown[]) => { warns.push(a); };
+  let r: ReturnType<typeof parsePatternDecision>;
+  try {
+    r = parsePatternDecision(
+      mk({ edit_loss_reasons: Array.from({ length: 6 }, (_, i) => ({ id: 5 + i, description: `d${i}` })) }),
+      c,
+    );
+  } finally { console.warn = orig; }
+  assert.ok(r.ok);
+  assert.equal(r.decision.editLossReasons.length, 3, 'editLossReasons truncado no cap 3');
+  assert.ok(warns.some((w) => /editLossReasons acima do limite/.test(String(w[0]))), 'loga warn no truncamento');
+});
+
 test('validador: editTags só de ids do contexto e não-humanOwned', () => {
   const c = ctx({
     tags: [

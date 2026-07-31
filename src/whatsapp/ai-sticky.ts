@@ -38,8 +38,10 @@ export function isHumanActor(actor: string | null | undefined): boolean {
 }
 
 /** Fragmento SQL do predicado humano na coluna dada (fonte única — actor / changed_by).
- *  Espelha isHumanActor: exclui a lista fixa E o prefixo `system:`. */
-function humanActorSql(col: string): string {
+ *  Espelha isHumanActor: exclui a lista fixa E o prefixo `system:`. Exportado (Task E3):
+ *  o aplicador de padrões (ai-pattern-apply) usa `NOT (${humanActorSql('updated_by')})`
+ *  como guard IN-SQL das edições de catálogo (0 rows = humano correu na frente). */
+export function humanActorSql(col: string): string {
   return `${col} IS NOT NULL AND ${col} NOT IN ('ai', 'system', 'migration') AND ${col} NOT LIKE 'system:%'`;
 }
 
