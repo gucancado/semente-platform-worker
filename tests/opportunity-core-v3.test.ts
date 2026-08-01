@@ -313,14 +313,18 @@ test('mudar so o titulo numa ganha ainda cascateia lead (invariante ganho)', () 
   assert.equal(result.threadLeadAction, 'set_true');
 });
 
-test('boardColumn em_andamento desqualificado e null defensivo (nao perdas)', () => {
+test('boardColumn: em_andamento+desqualificado (impossivel §4.4) dobra em interessados', () => {
+  // Estado inalcançável por invariante (§4.4 impede desqualificar sem fechar como
+  // perdido). A projeção NOVA (4 colunas) o dobra em 'interessados' (is_qualified=
+  // FALSE → interessados), preservando a paridade kernel↔SQL. Antes era null (a
+  // coluna 'perdas' não existe mais).
   assert.equal(
     boardColumn(true, { status: 'em_andamento', isQualified: false, lossReason: null }),
-    null,
+    'interessados',
   );
 });
 
-test('boardColumn projeta as cinco colunas e os casos fora do board', () => {
+test('boardColumn projeta as quatro colunas e os casos fora do board', () => {
   assert.equal(
     boardColumn(null, { status: 'em_andamento', isQualified: null, lossReason: null }),
     'novas_conversas',
@@ -337,9 +341,10 @@ test('boardColumn projeta as cinco colunas e os casos fora do board', () => {
     boardColumn(true, { status: 'ganho', isQualified: true, lossReason: null }),
     'ganhos',
   );
+  // Perdido agora deriva a coluna de POSIÇÃO (não mais 'perdas'): qualificado → negociacoes.
   assert.equal(
     boardColumn(true, { status: 'perdido', isQualified: true, lossReason: 'sem_orcamento' }),
-    'perdas',
+    'negociacoes',
   );
   assert.equal(
     boardColumn(false, { status: 'em_andamento', isQualified: null, lossReason: null }),

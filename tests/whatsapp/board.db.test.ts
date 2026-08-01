@@ -203,8 +203,8 @@ test('total é independente do limit; paginação por cursor dentro da coluna', 
   assert.deepEqual(ids(p1.columns.interessados.cards), ['a', 'b']);
   assert.equal(p1.columns.interessados.total, 3, 'total independe do limit');
   assert.ok(p1.columns.interessados.nextCursor);
-  // As 5 chaves seguem presentes mesmo no modo single-column.
-  assert.deepEqual(Object.keys(p1.columns), ['novas_conversas', 'interessados', 'negociacoes', 'ganhos', 'perdas']);
+  // As 4 chaves seguem presentes mesmo no modo single-column.
+  assert.deepEqual(Object.keys(p1.columns), ['novas_conversas', 'interessados', 'negociacoes', 'ganhos']);
 
   // Segunda página via cursor → [c], sem nextCursor.
   const cur = decodeBoardCursor(p1.columns.interessados.nextCursor!)!;
