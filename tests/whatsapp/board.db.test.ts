@@ -4,10 +4,13 @@
  *
  * Prova o CASE `board_column` REAL + a projeção do board contra Postgres (o que os
  * testes puros não alcançam):
- *   1. Fixtures nas 5 colunas → cada opp cai na coluna certa (spec §5).
- *   2. Exclusões: not_lead (is_lead=FALSE), perda nao_lead (cascata) e grupos
+ *   1. Fixtures nas 4 colunas → cada opp cai na coluna certa (spec §1).
+ *   2. statusFilter (toggle §2): default 'em_andamento' mostra as opps em andamento
+ *      nas 3 colunas de posição; 'perdido' mostra as perdidas na MESMA posição;
+ *      'ganhos' ignora o filtro (sempre visível). Totais refletem o filtro.
+ *   3. Exclusões: not_lead (is_lead=FALSE), perda nao_lead (cascata) e grupos
  *      (row em whatsapp_groups OU mensagem com author) ficam FORA do board.
- *   3. Ordenação por última atividade DESC (NULLS LAST) + totais independentes do
+ *   4. Ordenação por última atividade DESC (NULLS LAST) + totais independentes do
  *      limit + paginação por cursor dentro de uma coluna + contactName (push_name).
  */
 import { test, beforeEach, after } from 'node:test';
@@ -57,9 +60,15 @@ async function insertOpp(o: {
 
 const ids = (cards: { identifier: string }[]) => cards.map((c) => c.identifier);
 
-/** Monta as 5 colunas + todas as exclusões. */
+/**
+ * Monta as 4 colunas em DOIS modos do toggle + as exclusões:
+ *  - em andamento: nova·int·neg (posição) + ganho (sempre em ganhos).
+ *  - perdido: perda_nova·perda_int·perda_neg caem na MESMA posição (§1), visíveis
+ *    só no modo 'perdido'.
+ *  - exclusões: not_lead, perda nao_lead (cascata), grupos.
+ */
 async function seedAllColumns(): Promise<void> {
-  // ── 5 colunas ──
+  // ── modo em andamento (as 3 posições) + ganho ──
   await insertMsg({ identifier: 'nova', createdAt: '2026-07-20T00:00:00Z', eventId: 'ev-nova' });
   await insertOpp({ identifier: 'nova', status: 'em_andamento', isQualified: null }); // sem thread_meta → is_lead NULL
 
@@ -75,12 +84,20 @@ async function seedAllColumns(): Promise<void> {
   await insertLead('ganho', true);
   await insertOpp({ identifier: 'ganho', status: 'ganho', isQualified: true });
 
-  await insertMsg({ identifier: 'perda', createdAt: '2026-07-16T00:00:00Z' });
-  await insertLead('perda', true);
-  await insertOpp({ identifier: 'perda', status: 'perdido', isQualified: true, lossReason: 'sem_orcamento' });
+  // ── modo perdido: perdidas caem na coluna de POSIÇÃO (não mais numa 'perdas') ──
+  await insertMsg({ identifier: 'perda_nova', createdAt: '2026-07-16T00:00:00Z' });
+  await insertOpp({ identifier: 'perda_nova', status: 'perdido', isQualified: null, lossReason: 'sem_orcamento' }); // is_lead NULL → novas_conversas
+
+  await insertMsg({ identifier: 'perda_int', createdAt: '2026-07-15T12:00:00Z' });
+  await insertLead('perda_int', true);
+  await insertOpp({ identifier: 'perda_int', status: 'perdido', isQualified: null, lossReason: 'sem_orcamento' }); // lead + isQ null → interessados
+
+  await insertMsg({ identifier: 'perda_neg', createdAt: '2026-07-15T00:00:00Z' });
+  await insertLead('perda_neg', true);
+  await insertOpp({ identifier: 'perda_neg', status: 'perdido', isQualified: true, lossReason: 'sem_orcamento' }); // qualificado → negociacoes
 
   // ── exclusões ──
-  await insertMsg({ identifier: 'notlead', createdAt: '2026-07-15T00:00:00Z' });
+  await insertMsg({ identifier: 'notlead', createdAt: '2026-07-14T12:00:00Z' });
   await insertLead('notlead', false);
   await insertOpp({ identifier: 'notlead', status: 'perdido', isQualified: null, lossReason: 'nao_lead' });
 
@@ -102,28 +119,57 @@ async function seedAllColumns(): Promise<void> {
   await insertOpp({ identifier: 'g2', status: 'em_andamento', isQualified: null });
 }
 
-test('as 5 colunas recebem exatamente as opps certas; exclusões ficam fora', async () => {
+test('modo em andamento (default): as 4 colunas recebem as opps certas; exclusões e perdidas ficam fora', async () => {
   await seedAllColumns();
   const { columns } = await getBoard(pool, { workspaceId: 'ws', numberId: 1, limitPerColumn: 30 });
+
+  // As 4 chaves canônicas, sem 'perdas'.
+  assert.deepEqual(Object.keys(columns), ['novas_conversas', 'interessados', 'negociacoes', 'ganhos']);
 
   assert.deepEqual(ids(columns.novas_conversas.cards), ['nova']);
   assert.deepEqual(ids(columns.interessados.cards), ['int']);
   assert.deepEqual(ids(columns.negociacoes.cards), ['neg']);
   assert.deepEqual(ids(columns.ganhos.cards), ['ganho']);
-  assert.deepEqual(ids(columns.perdas.cards), ['perda']);
 
-  // Nenhuma exclusão aparece em NENHUMA coluna.
+  // Perdidas NÃO aparecem no modo em andamento (default); exclusões nunca aparecem.
   const all = Object.values(columns).flatMap((c) => ids(c.cards));
-  for (const excluded of ['notlead', 'naolead', 'g1@g.us', 'g2']) {
-    assert.equal(all.includes(excluded), false, `${excluded} fora do board`);
+  for (const hidden of ['perda_nova', 'perda_int', 'perda_neg', 'notlead', 'naolead', 'g1@g.us', 'g2']) {
+    assert.equal(all.includes(hidden), false, `${hidden} fora do modo em andamento`);
   }
 
-  // Totais coerentes.
+  // Totais coerentes (refletem o filtro em andamento).
   assert.equal(columns.novas_conversas.total, 1);
   assert.equal(columns.interessados.total, 1);
   assert.equal(columns.negociacoes.total, 1);
   assert.equal(columns.ganhos.total, 1);
-  assert.equal(columns.perdas.total, 1);
+});
+
+test('modo perdido (statusFilter): perdidas caem na coluna de posição; ganhos permanece; em andamento some', async () => {
+  await seedAllColumns();
+  const { columns } = await getBoard(pool, {
+    workspaceId: 'ws', numberId: 1, limitPerColumn: 30, statusFilter: 'perdido',
+  });
+
+  assert.deepEqual(Object.keys(columns), ['novas_conversas', 'interessados', 'negociacoes', 'ganhos']);
+
+  // As 3 colunas de posição mostram AGORA as perdidas (mesma posição), não as em andamento.
+  assert.deepEqual(ids(columns.novas_conversas.cards), ['perda_nova']);
+  assert.deepEqual(ids(columns.interessados.cards), ['perda_int']);
+  assert.deepEqual(ids(columns.negociacoes.cards), ['perda_neg']);
+  // ganhos IGNORA o filtro — segue mostrando o ganho nos 2 modos.
+  assert.deepEqual(ids(columns.ganhos.cards), ['ganho']);
+
+  // As em andamento (e as exclusões) somem no modo perdido.
+  const all = Object.values(columns).flatMap((c) => ids(c.cards));
+  for (const hidden of ['nova', 'int', 'neg', 'notlead', 'naolead', 'g1@g.us', 'g2']) {
+    assert.equal(all.includes(hidden), false, `${hidden} fora do modo perdido`);
+  }
+
+  // Totais refletem o filtro perdido.
+  assert.equal(columns.novas_conversas.total, 1);
+  assert.equal(columns.interessados.total, 1);
+  assert.equal(columns.negociacoes.total, 1);
+  assert.equal(columns.ganhos.total, 1);
 });
 
 test('ordenação por última atividade DESC com NULLS LAST', async () => {

@@ -526,12 +526,18 @@ export async function moveOpportunity(
       const reopen: Pick<OppPatchV3, 'status'> = cur.status !== 'em_andamento' ? { status: 'em_andamento' } : {};
       let patch: OppPatchV3;
       let threadTarget: true | null | undefined; // escrita EXPLÍCITA de thread; undefined = deixa pro kernel
+      // TODO(Task 2): 'perdas' saiu do board (perder = patch na conversa; reabrir =
+      // move p/ coluna viva). O `case 'perdas'` (status=perdido; loss_reason=<motivo>)
+      // foi REMOVIDO aqui só pra fechar o tsc — o tipo BoardColumn já não inclui
+      // 'perdas' (TS2678) e `isBoardColumn` a rejeita na rota (400), então este switch
+      // NUNCA recebia 'perdas'. Sem mudança de comportamento (ramo inalcançável). A
+      // Task 2 reescreve moveOpportunity (semântica de reabrir) e remove o param
+      // `lossReason`, hoje órfão.
       switch (column) {
         case 'novas_conversas': patch = { ...reopen, isQualified: null }; threadTarget = null; break;
         case 'interessados': patch = { ...reopen, isQualified: null }; threadTarget = true; break;
         case 'negociacoes': patch = { status: 'em_andamento', isQualified: true }; threadTarget = undefined; break;
         case 'ganhos': patch = { status: 'ganho' }; threadTarget = undefined; break;
-        case 'perdas': patch = { status: 'perdido', lossReason }; threadTarget = undefined; break;
       }
       const oppResult = await applyOppPatchInTx(client, opportunityId, cur, patch, changedBy, { numberId, identifier });
       let explicitThreadChanged = false;

@@ -1,15 +1,17 @@
 /**
  * src/whatsapp/board.ts
  *
- * CRM WhatsApp v3 — Fase C, Task C1: projeção do KANBAN (spec §5/§10). Endpoint
- * `GET /whatsapp/board` (rota em board-routes.ts) devolve as 5 colunas
- * (novas_conversas·interessados·negociacoes·ganhos·perdas) com cards + counts.
+ * CRM WhatsApp v3 — board 4 colunas (spec §1/§2). Endpoint `GET /whatsapp/board`
+ * (rota em board-routes.ts) devolve as 4 colunas
+ * (novas_conversas·interessados·negociacoes·ganhos) com cards + counts. O status
+ * (em_andamento/perdido) NÃO determina mais a coluna — vira o filtro do toggle
+ * (`statusFilter`): as 3 colunas de posição respeitam o filtro; `ganhos` sempre entra.
  *
  * FONTE ÚNICA da regra de coluna é o kernel `boardColumn` (opportunity-core.ts).
  * A projeção SQL (CASE `board_column` no BOARD_OPPS_CTE) DEVE espelhar o kernel;
  * `boardColumnSqlMirror` abaixo é uma transcrição TS EXATA desse CASE, provada
  * idêntica ao kernel por teste de paridade (tests/board.test.ts) — e o CASE real
- * é provado por tests/whatsapp/board.db.test.ts (fixtures nas 5 colunas).
+ * é provado por tests/whatsapp/board.db.test.ts (fixtures nas 4 colunas + filtro).
  *
  * Entram no board só opps de threads DM com is_lead IS DISTINCT FROM FALSE (spec
  * §5): DM-only pelo detector CANÔNICO (NOT EXISTS grupo pelo jid + NOT EXISTS
@@ -38,13 +40,12 @@ import {
 } from './opportunity-core.js';
 import { CASCADE_LOSS_REASON } from './loss-reasons.js';
 
-/** Ordem canônica das colunas do board (spec §5). Também a ordem de emissão. */
+/** Ordem canônica das colunas do board (spec §1, 4 colunas). Também a ordem de emissão. */
 export const BOARD_COLUMNS: readonly BoardColumn[] = [
   'novas_conversas',
   'interessados',
   'negociacoes',
   'ganhos',
-  'perdas',
 ];
 
 const BOARD_COLUMN_SET = new Set<string>(BOARD_COLUMNS);
@@ -128,14 +129,14 @@ export function boardColumnSqlMirror(
   const sqlEq = <T>(col: T | null, val: T): boolean => col !== null && col === val;
   if (sqlEq(isLead, false)) return null;
   if (sqlEq(status, 'ganho')) return 'ganhos';
-  if (sqlEq(status, 'perdido')) {
-    // SQL: loss_reason IS DISTINCT FROM 'nao_lead' → TRUE quando NULL ou != 'nao_lead'.
-    return lossReason === CASCADE_LOSS_REASON ? null : 'perdas';
-  }
+  // SQL: status = 'perdido' AND loss_reason IS NOT DISTINCT FROM 'nao_lead'.
+  // IS NOT DISTINCT FROM 'nao_lead' → TRUE só quando loss_reason === 'nao_lead' (NULL → FALSE).
+  if (sqlEq(status, 'perdido') && lossReason === CASCADE_LOSS_REASON) return null;
+  if (sqlEq(isQualified, true)) return 'negociacoes';
+  if (sqlEq(isQualified, false)) return 'interessados';
   if (isLead === null) return 'novas_conversas';
-  if (sqlEq(isLead, true) && isQualified === null) return 'interessados';
-  if (sqlEq(isLead, true) && sqlEq(isQualified, true)) return 'negociacoes';
-  return null;
+  // ELSE (só alcançável com is_lead=TRUE + is_qualified NULL): interessados.
+  return 'interessados';
 }
 
 // ── Projeção da coluna (CASE) — fonte SQL única ───────────────────────────────
@@ -158,12 +159,11 @@ export const BOARD_COLUMN_CASE_SQL = `
   CASE
     WHEN is_lead = FALSE THEN NULL
     WHEN status = 'ganho' THEN 'ganhos'
-    WHEN status = 'perdido' THEN
-      CASE WHEN loss_reason IS DISTINCT FROM '${CASCADE_LOSS_REASON}' THEN 'perdas' ELSE NULL END
+    WHEN status = 'perdido' AND loss_reason IS NOT DISTINCT FROM '${CASCADE_LOSS_REASON}' THEN NULL
+    WHEN is_qualified = TRUE THEN 'negociacoes'
+    WHEN is_qualified = FALSE THEN 'interessados'
     WHEN is_lead IS NULL THEN 'novas_conversas'
-    WHEN is_lead = TRUE AND is_qualified IS NULL THEN 'interessados'
-    WHEN is_lead = TRUE AND is_qualified = TRUE THEN 'negociacoes'
-    ELSE NULL
+    ELSE 'interessados'
   END`;
 
 // ── Query ────────────────────────────────────────────────────────────────────
@@ -235,13 +235,18 @@ function mapBoardCard(r: any): BoardCard {
 }
 
 /**
- * Projeta o board de um número. Duas modalidades (spec §5/§10):
- *  - SEM `column`: primeira página de TODAS as 5 colunas (limit cada), via
+ * Projeta o board de um número. Duas modalidades (spec §2):
+ *  - SEM `column`: primeira página de TODAS as 4 colunas (limit cada), via
  *    ROW_NUMBER particionado por coluna.
  *  - COM `column` (+ `cursor` opcional): só aquela coluna (carregar mais), com o
  *    predicado de cursor sobre a mesma ordenação (NULLS LAST).
- * As 5 chaves SEMPRE presentes (coluna sem cards = {cards:[], nextCursor:null,
+ * As 4 chaves SEMPRE presentes (coluna sem cards = {cards:[], nextCursor:null,
  * total:N}); `total` por coluna vem de um COUNT independente do limit.
+ *
+ * `statusFilter` (toggle Em andamento/Perdidas, default 'em_andamento'): filtra as
+ * 3 colunas de POSIÇÃO por esse status; `ganhos` IGNORA o filtro (sempre visível).
+ * Regra SQL: incluir a opp se `board_column = 'ganhos' OR status = :statusFilter`.
+ * Os totais por coluna refletem o filtro.
  */
 export async function getBoard(pool: Pool, p: {
   workspaceId: string;
@@ -249,21 +254,27 @@ export async function getBoard(pool: Pool, p: {
   limitPerColumn: number;
   column?: BoardColumn;
   cursor?: BoardCursor;
+  statusFilter?: 'em_andamento' | 'perdido';
 }): Promise<{ columns: BoardColumns }> {
   const cursorPresent = p.cursor !== undefined;
+  const statusFilter = p.statusFilter ?? 'em_andamento';
 
   const [countRes, cardRes] = await Promise.all([
-    // Totais por coluna — independentes do limit e do `column`/cursor (spec §10).
+    // Totais por coluna — independentes do limit e do `column`/cursor (spec §2).
+    // Refletem o statusFilter ($3): posição filtra por status; ganhos sempre entra.
     pool.query(
       `WITH ${BOARD_OPPS_CTE}
        SELECT board_column, COUNT(*)::int AS total
          FROM board_opps
         WHERE board_column IS NOT NULL
+          AND (board_column = 'ganhos' OR status = $3)
         GROUP BY board_column`,
-      [p.numberId, p.workspaceId],
+      [p.numberId, p.workspaceId, statusFilter],
     ),
     // Cards: ROW_NUMBER por coluna (multi) OU filtrado a uma coluna + cursor (single).
-    // $3=column|null $4=cursor.lastMessageAt|null $5=cursor.oppId|null $6=cursorPresent $7=limit+1
+    // $3=column|null $4=cursor.lastMessageAt|null $5=cursor.oppId|null $6=cursorPresent
+    // $7=limit+1 $8=statusFilter. O statusFilter entra ANTES do ROW_NUMBER (particiona
+    // só o subconjunto visível) → paginação e totais coerentes com o toggle.
     pool.query(
       `WITH ${BOARD_OPPS_CTE},
        ranked AS (
@@ -274,6 +285,7 @@ export async function getBoard(pool: Pool, p: {
                 ) AS rn
            FROM board_opps bo
           WHERE board_column IS NOT NULL
+            AND (board_column = 'ganhos' OR status = $8)
             AND ($3::text IS NULL OR board_column = $3)
             AND (NOT $6::boolean OR (
                   ($4::timestamptz IS NOT NULL AND (
@@ -289,7 +301,7 @@ export async function getBoard(pool: Pool, p: {
       [
         p.numberId, p.workspaceId, p.column ?? null,
         p.cursor?.lastMessageAt ?? null, p.cursor?.oppId ?? null,
-        cursorPresent, p.limitPerColumn + 1,
+        cursorPresent, p.limitPerColumn + 1, statusFilter,
       ],
     ),
   ]);

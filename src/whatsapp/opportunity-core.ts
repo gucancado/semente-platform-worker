@@ -213,8 +213,7 @@ export type BoardColumn =
   | 'novas_conversas'
   | 'interessados'
   | 'negociacoes'
-  | 'ganhos'
-  | 'perdas';
+  | 'ganhos';
 
 export function qualificationLabel(
   q: boolean | null,
@@ -371,20 +370,32 @@ export function applyOppPatchV3(
   return { next, events, closedAtAction, threadLeadAction };
 }
 
+/**
+ * Projeção da coluna do kanban (spec 4-colunas §1). FONTE ÚNICA da regra —
+ * espelhada EXATAMENTE por board.ts:boardColumnSqlMirror (TS) e
+ * BOARD_COLUMN_CASE_SQL (SQL). O `status` deixou de determinar a coluna (virou o
+ * filtro do toggle Em andamento/Perdidas); a POSIÇÃO deriva de isLead/isQualified
+ * tanto pra em_andamento QUANTO pra perdido. `perdas` não existe mais.
+ *
+ * Ordem de decisão (idêntica à do CASE SQL, semântica de 3 valores):
+ *   isLead === false                                  → null   (not_lead, oculto)
+ *   status === 'ganho'                                → ganhos (sempre, nos 2 modos)
+ *   status === 'perdido' && lossReason === nao_lead   → null   (cascata, oculto)
+ *   isQualified === true                              → negociacoes
+ *   isQualified === false                             → interessados (desqualificado; só em perdido)
+ *   isLead === null                                   → novas_conversas
+ *   isLead === true (isQualified === null)            → interessados
+ */
 export function boardColumn(
   isLead: boolean | null,
   o: { status: OppStatus; isQualified: boolean | null; lossReason: string | null },
 ): BoardColumn | null {
   if (isLead === false) return null;
   if (o.status === 'ganho') return 'ganhos';
-  if (o.status === 'perdido') {
-    return o.lossReason === 'nao_lead' ? null : 'perdas';
-  }
-  // em_andamento
+  if (o.status === 'perdido' && o.lossReason === 'nao_lead') return null;
+  if (o.isQualified === true) return 'negociacoes';
+  if (o.isQualified === false) return 'interessados';
   if (isLead === null) return 'novas_conversas';
-  if (isLead === true && o.isQualified === null) return 'interessados';
-  if (isLead === true && o.isQualified === true) return 'negociacoes';
-  // isQualified === false em em_andamento é inalcançável (invariante §4.4);
-  // fora do board por segurança.
-  return null;
+  // isLead === true && isQualified === null (em_andamento OU perdido não-cascata).
+  return 'interessados';
 }
