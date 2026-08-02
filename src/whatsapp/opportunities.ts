@@ -481,8 +481,11 @@ export type MoveResult =
 /**
  * Rota do drag-and-drop do kanban (spec §5/§10): UMA chamada que executa a
  * transição de coluna INTEIRA (opp + thread + eventos) numa única transação sob o
- * lock do par (§4.11), relendo o estado DENTRO do lock. A coluna alvo deriva o
- * patch da opp e o alvo de thread (tabela §5):
+ * lock do par (§4.11), relendo o estado DENTRO do lock. As 4 colunas são todas
+ * "vivas": mover pra qualquer uma REABRE uma opp perdida (o kernel limpa
+ * loss_reason/desqualificação na reabertura perdido→em_andamento). Perder saiu do
+ * board — é patch pela conversa (status=perdido + loss_reason), nunca um move. A
+ * coluna alvo deriva o patch da opp e o alvo de thread (tabela §5):
  *
  *  | coluna          | patch da opp                              | thread          |
  *  |-----------------|-------------------------------------------|-----------------|
@@ -490,19 +493,18 @@ export type MoveResult =
  *  | interessados    | reabre se fechada; is_qualified=NULL       | is_lead=TRUE     |
  *  | negociacoes     | status=em_andamento; is_qualified=TRUE      | TRUE via kernel  |
  *  | ganhos          | status=ganho                               | TRUE via kernel  |
- *  | perdas          | status=perdido; loss_reason=<motivo>       | (não toca)       |
  *
  * `negociacoes`/`ganhos` não escrevem a thread aqui: is_qualified=TRUE e status=ganho
- * já fazem o kernel emitir `set_true` (via applyOppPatchInTx). `perdas` não muda a
- * triagem. As escritas de opp reusam os internals de patch (applyOppPatchInTx) — mesmo
- * kernel/UPDATE/eventos, sem duplicar SQL. Ator = usuário real (`changedBy`).
+ * já fazem o kernel emitir `set_true` (via applyOppPatchInTx). As escritas de opp
+ * reusam os internals de patch (applyOppPatchInTx) — mesmo kernel/UPDATE/eventos,
+ * sem duplicar SQL. Ator = usuário real (`changedBy`).
  *
  * No-op (estado final == atual E thread já no valor) → `moved:false`, sem eventos.
  * A `column` devolvida é RECALCULADA do estado final via `boardColumn` (honesta).
  * Invariantes de kernel (invalid_value/desqualificar_ganho) viram o union de erro.
  */
 export async function moveOpportunity(
-  pool: Pool, opportunityId: number, column: BoardColumn, lossReason: string | null, changedBy: string,
+  pool: Pool, opportunityId: number, column: BoardColumn, changedBy: string,
 ): Promise<MoveResult> {
   const head = await pool.query(`SELECT whatsapp_number_id, identifier FROM whatsapp_opportunities WHERE id = $1`, [opportunityId]);
   if (!head.rows[0]) return { ok: false, error: 'not_found' };
@@ -526,13 +528,8 @@ export async function moveOpportunity(
       const reopen: Pick<OppPatchV3, 'status'> = cur.status !== 'em_andamento' ? { status: 'em_andamento' } : {};
       let patch: OppPatchV3;
       let threadTarget: true | null | undefined; // escrita EXPLÍCITA de thread; undefined = deixa pro kernel
-      // TODO(Task 2): 'perdas' saiu do board (perder = patch na conversa; reabrir =
-      // move p/ coluna viva). O `case 'perdas'` (status=perdido; loss_reason=<motivo>)
-      // foi REMOVIDO aqui só pra fechar o tsc — o tipo BoardColumn já não inclui
-      // 'perdas' (TS2678) e `isBoardColumn` a rejeita na rota (400), então este switch
-      // NUNCA recebia 'perdas'. Sem mudança de comportamento (ramo inalcançável). A
-      // Task 2 reescreve moveOpportunity (semântica de reabrir) e remove o param
-      // `lossReason`, hoje órfão.
+      // As 4 colunas são vivas; mover pra qualquer uma reabre (reopen). Perder saiu
+      // do board (é patch pela conversa), então não há mais case de destino perdido.
       switch (column) {
         case 'novas_conversas': patch = { ...reopen, isQualified: null }; threadTarget = null; break;
         case 'interessados': patch = { ...reopen, isQualified: null }; threadTarget = true; break;

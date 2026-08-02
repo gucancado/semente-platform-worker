@@ -449,24 +449,17 @@ test('MOVE coluna inválida → 400 invalid column', async () => {
   assert.equal(res.statusCode, 400); assert.deepEqual(res.json(), { error: 'invalid column' }); await app.close();
 });
 
-test('MOVE perdas sem loss_reason → 400 loss_reason_obrigatorio', async () => {
+test('MOVE column=perdas → 400 invalid column (perdas saiu do board; perder é patch pela conversa)', async () => {
   const { pool } = makePool({ opportunities: [{ id: 1, identifier: 'a', created_at: date(1) }] }); const app = appFor(pool);
   const res = await app.inject({ method: 'POST', url: '/whatsapp/opportunities/1/move', headers, payload: { column: 'perdas' } });
-  assert.equal(res.statusCode, 400); assert.deepEqual(res.json(), { error: 'loss_reason_obrigatorio' }); await app.close();
+  assert.equal(res.statusCode, 400); assert.deepEqual(res.json(), { error: 'invalid column' }); await app.close();
 });
 
-test('MOVE perdas loss_reason inexistente → 400 loss_reason_invalido nomeando', async () => {
+test('MOVE com loss_reason no body (coluna válida) → 400 loss_reason_nao_aceito (contrato estrito)', async () => {
   const { pool } = makePool({ opportunities: [{ id: 1, identifier: 'a', created_at: date(1) }] }); const app = appFor(pool);
   const res = await app.inject({ method: 'POST', url: '/whatsapp/opportunities/1/move', headers,
-    payload: { column: 'perdas', loss_reason: 'motivo_inexistente' } });
-  assert.equal(res.statusCode, 400); assert.deepEqual(res.json(), { error: 'loss_reason_invalido', code: 'motivo_inexistente' }); await app.close();
-});
-
-test('MOVE perdas loss_reason=nao_lead (cascata) → 400 (nunca aceito de fora)', async () => {
-  const { pool } = makePool({ opportunities: [{ id: 1, identifier: 'a', created_at: date(1) }] }); const app = appFor(pool);
-  const res = await app.inject({ method: 'POST', url: '/whatsapp/opportunities/1/move', headers,
-    payload: { column: 'perdas', loss_reason: 'nao_lead' } });
-  assert.equal(res.statusCode, 400); assert.deepEqual(res.json(), { error: 'loss_reason_invalido', code: 'nao_lead' }); await app.close();
+    payload: { column: 'ganhos', loss_reason: 'sem_orcamento' } });
+  assert.equal(res.statusCode, 400); assert.deepEqual(res.json(), { error: 'loss_reason_nao_aceito' }); await app.close();
 });
 
 test('MOVE não-admin → 403', async () => {
@@ -522,18 +515,19 @@ test('MOVE → novas_conversas: 200, thread NULL + column novas_conversas', asyn
   await app.close();
 });
 
-test('MOVE → perdas com motivo de sistema: 200, perdido + loss_reason + thread intacta', async () => {
+test('MOVE → interessados (reabre opp perdida): 200, em_andamento + is_qualified NULL + thread TRUE', async () => {
+  // perder saiu do move; mover uma opp perdida pra coluna viva REABRE (kernel limpa
+  // loss_reason/desqualificação). Aqui a opp começa perdida e vira interessados.
   const { pool, state } = makePool({
-    opportunities: [{ id: 1, identifier: 'a', created_at: date(1), is_qualified: true }],
-    threadMeta: { '1:a': true },
+    opportunities: [{ id: 1, identifier: 'a', created_at: date(1), status: 'perdido', is_qualified: false, loss_reason: 'lead_nao_respondeu' }],
   });
   const app = appFor(pool);
   const res = await app.inject({ method: 'POST', url: '/whatsapp/opportunities/1/move', headers,
-    payload: { column: 'perdas', loss_reason: 'lead_nao_respondeu' } });
+    payload: { column: 'interessados' } });
   assert.equal(res.statusCode, 200);
-  assert.equal(res.json().opportunity.status, 'perdido');
-  assert.equal(res.json().opportunity.lossReason, 'lead_nao_respondeu');
-  assert.equal(res.json().column, 'perdas');
-  assert.equal(state.threadMeta['1:a'], true, 'perda não mexe na triagem');
+  assert.equal(res.json().opportunity.status, 'em_andamento', 'reabriu');
+  assert.equal(res.json().opportunity.lossReason, null, 'reabertura limpou o motivo');
+  assert.equal(res.json().column, 'interessados');
+  assert.equal(state.threadMeta['1:a'], true, 'interessados vira lead na thread');
   await app.close();
 });

@@ -2,9 +2,10 @@
  * tests/whatsapp/board-routes.test.ts — teste de ROTA (stub pool, sem DB).
  *
  * Cobre (Task C1.2): auth (401/400 ator), validação de params (number_id,
- * limit_per_column, column, cursor), 404 número inexistente, 403 gate, e o SHAPE
- * do envelope — as 5 chaves de coluna SEMPRE presentes, cada uma
- * {cards,nextCursor,total}; modo column+cursor encaminha os params ao SQL.
+ * limit_per_column, column, cursor, status), 404 número inexistente, 403 gate, e o
+ * SHAPE do envelope — as 4 chaves de coluna SEMPRE presentes, cada uma
+ * {cards,nextCursor,total}; modo column+cursor encaminha os params ao SQL; o toggle
+ * `?status` (em_andamento/perdido) chega ao getBoard como statusFilter.
  *
  * A correção da projeção SQL é do board.db.test.ts; aqui só o wiring da rota.
  */
@@ -69,7 +70,7 @@ const CARDS: CardRow[] = [
     loss_reason: null, board_column: 'ganhos', contact_name: null,
     tags: [{ id: 5, name: 'VIP', color: 'warn' }], last_at_raw: D(18) },
 ];
-const COUNTS = { novas_conversas: 3, negociacoes: 1, ganhos: 2, perdas: 4 };
+const COUNTS = { novas_conversas: 3, negociacoes: 1, ganhos: 2 };
 
 // ── Auth ───────────────────────────────────────────────────────────────────────
 
@@ -142,7 +143,7 @@ test('403 quando gateMember nega', async () => {
 
 // ── Shape do envelope ────────────────────────────────────────────────────────────
 
-test('200: envelope + 5 chaves de coluna SEMPRE presentes com {cards,nextCursor,total}', async () => {
+test('200: envelope + 4 chaves de coluna SEMPRE presentes com {cards,nextCursor,total}', async () => {
   const { pool } = makePool({ cards: CARDS, counts: COUNTS }); const app = appFor(pool);
   const res = await app.inject({ method: 'GET', url: '/whatsapp/board?number_id=1', headers });
   assert.equal(res.statusCode, 200);
@@ -151,7 +152,7 @@ test('200: envelope + 5 chaves de coluna SEMPRE presentes com {cards,nextCursor,
   assert.equal(body.context.number.id, 1);
   assert.ok(body.generatedAt);
   const cols = body.columns;
-  assert.deepEqual(Object.keys(cols), ['novas_conversas', 'interessados', 'negociacoes', 'ganhos', 'perdas']);
+  assert.deepEqual(Object.keys(cols), ['novas_conversas', 'interessados', 'negociacoes', 'ganhos']);
   for (const k of Object.keys(cols)) {
     assert.ok(Array.isArray(cols[k].cards), `${k}.cards é array`);
     assert.ok('nextCursor' in cols[k], `${k}.nextCursor presente`);
@@ -160,7 +161,6 @@ test('200: envelope + 5 chaves de coluna SEMPRE presentes com {cards,nextCursor,
   // totais vêm do COUNT (independentes do limit); coluna ausente do COUNT → 0.
   assert.equal(cols.novas_conversas.total, 3);
   assert.equal(cols.ganhos.total, 2);
-  assert.equal(cols.perdas.total, 4);
   assert.equal(cols.interessados.total, 0, 'coluna sem count → total 0');
   // cards mapeados na coluna certa.
   assert.equal(cols.novas_conversas.cards.length, 1);
@@ -181,6 +181,36 @@ test('200: limit_per_column default 30 → cards query pede $7 = 31 (limit+1)', 
   assert.equal(cardsQ.params[6], 31, '$7 = limit+1');
   assert.equal(cardsQ.params[2], null, '$3 column null (todas as colunas)');
   assert.equal(cardsQ.params[5], false, '$6 cursorPresent false');
+  assert.equal(cardsQ.params[7], 'em_andamento', '$8 statusFilter default em_andamento');
+  await app.close();
+});
+
+// ── Toggle Em andamento/Perdidas (?status) ───────────────────────────────────────
+
+test('200: ?status=perdido → getBoard recebe statusFilter perdido ($8 na cards / $3 na counts)', async () => {
+  const { pool, state } = makePool({ cards: [], counts: {} }); const app = appFor(pool);
+  const res = await app.inject({ method: 'GET', url: '/whatsapp/board?number_id=1&status=perdido', headers });
+  assert.equal(res.statusCode, 200);
+  const cardsQ = state.queries.find(q => /ROW_NUMBER\(\) OVER/.test(q.text))!;
+  assert.equal(cardsQ.params[7], 'perdido', '$8 = statusFilter na query de cards');
+  const countQ = state.queries.find(q => /GROUP BY board_column/.test(q.text))!;
+  assert.equal(countQ.params[2], 'perdido', '$3 = statusFilter na query de totais');
+  await app.close();
+});
+
+test('200: sem ?status → default em_andamento nas duas queries', async () => {
+  const { pool, state } = makePool({ cards: [], counts: {} }); const app = appFor(pool);
+  await app.inject({ method: 'GET', url: '/whatsapp/board?number_id=1', headers });
+  const countQ = state.queries.find(q => /GROUP BY board_column/.test(q.text))!;
+  assert.equal(countQ.params[2], 'em_andamento', '$3 statusFilter default');
+  await app.close();
+});
+
+test('400 status inválido → invalid status (não toca o DB)', async () => {
+  const { pool, state } = makePool(); const app = appFor(pool);
+  const res = await app.inject({ method: 'GET', url: '/whatsapp/board?number_id=1&status=xpto', headers });
+  assert.equal(res.statusCode, 400); assert.deepEqual(res.json(), { error: 'invalid status' });
+  assert.equal(state.queries.filter(q => /GROUP BY board_column|ROW_NUMBER/.test(q.text)).length, 0, 'sem query de board após 400');
   await app.close();
 });
 
@@ -211,15 +241,15 @@ test('200: column+cursor encaminha column ($3) + cursor ($4/$5) + cursorPresent 
   assert.equal(cardsQ.params[3], D(15).toISOString(), '$4 = cursor.lastMessageAt');
   assert.equal(cardsQ.params[4], 42, '$5 = cursor.oppId');
   assert.equal(cardsQ.params[5], true, '$6 cursorPresent true');
-  // As 5 chaves seguem presentes mesmo no modo single-column (carregar mais).
-  assert.deepEqual(Object.keys(res.json().columns), ['novas_conversas', 'interessados', 'negociacoes', 'ganhos', 'perdas']);
+  // As 4 chaves seguem presentes mesmo no modo single-column (carregar mais).
+  assert.deepEqual(Object.keys(res.json().columns), ['novas_conversas', 'interessados', 'negociacoes', 'ganhos']);
   await app.close();
 });
 
 test('200: cursor com lastMessageAt null (cauda NULLS LAST) → $4 null, $5 oppId', async () => {
   const { pool, state } = makePool({ cards: [], counts: {} }); const app = appFor(pool);
   const cur = encodeBoardCursor(null, 7);
-  await app.inject({ method: 'GET', url: `/whatsapp/board?number_id=1&column=perdas&cursor=${encodeURIComponent(cur)}`, headers });
+  await app.inject({ method: 'GET', url: `/whatsapp/board?number_id=1&column=negociacoes&cursor=${encodeURIComponent(cur)}`, headers });
   const cardsQ = state.queries.find(q => /ROW_NUMBER\(\) OVER/.test(q.text))!;
   assert.equal(cardsQ.params[3], null, '$4 null');
   assert.equal(cardsQ.params[4], 7, '$5 oppId');

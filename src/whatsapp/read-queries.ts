@@ -26,7 +26,7 @@ export function oppQualificationToken(qualification: string | undefined): string
  * RECENTE do par (união, `= ANY`). Retorna:
  *  - `undefined`: filtro ausente/vazio (sem filtro; whitespace-only conta como vazio).
  *  - `BoardColumn[]`: 1+ valores válidos (trim, vazios descartados).
- *  - `null`: SENTINELA — pelo menos um valor fora do enum das 5 colunas
+ *  - `null`: SENTINELA — pelo menos um valor fora do enum das 4 colunas
  *    (`isBoardColumn`); o caller (read-routes.ts) 400s nesse caso.
  * Exportada p/ teste puro da conversão (mesmo padrão de `oppQualificationToken`).
  */
@@ -305,10 +305,14 @@ export async function listThreads(pool: Pool, p: {
         AND ($14::text IS NULL
              OR ($14 = 'with' AND COALESCE(os.opportunity_count, 0) > 0)
              OR ($14 = 'without' AND COALESCE(os.opportunity_count, 0) = 0))
+        -- oppStatus dirige o toggle Em andamento/Perdidas (spec §2): quando o filtro
+        -- é 'em_andamento' ou 'perdido', as GANHAS entram sempre (paridade com o
+        -- kanban, onde 'ganhos' ignora o toggle). Filtro por 'ganho' segue exato.
         AND ($15::text IS NULL OR EXISTS (
               SELECT 1 FROM whatsapp_opportunities oflt
                WHERE oflt.whatsapp_number_id = $1 AND oflt.identifier = a.identifier
-                 AND oflt.status = $15
+                 AND (oflt.status = $15
+                      OR ($15 IN ('em_andamento', 'perdido') AND oflt.status = 'ganho'))
             ))
         AND ($16::text IS NULL OR EXISTS (
               SELECT 1 FROM whatsapp_opportunities oflt
@@ -527,10 +531,13 @@ export async function searchThreads(pool: Pool, p: {
         AND ($11::text IS NULL
              OR ($11 = 'with' AND COALESCE(os.opportunity_count, 0) > 0)
              OR ($11 = 'without' AND COALESCE(os.opportunity_count, 0) = 0))
+        -- Toggle Em andamento/Perdidas (spec §2): 'em_andamento'/'perdido' somam as
+        -- GANHAS sempre (paridade com o kanban). Filtro por 'ganho' segue exato.
         AND ($12::text IS NULL OR EXISTS (
               SELECT 1 FROM whatsapp_opportunities oflt
                WHERE oflt.whatsapp_number_id = $1 AND oflt.identifier = h.identifier
-                 AND oflt.status = $12
+                 AND (oflt.status = $12
+                      OR ($12 IN ('em_andamento', 'perdido') AND oflt.status = 'ganho'))
             ))
         AND ($13::text IS NULL OR EXISTS (
               SELECT 1 FROM whatsapp_opportunities oflt

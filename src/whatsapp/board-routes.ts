@@ -29,9 +29,11 @@ export function registerBoardRoutes(
   const logAccess = deps.logAccess ?? defaultLogAccess;
 
   // ── GET /whatsapp/board ──────────────────────────────────────────────────────
-  // Sem column → primeira página das 5 colunas. Com column (+cursor) → só aquela.
+  // Sem column → primeira página das 4 colunas. Com column (+cursor) → só aquela.
+  // `status` (toggle Em andamento/Perdidas, default em_andamento) filtra as 3 colunas
+  // de posição; `ganhos` sempre entra (spec §2).
   app.get('/whatsapp/board', { preHandler: auth }, async (req: any, reply) => {
-    const { number_id, limit_per_column, column, cursor } = req.query as Record<string, string | undefined>;
+    const { number_id, limit_per_column, column, cursor, status } = req.query as Record<string, string | undefined>;
     if (!number_id) return reply.code(400).send({ error: 'number_id required' });
     if (Number.isNaN(Number(number_id))) return reply.code(400).send({ error: 'number_id must be numeric' });
 
@@ -46,9 +48,17 @@ export function registerBoardRoutes(
       limitPerColumn = n;
     }
 
-    // column: opcional; se presente, deve ser uma das 5 chaves canônicas.
+    // column: opcional; se presente, deve ser uma das 4 chaves canônicas.
     const col = emptyToUndefined(column);
     if (col !== undefined && !isBoardColumn(col)) return reply.code(400).send({ error: 'invalid column' });
+
+    // status: toggle do funil (default 'em_andamento'); só {em_andamento, perdido}.
+    let statusFilter: 'em_andamento' | 'perdido' = 'em_andamento';
+    const statRaw = emptyToUndefined(status);
+    if (statRaw !== undefined) {
+      if (statRaw !== 'em_andamento' && statRaw !== 'perdido') return reply.code(400).send({ error: 'invalid status' });
+      statusFilter = statRaw;
+    }
 
     // cursor: só faz sentido "carregar mais" DENTRO de uma coluna (spec §10) → exige column.
     let cursorDecoded: BoardCursor | undefined;
@@ -72,6 +82,7 @@ export function registerBoardRoutes(
       limitPerColumn,
       column: col,
       cursor: cursorDecoded,
+      statusFilter,
     });
     logAccess(deps.pool, { actor: req.actingUser, action: 'board', workspaceId: num.workspaceId, numberId: num.id });
     return reply.send({

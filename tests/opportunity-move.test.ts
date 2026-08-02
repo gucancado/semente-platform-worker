@@ -4,10 +4,11 @@
  * Testes PUROS (sem Postgres nem env de servidor) da rota do DnD do board —
  * `moveOpportunity` (opportunities.ts) e o helper generalizado `applyThreadLead`.
  *
- * Cobre (Task C2.1):
- *  - Derivação coluna→patch (§5) × 5: cada coluna deriva o patch da opp (via
- *    kernel/UPDATE) e o alvo de thread corretos, partindo de uma opp FECHADA
- *    (perdido) pra revelar a reabertura no UPDATE.
+ * Cobre (Task C2.1; board 4 colunas — perder saiu do move, é patch pela conversa):
+ *  - Derivação coluna→patch (§5) × 4: cada coluna (novas_conversas·interessados·
+ *    negociacoes·ganhos) deriva o patch da opp (via kernel/UPDATE) e o alvo de
+ *    thread corretos, partindo de uma opp FECHADA (perdido) pra revelar a
+ *    reabertura no UPDATE. `moveOpportunity` não recebe mais `lossReason`.
  *  - No-op: mover pra coluna onde a opp JÁ está + thread já no valor → moved=false,
  *    sem UPDATE nem log de thread.
  *  - not_found quando o par (head) não existe.
@@ -142,7 +143,7 @@ const threadUpsertCall = (calls: { text: string; params: any[] }[]) =>
 
 test('move → novas_conversas: reabre (status em_andamento, is_qualified NULL, loss NULL) + thread NULL', async () => {
   const { pool, calls } = fakePoolForMove(closedRow());
-  const res = await moveOpportunity(pool, 7, 'novas_conversas', null, 'u1');
+  const res = await moveOpportunity(pool, 7, 'novas_conversas', 'u1');
   assert.equal(res.ok, true);
   const up = updateCall(calls)!;
   // UPDATE params (v3 contract, mig 053 — sem a coluna legada `qualification`):
@@ -156,7 +157,7 @@ test('move → novas_conversas: reabre (status em_andamento, is_qualified NULL, 
 
 test('move → interessados: reabre + is_qualified NULL + thread TRUE (com log)', async () => {
   const { pool, calls } = fakePoolForMove(closedRow());
-  const res = await moveOpportunity(pool, 7, 'interessados', null, 'u1');
+  const res = await moveOpportunity(pool, 7, 'interessados', 'u1');
   assert.equal(res.ok, true);
   const up = updateCall(calls)!;
   assert.equal(up.params[1], 'em_andamento');
@@ -168,7 +169,7 @@ test('move → interessados: reabre + is_qualified NULL + thread TRUE (com log)'
 
 test('move → negociacoes: reabre + is_qualified TRUE + thread TRUE via kernel (sem write explícito)', async () => {
   const { pool, calls } = fakePoolForMove(closedRow());
-  const res = await moveOpportunity(pool, 7, 'negociacoes', null, 'u1');
+  const res = await moveOpportunity(pool, 7, 'negociacoes', 'u1');
   assert.equal(res.ok, true);
   const up = updateCall(calls)!;
   assert.equal(up.params[1], 'em_andamento');
@@ -181,7 +182,7 @@ test('move → negociacoes: reabre + is_qualified TRUE + thread TRUE via kernel 
 
 test('move → ganhos: status ganho (kernel força qualificado+lead)', async () => {
   const { pool, calls } = fakePoolForMove(closedRow());
-  const res = await moveOpportunity(pool, 7, 'ganhos', null, 'u1');
+  const res = await moveOpportunity(pool, 7, 'ganhos', 'u1');
   assert.equal(res.ok, true);
   const up = updateCall(calls)!;
   assert.equal(up.params[1], 'ganho');
@@ -192,15 +193,10 @@ test('move → ganhos: status ganho (kernel força qualificado+lead)', async () 
   assert.match(upserts[0]!.text, /is_lead = TRUE/);
 });
 
-test('move → perdas: status perdido + loss_reason do modal, sem tocar a thread', async () => {
-  const { pool, calls } = fakePoolForMove(closedRow());
-  const res = await moveOpportunity(pool, 7, 'perdas', 'sem_orcamento', 'u1');
-  assert.equal(res.ok, true);
-  const up = updateCall(calls)!;
-  assert.equal(up.params[1], 'perdido');
-  assert.equal(up.params[4], 'sem_orcamento', 'novo motivo gravado');
-  assert.equal(calls.some((c) => isMetaUpsert(c.text)), false, 'perda não escreve triagem');
-});
+// 'perdas' saiu do board: não é mais uma BoardColumn nem alvo de move (perder =
+// patch pela conversa: status=perdido + loss_reason via PATCH). A rejeição de
+// column='perdas' no move é coberta em tests/whatsapp/opportunity-routes.test.ts
+// (400 invalid column, via isBoardColumn) — aqui não há assinatura que a aceite.
 
 // =============================================================================
 // moveOpportunity — no-op e not_found
@@ -214,7 +210,7 @@ test('move no-op: opp já na coluna + thread no valor → moved=false, sem UPDAT
     created_at: new Date(), updated_at: new Date(), closed_at: null, created_by: 'u0', tags: [],
   };
   const { pool, calls } = fakePoolForMove(openRow, { threadIsLead: null });
-  const res = await moveOpportunity(pool, 7, 'novas_conversas', null, 'u1');
+  const res = await moveOpportunity(pool, 7, 'novas_conversas', 'u1');
   assert.equal(res.ok, true);
   assert.equal((res as any).moved, false);
   assert.equal(updateCall(calls), undefined, 'nada muda na opp');
@@ -227,7 +223,7 @@ test('move: par inexistente (head vazio) → not_found sem abrir conexão', asyn
     query() { return Promise.resolve({ rows: [], rowCount: 0 }); },
     connect() { connected = true; return Promise.resolve({ query: async () => ({ rows: [], rowCount: 0 }), release() {} }); },
   } as any;
-  const res = await moveOpportunity(pool, 999, 'ganhos', null, 'u1');
+  const res = await moveOpportunity(pool, 999, 'ganhos', 'u1');
   assert.deepEqual(res, { ok: false, error: 'not_found' });
   assert.equal(connected, false, 'head vazio → nem abre o lock');
 });

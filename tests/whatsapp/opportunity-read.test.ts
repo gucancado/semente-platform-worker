@@ -159,6 +159,15 @@ test('listThreads: opp_status / opp_qualification / opp_tag_id repassados em $15
   assert.match(text, /\$17::bigint IS NULL OR EXISTS[\s\S]*JOIN whatsapp_opportunity_tags oft/);
 });
 
+test('listThreads: oppStatus dirige o toggle e soma as GANHAS sempre (spec §2) no filtro de $15', async () => {
+  const { pool, calls } = fakePool(() => []);
+  await listThreads(pool, { workspaceId: 'ws-1', numberId: 1, limit: 50, oppStatus: 'perdido' });
+  const { params, text } = calls[0];
+  assert.equal(params[14], 'perdido'); // $15
+  // paridade com o kanban: 'em_andamento'/'perdido' somam as ganhas; 'ganho' segue exato.
+  assert.match(text, /oflt\.status = \$15\s*\n?\s*OR \(\$15 IN \('em_andamento', 'perdido'\) AND oflt\.status = 'ganho'\)/);
+});
+
 // =============================================================================
 // searchThreads — mesmo resumo + mesmos filtros no SearchHit
 // =============================================================================
@@ -187,6 +196,8 @@ test('searchThreads: filtros opp/status/qualification/tag em $11..$14', async ()
   assert.match(text, /oflt\.is_qualified IS NOT DISTINCT FROM/);
   assert.match(text, /FROM whatsapp_opportunities o/);
   assert.match(text, /ORDER BY o\.created_at DESC, o\.id DESC/);
+  // toggle: 'em_andamento'/'perdido' somam as ganhas sempre (paridade com o kanban).
+  assert.match(text, /oflt\.status = \$12\s*\n?\s*OR \(\$12 IN \('em_andamento', 'perdido'\) AND oflt\.status = 'ganho'\)/);
 });
 
 // =============================================================================
@@ -204,15 +215,16 @@ test('parseOppColumnCsv: 1 valor válido → array de 1', () => {
 });
 
 test('parseOppColumnCsv: N valores válidos (CSV, com espaços) → array', () => {
-  assert.deepEqual(parseOppColumnCsv('novas_conversas, ganhos ,perdas'), ['novas_conversas', 'ganhos', 'perdas']);
+  assert.deepEqual(parseOppColumnCsv('novas_conversas, ganhos ,interessados'), ['novas_conversas', 'ganhos', 'interessados']);
 });
 
 test('parseOppColumnCsv: array (repeated query key) também aceito', () => {
   assert.deepEqual(parseOppColumnCsv(['interessados', 'negociacoes']), ['interessados', 'negociacoes']);
 });
 
-test('parseOppColumnCsv: valor fora do enum das 5 colunas → null (sentinela de 400)', () => {
+test('parseOppColumnCsv: valor fora do enum das 4 colunas → null (sentinela de 400)', () => {
   assert.equal(parseOppColumnCsv('foo'), null);
+  assert.equal(parseOppColumnCsv('perdas'), null, 'perdas saiu do enum (board 4 colunas)');
   assert.equal(parseOppColumnCsv('ganhos,bogus'), null); // 1 inválido no meio do CSV já invalida tudo
 });
 
@@ -266,8 +278,8 @@ test('listThreads: Fix round 1 (review) — subquery correlacionada do opp_col g
 
 test('listThreads: opp_column multi-valor (CSV→array) propagado intacto pro param', async () => {
   const { pool, calls } = fakePool(() => []);
-  await listThreads(pool, { workspaceId: 'ws-1', numberId: 1, limit: 50, oppColumn: ['novas_conversas', 'ganhos', 'perdas'] });
-  assert.deepEqual(calls[0].params[17], ['novas_conversas', 'ganhos', 'perdas']);
+  await listThreads(pool, { workspaceId: 'ws-1', numberId: 1, limit: 50, oppColumn: ['novas_conversas', 'interessados', 'ganhos'] });
+  assert.deepEqual(calls[0].params[17], ['novas_conversas', 'interessados', 'ganhos']);
 });
 
 test('searchThreads: sem opp_column → $15 é NULL, sem filtro', async () => {

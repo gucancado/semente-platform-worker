@@ -167,27 +167,20 @@ export function registerOpportunityRoutes(app: FastifyInstance, deps: {
 
   // POST /whatsapp/opportunities/:id/move — DnD do kanban (§5/§10): 1 chamada que
   // executa a transição de coluna inteira (opp + thread + eventos) numa transação
-  // sob o lock. body {column, loss_reason?}; 'perdas' exige loss_reason válido.
+  // sob o lock. body {column}; as 4 colunas são vivas (mover pra qualquer uma reabre
+  // uma opp perdida). Perder saiu do board (é patch pela conversa) → `loss_reason` não
+  // é mais aceito aqui: se vier no body, 400 explícito (body estrito, não ignora).
   app.post('/whatsapp/opportunities/:id/move', { preHandler: auth }, async (req: any, reply) => {
     if (!req.actingUser) return reply.code(400).send({ error: 'x-acting-user required' });
     const body = req.body ?? {};
     if (!isBoardColumn(body.column)) return reply.code(400).send({ error: 'invalid column' });
     const column = body.column;
-    // loss_reason: obrigatório + validado SÓ pra 'perdas'; ignorado nas demais colunas.
-    let lossReason: string | null = null;
-    if (column === 'perdas') {
-      if (typeof body.loss_reason !== 'string' || body.loss_reason.trim() === '') {
-        return reply.code(400).send({ error: 'loss_reason_obrigatorio' });
-      }
-      lossReason = body.loss_reason;
-    }
+    // loss_reason saiu do contrato do move (perder = patch pela conversa) → rejeita
+    // explicitamente em vez de ignorar em silêncio.
+    if (body.loss_reason !== undefined) return reply.code(400).send({ error: 'loss_reason_nao_aceito' });
     const loaded = await loadScoped(req, reply); if (!loaded) return;
     if (!await gateAdmin(req, reply, loaded.num.workspaceId, authz)) return;
-    // Motivo selecionável (sistema ∪ custom ativo); nunca a cascata 'nao_lead'.
-    if (column === 'perdas' && !await isValidLossReason(deps.pool, loaded.num.workspaceId, lossReason!)) {
-      return reply.code(400).send({ error: 'loss_reason_invalido', code: lossReason });
-    }
-    const result = await moveOpportunity(deps.pool, loaded.opp.id, column, lossReason, req.actingUser);
+    const result = await moveOpportunity(deps.pool, loaded.opp.id, column, req.actingUser);
     if (!result.ok) {
       const code = result.error === 'not_found' ? 404 : result.error === 'desqualificar_ganho' ? 409 : 400;
       return reply.code(code).send({ error: result.error });

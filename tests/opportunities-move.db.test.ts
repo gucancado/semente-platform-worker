@@ -2,10 +2,12 @@
 //
 // Prova a transição de coluna transacional da rota `move` (DnD do kanban, §5/§10)
 // contra Postgres real — o que os testes puros não alcançam (advisory lock +
-// transação + CHECKs do schema v3):
+// transação + CHECKs do schema v3). Board 4 colunas: perder saiu do move (é patch
+// pela conversa); as 4 colunas são vivas → mover uma PERDIDA pra qualquer uma REABRE.
 //   1. mover PERDIDA → negociacoes REABRE: em_andamento + qualificado + loss_reason
 //      NULL + closed_at NULL + is_lead=TRUE na thread + eventos de transição.
-//   2. mover ABERTA → perdas grava status=perdido + loss_reason (thread intacta).
+//   2. mover PERDIDA (desqualificada) → interessados REABRE: em_andamento +
+//      is_qualified NULL + loss_reason NULL + is_lead=TRUE (desqualificação limpa).
 //   3. mover → novas_conversas rebaixa a thread pra NULL COM log (true→null).
 //   4. no-op (opp já na coluna + thread no valor) não gera evento nem log.
 //   5. thread log SÓ em mudança: negociacoes→interessados mantém is_lead=TRUE (sem
@@ -51,7 +53,7 @@ test('mover PERDIDA → negociacoes reabre: em_andamento+qualificado, loss/close
   // fecha como perdido com motivo
   await patchOpportunityV3(pool, id, { status: 'perdido', lossReason: 'lead_nao_respondeu' }, 'u1');
 
-  const res = await moveOpportunity(pool, id, 'negociacoes', null, 'u2');
+  const res = await moveOpportunity(pool, id, 'negociacoes', 'u2');
   if (!res.ok) throw new Error(`move falhou: ${res.error}`);
   assert.equal(res.column, 'negociacoes');
   assert.equal(res.moved, true);
@@ -69,19 +71,23 @@ test('mover PERDIDA → negociacoes reabre: em_andamento+qualificado, loss/close
   assert.equal(await countEvents(id, ['loss_reason']), 2, '1 ao fechar + 1 ao reabrir (limpa)');
 });
 
-test('mover ABERTA → perdas grava perdido + loss_reason, thread intacta', async () => {
+test('mover PERDIDA (desqualificada) → interessados reabre: em_andamento + is_qualified NULL + loss NULL + thread TRUE', async () => {
   const id = await newOpp();
-  const res = await moveOpportunity(pool, id, 'perdas', 'lead_nao_respondeu', 'u1');
+  // desqualifica: is_qualified=false ⇒ kernel fecha como perdido, com motivo.
+  await patchOpportunityV3(pool, id, { isQualified: false, lossReason: 'lead_nao_respondeu' }, 'u1');
+
+  const res = await moveOpportunity(pool, id, 'interessados', 'u2');
   if (!res.ok) throw new Error(`move falhou: ${res.error}`);
-  assert.equal(res.column, 'perdas');
+  assert.equal(res.column, 'interessados');
+  assert.equal(res.moved, true);
 
   const row = await oppRow(id);
-  assert.equal(row.status, 'perdido');
-  assert.equal(row.loss_reason, 'lead_nao_respondeu');
-  assert.ok(row.closed_at, 'closed_at setado');
+  assert.equal(row.status, 'em_andamento', 'reabriu');
+  assert.equal(row.is_qualified, null, 'desqualificação limpa (volta a indefinido)');
+  assert.equal(row.loss_reason, null, 'motivo limpo na reabertura');
+  assert.equal(row.closed_at, null, 'reabertura limpa closed_at');
 
-  assert.equal(await threadLead(), undefined, 'perda não escreve triagem (sem row de thread)');
-  assert.equal(await countEvents(id, ['status', 'loss_reason']), 2);
+  assert.equal((await threadLead()).is_lead, true, 'interessados marca is_lead=TRUE na thread');
 });
 
 test('mover → novas_conversas rebaixa a thread pra NULL COM log', async () => {
@@ -89,7 +95,7 @@ test('mover → novas_conversas rebaixa a thread pra NULL COM log', async () => 
   assert.equal((await threadLead()).is_lead, true);
   assert.equal(await leadLogCount(), 1);
 
-  const res = await moveOpportunity(pool, id, 'novas_conversas', null, 'u1');
+  const res = await moveOpportunity(pool, id, 'novas_conversas', 'u1');
   if (!res.ok) throw new Error(`move falhou: ${res.error}`);
   assert.equal(res.column, 'novas_conversas');
   assert.equal(res.moved, true);
@@ -109,7 +115,7 @@ test('mover → novas_conversas rebaixa a thread pra NULL COM log', async () => 
 
 test('move no-op (já na coluna + thread no valor) → sem evento nem log', async () => {
   const id = await newOpp(); // em_andamento + is_qualified NULL + thread ausente = novas_conversas
-  const res = await moveOpportunity(pool, id, 'novas_conversas', null, 'u1');
+  const res = await moveOpportunity(pool, id, 'novas_conversas', 'u1');
   if (!res.ok) throw new Error(`move falhou: ${res.error}`);
   assert.equal(res.moved, false);
   assert.equal(res.column, 'novas_conversas');
@@ -123,7 +129,7 @@ test('thread log SÓ em mudança: negociacoes→interessados mantém is_lead=TRU
   const id = await newOpp({ isQualified: true }); // negociacoes: thread TRUE + 1 log
   assert.equal(await leadLogCount(), 1);
 
-  const res = await moveOpportunity(pool, id, 'interessados', null, 'u1');
+  const res = await moveOpportunity(pool, id, 'interessados', 'u1');
   if (!res.ok) throw new Error(`move falhou: ${res.error}`);
   assert.equal(res.column, 'interessados');
   assert.equal(res.moved, true, 'mudou a qualificação da opp');
