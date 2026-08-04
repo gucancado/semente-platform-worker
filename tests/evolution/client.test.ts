@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createEvolutionInstance, getConnectionState, sendText, ensureEvolutionInstance } from '../../src/evolution/client.js';
+import { createEvolutionInstance, getConnectionState, sendText, ensureEvolutionInstance, setPresenceUnavailable } from '../../src/evolution/client.js';
 
 function mockFetch(handler: (url: string, init: any) => { status: number; body: any }) {
   return async (url: string, init: any) => {
@@ -56,6 +56,16 @@ test('ensureEvolutionInstance: create falha E instância não existe → propaga
     return { ok: false, status: 500, json: async () => ({}) } as any;
   }) as any };
   await assert.rejects(() => ensureEvolutionInstance(deps, 'inst-3', { url: 'http://wk', secret: 's' }));
+});
+
+test('setPresenceUnavailable posta presence=unavailable no endpoint da instância', async () => {
+  let seen: any = null;
+  const deps = { baseUrl: 'https://evo', apiKey: 'k', fetch: mockFetch((url, init) => { seen = { url, init }; return { status: 201, body: { presence: 'unavailable' } }; }) };
+  await setPresenceUnavailable(deps, 'inst-1');
+  assert.match(seen.url, /\/instance\/setPresence\/inst-1$/);
+  assert.equal(seen.init.method, 'POST');
+  assert.equal(seen.init.headers['apikey'], 'k');
+  assert.equal(JSON.parse(seen.init.body).presence, 'unavailable');
 });
 
 test('ensureEvolutionInstance: webhook falha após create → rollback (deleteInstance) e propaga', async () => {

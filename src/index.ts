@@ -35,6 +35,7 @@ import { startLuaScheduler } from './lua/scheduler.js';
 import { startFirefliesImportCron } from './integrations/fireflies/import-cron.js';
 import { startProvisioningReaperCron } from './whatsapp/provisioning-reaper.js';
 import { startConnectionAlertSweep } from './whatsapp/connection-alerts.js';
+import { startPresenceKeepalive } from './whatsapp/presence-keepalive.js';
 import { startTranscriptionPoller } from './transcription/poller.js';
 import { r2Configured } from './integrations/r2.js';
 import { startCreationPoller } from './whatsapp/opportunity-pipeline.js';
@@ -242,6 +243,11 @@ async function main() {
   // Sweep de queda de conexão WhatsApp: alerta (painel + WhatsApp Saturno) quando um
   // número cai de 'connected' e fica fora do ar além do debounce. Idempotente por episódio.
   startConnectionAlertSweep(pool, app.log);
+
+  // Keep-alive de presença: reafirma `unavailable` nas instâncias conectadas. Sem isso
+  // o estado decai no servidor do WhatsApp e o CELULAR DO CLIENTE para de receber push
+  // (quanto mais estável a sessão, pior — reconexão se auto-cura).
+  startPresenceKeepalive(pool, app.log);
 
   // Serviço de transcrição de áudio (isolado). Pré-requisitos já validados acima.
   if (config.TRANSCRIBE_MODE === 'auto') {

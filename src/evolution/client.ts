@@ -64,6 +64,19 @@ export async function getConnectionState(deps: EvolutionDeps, instance: string):
   const r = await call(deps, 'GET', `/instance/connectionState/${instance}`);
   return (r.instance?.state ?? r.state ?? 'close') as 'open'|'connecting'|'close';
 }
+/**
+ * Reafirma a presença do companion como `unavailable`.
+ *
+ * O Baileys só emite presença UMA vez, na transição pra `open`
+ * (`sendPresenceUpdate(markOnlineOnConnect ? 'available' : 'unavailable')`), e o
+ * estado DECAI no servidor do WhatsApp. Quando decai, o WhatsApp volta a tratar
+ * o companion como ativo e SUPRIME o push no celular do cliente — quanto mais
+ * estável a sessão, pior (sessão que reconecta se auto-cura no `open` novo).
+ * Provado na Luhma (42d sem reconectar): sem push → este POST → push de volta.
+ */
+export async function setPresenceUnavailable(deps: EvolutionDeps, instance: string) {
+  await call(deps, 'POST', `/instance/setPresence/${instance}`, { presence: 'unavailable' });
+}
 export async function logoutInstance(deps: EvolutionDeps, instance: string) { await call(deps, 'DELETE', `/instance/logout/${instance}`); }
 export async function deleteInstance(deps: EvolutionDeps, instance: string) { await call(deps, 'DELETE', `/instance/delete/${instance}`); }
 export async function sendText(deps: EvolutionDeps, instance: string, to: string, text: string): Promise<{ sendId: string }> {

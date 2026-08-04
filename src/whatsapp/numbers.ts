@@ -47,6 +47,18 @@ export async function listNumbers(pool: Pool, workspaceId: string, opts?: { incl
   const { rows } = await pool.query(`${SELECT} ${where} ORDER BY created_at DESC`, [workspaceId]);
   return rows.map(map);
 }
+/**
+ * Instâncias Evolution de todos os números conectados (cross-workspace).
+ * Usado pelo keep-alive de presença — ver `presence-keepalive.ts`.
+ */
+export async function listConnectedInstances(pool: Pool): Promise<string[]> {
+  const { rows } = await pool.query(
+    `SELECT evolution_instance FROM whatsapp_numbers
+      WHERE status = 'connected' AND removed_at IS NULL
+      ORDER BY id`,
+  );
+  return rows.map((r) => r.evolution_instance as string);
+}
 export async function upsertConnectedNumber(
   pool: Pool,
   p: { workspaceId: string; evolutionInstance: string; phone: string | undefined; createdBy: string | null },

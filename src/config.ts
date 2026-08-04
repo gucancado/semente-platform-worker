@@ -93,6 +93,12 @@ const EnvSchema = z.object({
   GOOGLE_TOKEN_ENCRYPTION_KEY: z.string().min(40),
   GOOGLE_OAUTH_STATE_SECRET: z.string().min(40),
 
+  // ── Keep-alive de presença WhatsApp ──
+  // Reafirma `presence: unavailable` nas instâncias conectadas. Sem isso o estado
+  // decai no servidor do WhatsApp e o push do celular do cliente é suprimido.
+  // 5 min é conservador: ~8 instâncias × 12 ciclos/h ≈ 96 req/h (desprezível).
+  WHATSAPP_PRESENCE_REFRESH_INTERVAL_MS: z.coerce.number().int().positive().default(300_000),
+
   // ── Alerta de queda de conexão WhatsApp ──
   // Sweep varre números fora do ar; dispara alerta (outbox + WhatsApp) após o debounce.
   CONNECTION_ALERT_SWEEP_INTERVAL_MS: z.coerce.number().int().positive().default(60_000),
