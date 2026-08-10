@@ -129,6 +129,14 @@ function toISO(v: unknown): string | null {
 // sobre histórico pré-pipeline nem re-julga input já visto). Ordenadas mais QUENTES
 // primeiro (MAX(created_at) DESC) e limitadas ao cap. $1 = workspace_id,
 // $2 = pipeline_since, $3 = limite.
+//
+// PRECISÃO (bug de 2026-08-10 — não remover o date_trunc): `input_last_message_at` é
+// gravado a partir de ctx.lastMessageAt, uma ISO string de JS, ou seja MILISSEGUNDO — o
+// driver do pg trunca os µs do timestamptz ao construir o Date. messages.created_at tem
+// MICROSSEGUNDO. Sem truncar o lado esquerdo, `19:00:49.357980 > 19:00:49.357000` é
+// eternamente verdadeiro e toda conversa já julgada volta como pendente em todo run: o
+// LLM é chamado (custo pago), o CLAIM cai no UNIQUE e a decisão é descartada. Medido em
+// prod: 143 chamadas → 50 julgamentos (65% de desperdício), 34/34 conversas zumbis.
 const PENDING_SQL = `/* ai:pending */
   SELECT m.whatsapp_number_id, m.identifier, m.workspace_id,
          MAX(m.created_at) AS last_message_at,
@@ -153,7 +161,7 @@ const PENDING_SQL = `/* ai:pending */
           AND m2.author IS NOT NULL
      )
    GROUP BY m.whatsapp_number_id, m.identifier, m.workspace_id, j.watermark
-  HAVING MAX(m.created_at) > COALESCE(j.watermark, $2::timestamptz)
+  HAVING date_trunc('milliseconds', MAX(m.created_at)) > COALESCE(j.watermark, $2::timestamptz)
    ORDER BY MAX(m.created_at) DESC
    LIMIT $3`;
 

@@ -136,6 +136,11 @@ const MSG_BASE = `SELECT direction, text, created_at, id FROM messages
  * DESC LIMIT + revertidas pra ASC — com >MAX_MESSAGES novas, fica com as recentes,
  * não com as antigas). `lastMessageAt` = created_at REAL da última mensagem da
  * conversa (não o fim da janela truncada); null se a conversa não tem mensagem.
+ *
+ * A partição cauda/novas trunca os DOIS lados pra MILISSEGUNDO porque o watermark
+ * (input_last_message_at) foi gravado a partir de uma ISO string de JS e só tem ms,
+ * enquanto messages.created_at tem µs — comparar cru joga a última mensagem JÁ julgada
+ * no balde "novas" a cada run (mesma raiz do bug do PENDING_SQL, ai-judgment-runner.ts).
  */
 async function fetchMessages(
   pool: Pool,
@@ -148,12 +153,12 @@ async function fetchMessages(
   let freshDesc: any[] = [];
   if (watermark != null) {
     const newRes = await pool.query(
-      `/* ctx:messages:new */ ${MSG_BASE} AND created_at > $4 ORDER BY created_at DESC, id DESC LIMIT $5`,
+      `/* ctx:messages:new */ ${MSG_BASE} AND date_trunc('milliseconds', created_at) > $4 ORDER BY created_at DESC, id DESC LIMIT $5`,
       [numberId, identifier, workspaceId, watermark, MAX_MESSAGES],
     );
     freshDesc = newRes.rows;
     const tailRes = await pool.query(
-      `/* ctx:messages:tail */ ${MSG_BASE} AND created_at <= $4 ORDER BY created_at DESC, id DESC LIMIT $5`,
+      `/* ctx:messages:tail */ ${MSG_BASE} AND date_trunc('milliseconds', created_at) <= $4 ORDER BY created_at DESC, id DESC LIMIT $5`,
       [numberId, identifier, workspaceId, watermark, TAIL_LIMIT],
     );
     tailAsc = tailRes.rows.slice().reverse();

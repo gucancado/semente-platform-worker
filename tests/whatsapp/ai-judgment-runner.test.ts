@@ -123,11 +123,26 @@ test('fetchPendingConversations: COALESCE(watermark, pipeline_since), is_lead≠
   const sql = calls[0].sql;
   assert.deepEqual(calls[0].params, ['ws-1', 'PS', 200]);
   assert.match(sql, /tm\.is_lead IS DISTINCT FROM FALSE/);
-  assert.match(sql, /HAVING MAX\(m\.created_at\) > COALESCE\(j\.watermark, \$2::timestamptz\)/);
+  assert.match(sql, /HAVING date_trunc\('milliseconds', MAX\(m\.created_at\)\) > COALESCE\(j\.watermark, \$2::timestamptz\)/);
   assert.match(sql, /input_last_message_at/);
   assert.match(sql, /NOT EXISTS \(\s*SELECT 1 FROM whatsapp_groups g/);
   assert.match(sql, /NOT EXISTS \(\s*SELECT 1 FROM messages m2[\s\S]*m2\.author IS NOT NULL/);
   assert.match(sql, /ORDER BY MAX\(m\.created_at\) DESC\s*LIMIT \$3/);
+});
+
+test('fetchPendingConversations: compara na MESMA precisão do watermark gravado (ms), não em µs', async () => {
+  // Regressão do bug de 2026-08-10: `input_last_message_at` é gravado a partir de
+  // ctx.lastMessageAt, que é uma ISO string de JS (MILISSEGUNDO — o driver do pg trunca
+  // os µs ao virar Date). Comparar MAX(created_at) cru (MICROSSEGUNDO) contra esse
+  // watermark deixava `.357980 > .357000` eternamente verdadeiro: TODA conversa já
+  // julgada voltava como pendente em todo run, o LLM era chamado de novo (custo pago) e
+  // o CLAIM caía no UNIQUE → 65% das chamadas viravam lixo. O lado esquerdo TEM que ser
+  // truncado pra ms antes da comparação.
+  const { pool, calls } = fakePool(() => ({ rows: [] }));
+  await fetchPendingConversations(pool, { workspaceId: 'ws-1', pipelineSince: 'PS', limit: 10 });
+  const sql = calls[0].sql;
+  assert.match(sql, /date_trunc\('milliseconds', MAX\(m\.created_at\)\)/);
+  assert.doesNotMatch(sql, /HAVING MAX\(m\.created_at\) >/);
 });
 
 test('fetchPendingConversations: watermark NULL (nunca julgado) → null no shape', async () => {
