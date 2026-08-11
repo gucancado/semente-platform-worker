@@ -12,24 +12,39 @@ import { localTimeInSaoPaulo } from '../lua/scheduler.js';
  *
  * Só toca números que têm PELO MENOS UM grupo vinculado: sem vínculo, nada aqui
  * tem consumidor, e `fetchAllGroups?getParticipants=true` é a chamada mais cara
- * que fazemos à Evolution (o `groupFetchAllParticipating` do Baileys sobre ~54
+ * que fazemos à Evolution (o `groupFetchAllParticipating` do Baileys sobre ~140
  * grupos) — não pode rodar "por via das dúvidas".
+ *
+ * ⚠️ LGPD/escopo: a chamada à Evolution devolve o roster de TODOS os grupos do
+ * número numa tacada só (não dá pra pedir só os vinculados), mas a
+ * PERSISTÊNCIA do roster (o que `syncGroupSubjects` grava em
+ * `whatsapp_group_participants`) é restrita aos jids vinculados DAQUELE
+ * número — por isso a query abaixo traz `(numberId, jid)` em vez de só
+ * `DISTINCT numberId`, e monta um `Set<jid>` por número (`participantScope`).
+ * Sem essa restrição o worker coletaria e armazenaria telefone de gente em
+ * ~140 grupos alheios à feature, e multiplicaria à toa o custo do upsert
+ * (uma query por pessoa).
  */
 export async function runGroupSyncCycle(
   pool: Pool, deps: EvolutionDeps, budgets: { avatars: number; identities: number },
   log: { info: Function; error: Function },
 ): Promise<void> {
   const { rows } = await pool.query(
-    `SELECT DISTINCT whatsapp_number_id AS id
+    `SELECT whatsapp_number_id AS id, jid
        FROM whatsapp_groups
       WHERE linked_workspace_id IS NOT NULL AND whatsapp_number_id IS NOT NULL`,
   );
+  const linkedJidsByNumber = new Map<number, Set<string>>();
   for (const r of rows) {
     const numberId = Number(r.id);
+    if (!linkedJidsByNumber.has(numberId)) linkedJidsByNumber.set(numberId, new Set());
+    linkedJidsByNumber.get(numberId)!.add(r.jid as string);
+  }
+  for (const [numberId, linkedJids] of linkedJidsByNumber) {
     const num = await getNumber(pool, numberId);
     if (!num) continue;
     try {
-      const synced = await syncGroupSubjects(pool, deps, numberId, { participants: true });
+      const synced = await syncGroupSubjects(pool, deps, numberId, { participants: true, participantScope: linkedJids });
       const avatars = await sweepGroupAvatars(pool, deps, num.evolutionInstance, budgets.avatars);
       const ids = await resolveGroupIdentities(pool, budgets.identities);
       log.info({ numberId, synced, avatars, ids }, 'group-sync: ciclo concluído');

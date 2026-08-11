@@ -97,6 +97,23 @@ test('a fila elege por avatar_fetched_at, não pela ausência de avatar_key', as
   assert.doesNotMatch(sql, /avatar_key IS NULL/);
 });
 
+// Mesmo argumento de group-identity.ts: um LID de privacidade não é telefone.
+// `fetchProfilePictureUrl(number)` com um LID queima orçamento à toa e pode
+// trazer a foto de OUTRA pessoa.
+test('a fila exclui participantes is_lid', async () => {
+  let sql = '';
+  const pool = {
+    query: async (s: string) => {
+      if (s.trim().startsWith('SELECT')) { sql = s; return { rows: [] }; }
+      return { rows: [] };
+    },
+  } as any;
+  await sweepGroupAvatars(pool, {} as any, 'inst', 5, {
+    fetchUrl: async () => null, download: async () => Buffer.alloc(0), upload: async () => {},
+  });
+  assert.match(sql, /is_lid = FALSE/);
+});
+
 test('erro na Evolution → incrementa avatar_attempts e o sweep continua', async () => {
   const { pool, updates } = poolWithCandidates([CAND, { phone: '+5531988887777' }]);
   let calls = 0;

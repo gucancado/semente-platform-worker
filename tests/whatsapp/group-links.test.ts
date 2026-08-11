@@ -73,3 +73,21 @@ test('listLinkedGroups mapeia várias rows', async () => {
   assert.equal(gs[1].jid, '+120363002');
   assert.equal(gs[1].numberWorkspaceId, 'ws-saturno');
 });
+
+// O gate 2 (assertMember no workspace do NÚMERO) só barra alguém que o gate 1
+// (assertAdmin no workspace do CLIENTE) já não barraria sozinho quando os dois
+// workspaces são DIFERENTES. Se o vínculo apontar pra uma linha cujo número é
+// do PRÓPRIO workspace do cliente, admin implica membro e o gate 2 vira
+// tautologia — o SQL tem que excluir essa linha na origem (JOIN), não confiar
+// em quem chama pra perceber a ambiguidade depois.
+test('SELECT exige n.workspace_id <> g.linked_workspace_id (senão o gate 2 vira tautologia)', async () => {
+  const { pool, calls } = fakePool([ROW]);
+  await resolveLinkedGroup(pool, 'ws-cliente', '+120363001');
+  assert.match(calls[0].sql, /n\.workspace_id\s*<>\s*g\.linked_workspace_id/);
+});
+
+test('listLinkedGroups também carrega n.workspace_id <> g.linked_workspace_id', async () => {
+  const { pool, calls } = fakePool([]);
+  await listLinkedGroups(pool, 'ws-cliente');
+  assert.match(calls[0].sql, /n\.workspace_id\s*<>\s*g\.linked_workspace_id/);
+});

@@ -7,6 +7,18 @@
  * (`syncGroupSubjectsDebounced`) — tem que deixar o marcador e o roster
  * intocados, senão `listParticipants` esvazia o roster inteiro assim que uma
  * reconexão qualquer acontece depois do cron de participantes.
+ *
+ * Fix round 2 (review final): dois cuidados a mais.
+ *  - `participantScope`: a persistência do roster fica restrita aos jids
+ *    vinculados daquele número — o subject de um grupo fora do escopo ainda
+ *    sincroniza, o roster dele não (LGPD: não coletar telefone de gente em
+ *    grupos alheios à feature).
+ *  - O marcador só avança quando `upsertParticipants` de fato GRAVOU ≥1 linha
+ *    — não basta `participants: true`. Se a Evolution devolver roster vazio
+ *    (ou o upsert falhar), o marcador fica intocado; senão `listParticipants`
+ *    devolveria lista vazia até o próximo sync bom, sem sinal na tela. Por
+ *    isso o marcador agora é uma query SEPARADA (`SET participants_synced_at`
+ *    isolado), nunca embutida no upsert do grupo.
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -52,7 +64,15 @@ function makePool() {
   return { pool, calls };
 }
 
-test('syncGroupSubjects: só a chamada com participants:true avança participants_synced_at e grava o roster', async () => {
+/** Query dedicada que carimba o marcador — separada do upsert do grupo (fix round 2). */
+function markerUpdates(calls: Array<{ sql: string; params: any[] }>) {
+  return calls.filter((c) => c.sql.includes('SET participants_synced_at'));
+}
+function participantInserts(calls: Array<{ sql: string; params: any[] }>) {
+  return calls.filter((c) => c.sql.includes('INSERT INTO whatsapp_group_participants'));
+}
+
+test('syncGroupSubjects: só a chamada com participants:true grava o roster e avança o marcador', async () => {
   const { pool, calls } = makePool();
   const deps = makeEvolutionDeps();
 
@@ -60,13 +80,9 @@ test('syncGroupSubjects: só a chamada com participants:true avança participant
   const first = await syncGroupSubjects(pool, deps, 3, { participants: true });
   assert.equal(first.synced, 1);
   assert.equal(first.participants, 1, '1ª chamada grava o participante do roster');
-
-  const groupUpsert1 = calls.filter((c) => c.sql.includes('whatsapp_groups') && !c.sql.includes('whatsapp_group_participants'));
-  assert.equal(groupUpsert1.length, 1);
-  assert.equal(groupUpsert1[0]!.params[4], true, '1ª chamada: wantPeople=true no upsert do grupo (avança participants_synced_at)');
-
-  const participantInserts1 = calls.filter((c) => c.sql.includes('whatsapp_group_participants'));
-  assert.equal(participantInserts1.length, 1, '1ª chamada grava 1 participante');
+  assert.equal(participantInserts(calls).length, 1, '1ª chamada grava 1 participante');
+  assert.deepEqual(markerUpdates(calls)[0]!.params, [7], '1ª chamada: roster persistido → marcador avança para o grupo 7');
+  assert.equal(markerUpdates(calls).length, 1);
 
   calls.length = 0; // isola a 2ª chamada
 
@@ -75,14 +91,55 @@ test('syncGroupSubjects: só a chamada com participants:true avança participant
   const second = await syncGroupSubjects(pool, deps, 3);
   assert.equal(second.synced, 1);
   assert.equal(second.participants, 0, '2ª chamada NÃO grava participante nenhum — é o bug corrigido');
+  assert.equal(participantInserts(calls).length, 0, '2ª chamada não deve tocar whatsapp_group_participants');
+  assert.equal(markerUpdates(calls).length, 0, '2ª chamada: sem roster persistido → marcador fica intocado');
+});
 
-  const groupUpsert2 = calls.filter((c) => c.sql.includes('whatsapp_groups') && !c.sql.includes('whatsapp_group_participants'));
-  assert.equal(groupUpsert2.length, 1);
-  assert.equal(
-    groupUpsert2[0]!.params[4], false,
-    '2ª chamada: wantPeople=false → participants_synced_at fica INTOCADO (CASE WHEN $5 ... ELSE whatsapp_groups.participants_synced_at)',
-  );
+// Correção 2 (LGPD/escopo): a chamada à Evolution é uma só e devolve o roster
+// de todos os grupos do número, mas a PERSISTÊNCIA fica restrita aos jids
+// vinculados. O subject sincroniza igual; o roster de fora do escopo não é
+// gravado nem avança o marcador.
+test('syncGroupSubjects: grupo FORA do participantScope sincroniza subject mas não persiste roster', async () => {
+  const { pool, calls } = makePool();
+  const deps = makeEvolutionDeps();
+  const out = await syncGroupSubjects(pool, deps, 3, {
+    participants: true,
+    participantScope: new Set(['+999999999999']), // não contém o jid devolvido ('+120363001')
+  });
+  assert.equal(out.synced, 1, 'subject sincroniza mesmo fora do escopo');
+  assert.equal(out.participants, 0, 'roster NÃO persiste fora do escopo');
+  assert.equal(participantInserts(calls).length, 0);
+  assert.equal(markerUpdates(calls).length, 0, 'sem persistência, marcador não avança');
+});
 
-  const participantInserts2 = calls.filter((c) => c.sql.includes('whatsapp_group_participants'));
-  assert.equal(participantInserts2.length, 0, '2ª chamada não deve tocar whatsapp_group_participants');
+test('syncGroupSubjects: grupo DENTRO do participantScope persiste roster normalmente', async () => {
+  const { pool, calls } = makePool();
+  const deps = makeEvolutionDeps();
+  const out = await syncGroupSubjects(pool, deps, 3, {
+    participants: true,
+    participantScope: new Set(['+120363001']), // contém o jid devolvido
+  });
+  assert.equal(out.participants, 1);
+  assert.equal(participantInserts(calls).length, 1);
+  assert.equal(markerUpdates(calls).length, 1);
+});
+
+// Correção 4: `participants: true` sozinho não basta. Se a Evolution devolver
+// roster vazio/ausente para um grupo, `upsertParticipants` nunca roda — e o
+// marcador não pode avançar mesmo assim (senão `listParticipants` esvaziaria
+// a tela até o próximo sync bom, sem sinal do porquê).
+test('syncGroupSubjects: roster vazio da Evolution não avança o marcador', async () => {
+  const { pool, calls } = makePool();
+  const deps = {
+    baseUrl: 'https://evo', apiKey: 'k',
+    fetch: (async () => ({
+      ok: true, status: 200,
+      json: async () => ([{ id: '120363001@g.us', subject: 'Grupo Teste', participants: [] }]),
+    })) as any,
+  };
+  const out = await syncGroupSubjects(pool, deps, 3, { participants: true });
+  assert.equal(out.synced, 1);
+  assert.equal(out.participants, 0);
+  assert.equal(participantInserts(calls).length, 0);
+  assert.equal(markerUpdates(calls).length, 0);
 });

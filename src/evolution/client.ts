@@ -189,14 +189,33 @@ export async function fetchProfilePictureUrl(
 /**
  * Lista os grupos da instância. Shape do retorno da Evolution varia por versão —
  * cobrimos array direto e {groups:[...]}; cada item tem id ('<id>@g.us') + subject.
+ *
+ * NÃO usa o `call()` deste arquivo de propósito (mesma razão de
+ * `fetchProfilePictureUrl` abaixo): `call()` não tem timeout, e
+ * `?getParticipants=true` é a chamada mais pesada que fazemos à Evolution — o
+ * `groupFetchAllParticipating` do Baileys sobre TODOS os grupos do número
+ * (~140 em produção). Se pendurar, o guard `running` do cron de grupos
+ * (`group-sync-cron.ts`) só reseta no `finally`, que nunca chega — o ciclo
+ * morre até o próximo restart do processo. Timeout aqui, não no `call()`
+ * genérico: `call()` é usado por todo o resto do worker, e mudar o timeout
+ * default é risco fora do escopo desta feature.
  */
+const FETCH_ALL_GROUPS_TIMEOUT_MS = 120_000;
+
 export async function fetchAllGroups(
   deps: EvolutionDeps,
   instance: string,
   opts?: { participants?: boolean },
 ): Promise<Array<{ jid: string; subject: string | null; participants?: Array<{ phone: string; isAdmin: boolean; isLid: boolean }> }>> {
   const want = opts?.participants === true;
-  const r = await call(deps, 'GET', `/group/fetchAllGroups/${instance}?getParticipants=${want}`);
+  const f = deps.fetch ?? fetch;
+  const res = await f(`${deps.baseUrl}/group/fetchAllGroups/${instance}?getParticipants=${want}`, {
+    method: 'GET',
+    headers: { apikey: deps.apiKey, 'Content-Type': 'application/json' },
+    signal: AbortSignal.timeout(FETCH_ALL_GROUPS_TIMEOUT_MS),
+  } as any);
+  if (!res.ok) throw new Error(`Evolution fetchAllGroups ${instance} → ${res.status}`);
+  const r: any = await res.json();
   const arr: any[] = Array.isArray(r) ? r : Array.isArray(r?.groups) ? r.groups : [];
   return arr
     .filter((g) => typeof g?.id === 'string')

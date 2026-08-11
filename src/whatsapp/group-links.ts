@@ -25,13 +25,25 @@ export type LinkedGroup = {
 // `numberWorkspaceId` sai de whatsapp_numbers (autoridade), não de
 // whatsapp_groups.workspace_id — as duas normalmente coincidem, mas é a do
 // número que casa com messages.workspace_id.
+//
+// ⚠️ `n.workspace_id <> g.linked_workspace_id` NÃO é redundante — é o que
+// impede o gate 2 (`assertMember(numberWorkspaceId)`) de virar tautologia.
+// Se o número que grava o grupo for do MESMO workspace do cliente vinculado,
+// `numberWorkspaceId === linkedWorkspaceId`, e como o gate 1 já exige
+// `assertAdmin(linkedWorkspaceId)` — e admin também é membro — o gate 2 passa
+// sempre, mesmo pra quem o vínculo existe pra BARRAR (o próprio cliente lendo
+// a conversa interna da equipe sobre ele). Existem em produção linhas desses
+// grupos sob números dos próprios clientes. Com a condição, um vínculo
+// auto-referente simplesmente não resolve (lista vazia / 404) — fail-closed.
+// Não remover num refactor "para simplificar o JOIN".
 const SELECT = `
   SELECT g.id, g.jid, g.subject,
          g.whatsapp_number_id,
          n.workspace_id AS number_workspace_id,
          g.linked_workspace_id
     FROM whatsapp_groups g
-    JOIN whatsapp_numbers n ON n.id = g.whatsapp_number_id`;
+    JOIN whatsapp_numbers n ON n.id = g.whatsapp_number_id
+                            AND n.workspace_id <> g.linked_workspace_id`;
 
 function map(r: any): LinkedGroup {
   return {

@@ -52,6 +52,11 @@ const defaultIo: AvatarIo = {
  *   - data + key NULA = sem foto CONFIRMADO    → volta só após REFRESH_DAYS
  * Um predicado por `avatar_key IS NULL` colocaria o terceiro caso de volta na
  * fila em todo run, queimando orçamento até estourar MAX_ATTEMPTS.
+ *
+ * `is_lid = FALSE` pelo mesmo motivo de `group-identity.ts`: um LID de
+ * privacidade não é telefone. `fetchProfilePictureUrl(number)` mandado com um
+ * LID queima orçamento à toa e pode trazer a foto de OUTRA pessoa — um dia
+ * aquele LID poderia casar com o telefone errado de alguém.
  */
 export async function sweepGroupAvatars(
   pool: Pool,
@@ -71,7 +76,8 @@ export async function sweepGroupAvatars(
   const { rows } = await pool.query(
     `SELECT DISTINCT ON (phone) phone
        FROM whatsapp_group_participants
-      WHERE avatar_attempts < ${MAX_ATTEMPTS}
+      WHERE is_lid = FALSE
+        AND avatar_attempts < ${MAX_ATTEMPTS}
         AND (avatar_fetched_at IS NULL
              OR avatar_fetched_at < NOW() - INTERVAL '${REFRESH_DAYS} days')
       ORDER BY phone, (avatar_fetched_at IS NOT NULL), random()
