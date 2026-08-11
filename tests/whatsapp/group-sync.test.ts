@@ -19,6 +19,18 @@
  *    devolveria lista vazia até o próximo sync bom, sem sinal na tela. Por
  *    isso o marcador agora é uma query SEPARADA (`SET participants_synced_at`
  *    isolado), nunca embutida no upsert do grupo.
+ *
+ * Fix round 3 (regressão pós-round-2): a query separada do marcador rodava
+ * com seu PRÓPRIO `NOW()`, independente do `NOW()` de cada upsert de
+ * participante — dois statements sequenciais sem transação, então o `NOW()`
+ * do marcador (gravado DEPOIS) ficava sempre um pouco à frente do
+ * `last_seen_at` do lote. Isso invertia o corte `last_seen_at >=
+ * participants_synced_at` de `listParticipants` e devolvia lista VAZIA logo
+ * após um sync bem-sucedido. Fake pool não modela `NOW()` do Postgres, então
+ * essa regressão passava batido nos rounds 1-2. O teste abaixo trava a
+ * invariante sem banco: exige que a implementação passe um timestamp
+ * EXPLÍCITO (mesmo valor) pros dois writes, em vez de confiar em `NOW()` do
+ * SQL em qualquer um dos dois.
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -81,7 +93,7 @@ test('syncGroupSubjects: só a chamada com participants:true grava o roster e av
   assert.equal(first.synced, 1);
   assert.equal(first.participants, 1, '1ª chamada grava o participante do roster');
   assert.equal(participantInserts(calls).length, 1, '1ª chamada grava 1 participante');
-  assert.deepEqual(markerUpdates(calls)[0]!.params, [7], '1ª chamada: roster persistido → marcador avança para o grupo 7');
+  assert.equal(markerUpdates(calls)[0]!.params[0], 7, '1ª chamada: roster persistido → marcador avança para o grupo 7');
   assert.equal(markerUpdates(calls).length, 1);
 
   calls.length = 0; // isola a 2ª chamada
@@ -142,4 +154,35 @@ test('syncGroupSubjects: roster vazio da Evolution não avança o marcador', asy
   assert.equal(out.participants, 0);
   assert.equal(participantInserts(calls).length, 0);
   assert.equal(markerUpdates(calls).length, 0);
+});
+
+// Fix round 3: regressão do "listParticipants sempre vazio logo após o sync".
+// Sem banco real não dá pra observar dois NOW() divergindo, mas dá pra travar
+// a PRECONDIÇÃO que os elimina: nenhuma das duas escritas pode confiar no
+// `NOW()` do SQL (que rodaria em instantes diferentes) — as duas têm que
+// receber o MESMO timestamp como parâmetro explícito.
+test('syncGroupSubjects: roster e marcador usam o MESMO timestamp explícito (não dois NOW() do SQL)', async () => {
+  const { pool, calls } = makePool();
+  const deps = makeEvolutionDeps();
+
+  await syncGroupSubjects(pool, deps, 3, { participants: true });
+
+  const insertCall = participantInserts(calls)[0]!;
+  const markerCall = markerUpdates(calls)[0]!;
+
+  // Nenhuma das duas queries pode ter o `last_seen_at`/`participants_synced_at`
+  // fixado via NOW() do SQL — senão nada garante que sejam o mesmo instante.
+  assert.doesNotMatch(insertCall.sql, /last_seen_at\s*=\s*NOW\(\)/i, 'upsert do participante não pode depender do NOW() do banco');
+  assert.doesNotMatch(markerCall.sql, /participants_synced_at\s*=\s*NOW\(\)/i, 'UPDATE do marcador não pode depender do NOW() do banco');
+
+  // Os dois últimos parâmetros são o timestamp explícito de cada escrita.
+  const insertTs = insertCall.params.at(-1);
+  const markerTs = markerCall.params.at(-1);
+  assert.ok(insertTs instanceof Date, 'upsert do participante recebe um timestamp explícito');
+  assert.ok(markerTs instanceof Date, 'UPDATE do marcador recebe um timestamp explícito');
+
+  // A invariante que corrige o bug: MESMO instante nas duas escritas, não
+  // apenas "próximo" — é o que faz last_seen_at >= participants_synced_at
+  // valer pro lote inteiro do sync corrente.
+  assert.equal((insertTs as Date).getTime(), (markerTs as Date).getTime(), 'roster e marcador têm que gravar o MESMO instante');
 });

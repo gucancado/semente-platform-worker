@@ -38,11 +38,19 @@ import { upsertParticipants } from './group-participants.js';
  * marcador é uma query SEPARADA, disparada só depois de confirmar que
  * `upsertParticipants` gravou ≥1 linha — nunca embutida no upsert do grupo.
  *
- * ⚠️ A ORDEM importa: os participantes são gravados (com o próprio `NOW()` de
- * cada statement) ANTES do UPDATE que carimba `participants_synced_at`. É
- * isso que garante `last_seen_at >= g.participants_synced_at` (o corte de
- * `listParticipants`) — inverter a ordem poderia carimbar o marcador com um
- * instante posterior a algum `last_seen_at` e esvaziar o roster na leitura.
+ * ⚠️ Roster e marcador usam o MESMO instante (`syncedAt`, capturado uma vez
+ * por chamada), NUNCA dois `NOW()` independentes. Os upserts de
+ * `whatsapp_group_participants` e o UPDATE de `participants_synced_at` são
+ * statements sequenciais sem transação — dois `NOW()` separados quase sempre
+ * divergem (round-trip de rede entre eles), e como o marcador é gravado
+ * DEPOIS dos participantes, o `NOW()` dele fica um pouco à FRENTE do
+ * `last_seen_at` que acabou de ser gravado. O corte de `listParticipants` é
+ * `last_seen_at >= g.participants_synced_at`: com o marcador à frente essa
+ * comparação fica FALSA para o lote inteiro, e a lista volta vazia logo
+ * depois de um sync bem-sucedido. Passar o mesmo `syncedAt` pros dois lados
+ * garante `last_seen_at == participants_synced_at` (portanto `>=` verdadeiro)
+ * pra quem foi visto neste sync, e preserva `last_seen_at` menor (portanto
+ * excluído) pra quem saiu num sync anterior.
  */
 export async function syncGroupSubjects(
   pool: Pool,
@@ -54,6 +62,9 @@ export async function syncGroupSubjects(
   if (!num) return { synced: 0, participants: 0 };
   const wantPeople = opts?.participants === true;
   const groups = await fetchAllGroups(deps, num.evolutionInstance, { participants: wantPeople });
+  // Capturado UMA vez por chamada e reusado no roster + no marcador — ver
+  // bloco de comentário acima sobre por que não pode ser dois `NOW()`.
+  const syncedAt = new Date();
   let synced = 0;
   let participants = 0;
   for (const g of groups) {
@@ -76,12 +87,14 @@ export async function syncGroupSubjects(
         stored = await upsertParticipants(
           pool, groupId,
           g.participants.map((p) => ({ phone: p.phone, pushName: null, isAdmin: p.isAdmin, isLid: p.isLid })),
+          syncedAt,
         );
       } catch { /* segue */ }
       if (stored > 0) {
         // Marcador avança SÓ aqui — depois de confirmar que o roster foi
-        // gravado de fato. Ver bloco de comentário acima.
-        await pool.query(`UPDATE whatsapp_groups SET participants_synced_at = NOW() WHERE id = $1`, [groupId]);
+        // gravado de fato — e com o MESMO `syncedAt` do roster. Ver bloco de
+        // comentário acima.
+        await pool.query(`UPDATE whatsapp_groups SET participants_synced_at = $2 WHERE id = $1`, [groupId, syncedAt]);
         participants += stored;
       }
     }
