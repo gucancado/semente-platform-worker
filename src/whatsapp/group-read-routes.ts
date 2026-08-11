@@ -3,6 +3,7 @@ import type { Pool } from 'pg';
 import { listLinkedGroups, resolveLinkedGroup, type LinkedGroup } from './group-links.js';
 import { listThreadMessages } from './read-queries.js';
 import { exportConversation } from './export.js';
+import { listParticipants } from './group-participants.js';
 import { requirePanelToken } from './provision-routes.js';
 import { defaultRouteAuthz, gateAdmin, type RouteAuthz } from './route-authz.js';
 import { logAccess as defaultLogAccess, type LogAccessFn } from './access-log.js';
@@ -169,5 +170,46 @@ export function registerGroupReadRoutes(
       meta: { messageCount: out.messageCount },
     });
     return reply.send({ schema: 'group_v1', context: groupContext(g), ...out });
+  });
+
+  // ── GET /whatsapp/groups/:jid/participants ───────────────────────────────────
+  app.get('/whatsapp/groups/:jid/participants', { preHandler: auth }, async (req: any, reply) => {
+    const g = await gateAndResolve(req, reply);
+    if (!g) return;
+    const participants = await listParticipants(deps.pool, g.id);
+    logAccess(deps.pool, {
+      actor: req.actingUser, action: 'group_participants',
+      workspaceId: g.linkedWorkspaceId, numberId: g.numberId, identifier: g.jid,
+    });
+    return reply.send({ schema: 'group_v1', context: groupContext(g), participants });
+  });
+
+  // ── GET /whatsapp/groups/:jid/view ───────────────────────────────────────────
+  // Agregador do que a PÁGINA precisa: mensagens + roster num gate só.
+  //
+  // Não é açúcar: `assertActorAdmin` é deliberadamente NÃO-cacheado
+  // (`src/whatsapp/authz.ts` — "Intentionally bypass and do not populate the
+  // shared cache"), então cada rota chamada custa um POST fresco ao bloquim-api.
+  // A página precisa de grupo + mensagens + participantes; em rotas separadas
+  // seriam 3 pares de gates por render, somados ao que o layout já faz.
+  app.get('/whatsapp/groups/:jid/view', { preHandler: auth }, async (req: any, reply) => {
+    const g = await gateAndResolve(req, reply);
+    if (!g) return;
+    const [msgs, participants] = await Promise.all([
+      listThreadMessages(deps.pool, {
+        workspaceId: g.numberWorkspaceId, numberId: g.numberId, identifier: g.jid,
+        limit: Number(req.query.limit ?? 50), cursor: emptyToUndefined(req.query.cursor),
+      }),
+      listParticipants(deps.pool, g.id),
+    ]);
+    logAccess(deps.pool, {
+      actor: req.actingUser, action: 'group_messages',
+      workspaceId: g.linkedWorkspaceId, numberId: g.numberId, identifier: g.jid,
+    });
+    return reply.send({
+      schema: 'group_v1', context: groupContext(g),
+      group: { jid: g.jid, subject: g.subject },
+      ...msgs, participants,
+    });
   });
 }

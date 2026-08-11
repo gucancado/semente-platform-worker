@@ -126,16 +126,53 @@ export async function getBase64FromMediaMessage(
 }
 
 /**
+ * Participantes crus da Evolution → `{ phone, isAdmin, isLid }`.
+ *
+ * O telefone TEM que sair no mesmo formato do `author` das mensagens, que é
+ * `normalizeGroupJid(canonicalJid(key.participant, key.participantAlt))`
+ * (src/webhook/evolution.ts:63-65). Aplicar só `normalizeGroupJid` produziria
+ * '+<lid>' onde a mensagem tem '+5531…': roster duplicado, join furado com
+ * messages.author e um LID mandado ao resolvedor do Bloquim como se fosse
+ * telefone.
+ *
+ * `isLid` = o payload não trouxe o alt e o id continua sendo LID. Não é erro (é
+ * o que o WhatsApp entrega); só não é telefone, e quem consome trata assim.
+ *
+ * `admin` vem como 'admin' | 'superadmin' | null.
+ */
+export function parseParticipants(raw: any): Array<{ phone: string; isAdmin: boolean; isLid: boolean }> {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .filter((p) => typeof p?.id === 'string')
+    .map((p) => {
+      // A Evolution não é consistente no nome do campo alternativo entre
+      // endpoints; aceitamos os shapes conhecidos e caímos no id quando não vem.
+      const canonical = canonicalJid(p.id, p.jidAlt ?? p.participantAlt ?? p.phoneNumber ?? null);
+      return {
+        phone: normalizeGroupJid(canonical),
+        isAdmin: p.admin === 'admin' || p.admin === 'superadmin',
+        isLid: canonical.endsWith('@lid'),
+      };
+    });
+}
+
+/**
  * Lista os grupos da instância. Shape do retorno da Evolution varia por versão —
  * cobrimos array direto e {groups:[...]}; cada item tem id ('<id>@g.us') + subject.
  */
 export async function fetchAllGroups(
   deps: EvolutionDeps,
-  instance: string
-): Promise<Array<{ jid: string; subject: string | null }>> {
-  const r = await call(deps, 'GET', `/group/fetchAllGroups/${instance}?getParticipants=false`);
+  instance: string,
+  opts?: { participants?: boolean },
+): Promise<Array<{ jid: string; subject: string | null; participants?: Array<{ phone: string; isAdmin: boolean; isLid: boolean }> }>> {
+  const want = opts?.participants === true;
+  const r = await call(deps, 'GET', `/group/fetchAllGroups/${instance}?getParticipants=${want}`);
   const arr: any[] = Array.isArray(r) ? r : Array.isArray(r?.groups) ? r.groups : [];
   return arr
     .filter((g) => typeof g?.id === 'string')
-    .map((g) => ({ jid: normalizeGroupJid(g.id), subject: g.subject ?? g.subjectName ?? null }));
+    .map((g) => ({
+      jid: normalizeGroupJid(g.id),
+      subject: g.subject ?? g.subjectName ?? null,
+      ...(want ? { participants: parseParticipants(g.participants) } : {}),
+    }));
 }
