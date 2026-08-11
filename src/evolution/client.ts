@@ -157,6 +157,36 @@ export function parseParticipants(raw: any): Array<{ phone: string; isAdmin: boo
 }
 
 /**
+ * URL da foto de perfil (CDN do WhatsApp, EXPIRA). `null` = **sem foto pública**,
+ * que é resultado legítimo e precisa ser distinguível de falha.
+ *
+ * NÃO usa o `call()` deste arquivo de propósito, por duas razões medidas:
+ *  - `call()` lança `Error` genérico com o status só embutido na string, então
+ *    404 (sem foto) e 500 (Evolution com problema) chegariam idênticos ao sweep —
+ *    e "sem foto" cairia no contador de falhas até o participante ser expulso da
+ *    fila sem nunca receber o carimbo de `avatar_fetched_at`;
+ *  - `call()` não tem timeout (nenhum `AbortSignal`), e este é um sweep de dezenas
+ *    de chamadas seriais: uma pendurada trava o ciclo inteiro.
+ */
+export async function fetchProfilePictureUrl(
+  deps: EvolutionDeps, instance: string, number: string,
+): Promise<string | null> {
+  const f = deps.fetch ?? fetch;
+  const res = await f(`${deps.baseUrl}/chat/fetchProfilePictureUrl/${instance}`, {
+    method: 'POST',
+    headers: { apikey: deps.apiKey, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ number }),
+    signal: AbortSignal.timeout(15000),
+  } as any);
+  // 404/400 = não há foto pública para esse número. Não é erro.
+  if (res.status === 404 || res.status === 400) return null;
+  if (!res.ok) throw new Error(`Evolution fetchProfilePictureUrl → ${res.status}`);
+  const r = await res.json().catch(() => null);
+  const url = (r as any)?.profilePictureUrl ?? (r as any)?.profilePicUrl ?? null;
+  return typeof url === 'string' && url.length > 0 ? url : null;
+}
+
+/**
  * Lista os grupos da instância. Shape do retorno da Evolution varia por versão —
  * cobrimos array direto e {groups:[...]}; cada item tem id ('<id>@g.us') + subject.
  */

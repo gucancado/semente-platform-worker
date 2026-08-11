@@ -162,6 +162,12 @@ const EnvSchema = z.object({
   // Parse ESTRITO (NÃO z.coerce.boolean — que coage 'false' p/ true; com
   // INGEST_LEGACY_PARSE_ENABLED=false no Coolify o corte falharia silenciosamente).
   INGEST_LEGACY_PARSE_ENABLED: z.enum(['true', 'false']).default('true').transform((v) => v === 'true'),
+
+  // ── Grupos de WhatsApp internos ↔ workspaces — avatares dos participantes ──
+  // Teto de buscas por run do sweep (1 busca por telefone distinto). Sem teto,
+  // um sweep saturaria o rate limit da Evolution.
+  GROUP_AVATAR_BUDGET_PER_RUN: z.coerce.number().int().positive().default(30),
+
   // Janela noturna (hora local America/Sao_Paulo) [start, end).
   LUA_WINDOW_START: z.coerce.number().int().min(0).max(23).default(2),
   LUA_WINDOW_END: z.coerce.number().int().min(1).max(24).default(5),

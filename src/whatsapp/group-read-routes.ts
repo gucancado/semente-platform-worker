@@ -4,6 +4,7 @@ import { listLinkedGroups, resolveLinkedGroup, type LinkedGroup } from './group-
 import { listThreadMessages } from './read-queries.js';
 import { exportConversation } from './export.js';
 import { listParticipants } from './group-participants.js';
+import { presignGet, whatsappMediaBucket } from '../integrations/r2.js';
 import { requirePanelToken } from './provision-routes.js';
 import { defaultRouteAuthz, gateAdmin, type RouteAuthz } from './route-authz.js';
 import { logAccess as defaultLogAccess, type LogAccessFn } from './access-log.js';
@@ -30,6 +31,22 @@ import { emptyToUndefined } from './query-coerce.js';
 /** Envelope comum; `number` é o do saturno (informativo, não é escopo de autz). */
 function groupContext(g: LinkedGroup) {
   return { workspaceId: g.linkedWorkspaceId, group: { jid: g.jid, subject: g.subject }, numberId: g.numberId };
+}
+
+/**
+ * Roster com `avatarKey` (interno) trocado por `avatarUrl` presigned (público).
+ * Presign curto (120s) — o mesmo TTL da rota de áudio. Falha de R2 não derruba
+ * o roster: o avatar cai pras iniciais no lugar de quebrar a resposta inteira.
+ */
+async function withAvatarUrls(raw: Awaited<ReturnType<typeof listParticipants>>) {
+  return Promise.all(raw.map(async (p) => {
+    let avatarUrl: string | null = null;
+    if (p.avatarKey) {
+      try { avatarUrl = await presignGet(p.avatarKey, 120, whatsappMediaBucket()!); } catch { avatarUrl = null; }
+    }
+    const { avatarKey: _omit, ...rest } = p;
+    return { ...rest, avatarUrl };
+  }));
 }
 
 export function registerGroupReadRoutes(
@@ -176,7 +193,8 @@ export function registerGroupReadRoutes(
   app.get('/whatsapp/groups/:jid/participants', { preHandler: auth }, async (req: any, reply) => {
     const g = await gateAndResolve(req, reply);
     if (!g) return;
-    const participants = await listParticipants(deps.pool, g.id);
+    const raw = await listParticipants(deps.pool, g.id);
+    const participants = await withAvatarUrls(raw);
     logAccess(deps.pool, {
       actor: req.actingUser, action: 'group_participants',
       workspaceId: g.linkedWorkspaceId, numberId: g.numberId, identifier: g.jid,
@@ -195,13 +213,14 @@ export function registerGroupReadRoutes(
   app.get('/whatsapp/groups/:jid/view', { preHandler: auth }, async (req: any, reply) => {
     const g = await gateAndResolve(req, reply);
     if (!g) return;
-    const [msgs, participants] = await Promise.all([
+    const [msgs, rawParticipants] = await Promise.all([
       listThreadMessages(deps.pool, {
         workspaceId: g.numberWorkspaceId, numberId: g.numberId, identifier: g.jid,
         limit: Number(req.query.limit ?? 50), cursor: emptyToUndefined(req.query.cursor),
       }),
       listParticipants(deps.pool, g.id),
     ]);
+    const participants = await withAvatarUrls(rawParticipants);
     logAccess(deps.pool, {
       actor: req.actingUser, action: 'group_messages',
       workspaceId: g.linkedWorkspaceId, numberId: g.numberId, identifier: g.jid,
