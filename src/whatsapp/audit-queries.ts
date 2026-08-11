@@ -5,11 +5,15 @@
  */
 import type { Pool } from 'pg';
 
-/** Ações governança-relevantes (default do feed). `export` entra por ser exfiltração. */
+/**
+ * Ações governança-relevantes (default do feed). `export`/`group_export` entram
+ * por serem exfiltração — `group_list`/`group_messages`/`group_participants`
+ * (leitura) ficam fora do default, mas continuam consultáveis via `actions`.
+ */
 export const RELEVANT_ACTIONS = [
   'set_lead', 'set_lead_bulk',
   'upsert_disqualify_reason', 'deactivate_disqualify_reason',
-  'export',
+  'export', 'group_export',
 ] as const;
 
 export type AccessLogEntry = {

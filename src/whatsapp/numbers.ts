@@ -164,7 +164,11 @@ export async function claimNumberByPhone(
     }
     const id = Number(row.id);
     for (const [table, col] of RESTAMP) {
-      await client.query(`UPDATE ${table} SET workspace_id = $1 WHERE ${col} = $2`, [p.newWorkspaceId, id]);
+      // Ações group_* carregam o workspace do CLIENTE (feature de grupos
+      // internos), não o do número — restampá-las apagaria a trilha de quem leu
+      // a conversa de qual cliente.
+      const guard = table === 'whatsapp_access_log' ? ` AND action NOT LIKE 'group_%'` : '';
+      await client.query(`UPDATE ${table} SET workspace_id = $1 WHERE ${col} = $2${guard}`, [p.newWorkspaceId, id]);
     }
     const upd = await client.query(
       `UPDATE whatsapp_numbers

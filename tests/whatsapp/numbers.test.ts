@@ -138,6 +138,25 @@ test('claim: ficha inativa no MESMO ws → moved (reconexão via onboarding)', a
   if (r.kind === 'moved') assert.equal(r.number.id, n.id);
 });
 
+test('claim: RESTAMP não reescreve ações group_* do whatsapp_access_log (trilha de auditoria do cliente)', async () => {
+  const n = await upsertConnectedNumber(pool, { workspaceId: 'ws-A', evolutionInstance: 'saturno-old', phone: '+5531666', createdBy: null });
+  await pool.query(
+    `INSERT INTO whatsapp_access_log (actor, action, workspace_id, number_id, identifier)
+     VALUES ('u1', 'group_list', 'ws-A', $1, null), ('u1', 'set_lead', 'ws-A', $1, null)`,
+    [n.id],
+  );
+  await setNumberLifecycle(pool, n.id, { status: 'disconnected', removed: true });
+  const r = await claimNumberByPhone(pool, { phone: '+5531666', newWorkspaceId: 'ws-B', evolutionInstance: 'saturno-new' });
+  assert.equal(r.kind, 'moved');
+  const rows = await pool.query(
+    `SELECT action, workspace_id FROM whatsapp_access_log WHERE number_id = $1 ORDER BY action`,
+    [n.id],
+  );
+  const byAction = Object.fromEntries(rows.rows.map((row) => [row.action, row.workspace_id]));
+  assert.equal(byAction.group_list, 'ws-A', 'ação group_* preserva o workspace do CLIENTE');
+  assert.equal(byAction.set_lead, 'ws-B', 'ações não-group_* seguem restampadas normalmente');
+});
+
 test('unique global: 2ª ficha com mesmo phone viola', async () => {
   await upsertConnectedNumber(pool, { workspaceId: 'ws-1', evolutionInstance: 'a', phone: '+5531222', createdBy: null });
   await assert.rejects(() => pool.query(`INSERT INTO whatsapp_numbers (workspace_id, evolution_instance, phone, status) VALUES ('ws-2','b','+5531222','connected')`));

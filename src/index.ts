@@ -13,6 +13,7 @@ import { registerEpisodesRoutes } from './episodes/routes.js';
 import { registerMemoriaRoutes } from './lua/routes.js';
 import { registerProvisionRoutes } from './whatsapp/provision-routes.js';
 import { registerReadRoutes } from './whatsapp/read-routes.js';
+import { registerGroupReadRoutes } from './whatsapp/group-read-routes.js';
 import { registerBoardRoutes } from './whatsapp/board-routes.js';
 import { registerWriteRoutes } from './whatsapp/write-routes.js';
 import { registerOpportunityRoutes } from './whatsapp/opportunity-routes.js';
@@ -34,6 +35,7 @@ import { startOutboxDispatcher } from './events/dispatcher.js';
 import { startLuaScheduler } from './lua/scheduler.js';
 import { startFirefliesImportCron } from './integrations/fireflies/import-cron.js';
 import { startProvisioningReaperCron } from './whatsapp/provisioning-reaper.js';
+import { startGroupSyncCron } from './whatsapp/group-sync-cron.js';
 import { startConnectionAlertSweep } from './whatsapp/connection-alerts.js';
 import { startPresenceKeepalive } from './whatsapp/presence-keepalive.js';
 import { startTranscriptionPoller } from './transcription/poller.js';
@@ -149,6 +151,8 @@ async function main() {
     registerReadRoutes(scope, { pool, panelToken: config.PANEL_TOKEN });
     // GET /whatsapp/board (CRM v3 Fase C): projeção das 5 colunas do kanban.
     registerBoardRoutes(scope, { pool, panelToken: config.PANEL_TOKEN });
+    // Contrato group_v1: conversa de grupo INTERNO no workspace do cliente.
+    registerGroupReadRoutes(scope, { pool, panelToken: config.PANEL_TOKEN });
   });
 
   // Contrato de ESCRITA WhatsApp (painel central): auth X-Panel-Token.
@@ -238,6 +242,14 @@ async function main() {
   startProvisioningReaperCron(app.log, {
     pool,
     evolution: { baseUrl: config.EVOLUTION_API_URL, apiKey: config.EVOLUTION_API_KEY },
+  });
+
+  // Cron diário (04:30 BRT) dos grupos vinculados: subjects + roster + fotos + identidades.
+  startGroupSyncCron(app.log, {
+    pool,
+    evolution: { baseUrl: config.EVOLUTION_API_URL, apiKey: config.EVOLUTION_API_KEY },
+    avatarBudget: config.GROUP_AVATAR_BUDGET_PER_RUN,
+    identityBudget: 50,
   });
 
   // Sweep de queda de conexão WhatsApp: alerta (painel + WhatsApp Saturno) quando um

@@ -126,16 +126,102 @@ export async function getBase64FromMediaMessage(
 }
 
 /**
+ * Participantes crus da Evolution → `{ phone, isAdmin, isLid }`.
+ *
+ * O telefone TEM que sair no mesmo formato do `author` das mensagens, que é
+ * `normalizeGroupJid(canonicalJid(key.participant, key.participantAlt))`
+ * (src/webhook/evolution.ts:63-65). Aplicar só `normalizeGroupJid` produziria
+ * '+<lid>' onde a mensagem tem '+5531…': roster duplicado, join furado com
+ * messages.author e um LID mandado ao resolvedor do Bloquim como se fosse
+ * telefone.
+ *
+ * `isLid` = o payload não trouxe o alt e o id continua sendo LID. Não é erro (é
+ * o que o WhatsApp entrega); só não é telefone, e quem consome trata assim.
+ *
+ * `admin` vem como 'admin' | 'superadmin' | null.
+ */
+export function parseParticipants(raw: any): Array<{ phone: string; isAdmin: boolean; isLid: boolean }> {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .filter((p) => typeof p?.id === 'string')
+    .map((p) => {
+      // A Evolution não é consistente no nome do campo alternativo entre
+      // endpoints; aceitamos os shapes conhecidos e caímos no id quando não vem.
+      const canonical = canonicalJid(p.id, p.jidAlt ?? p.participantAlt ?? p.phoneNumber ?? null);
+      return {
+        phone: normalizeGroupJid(canonical),
+        isAdmin: p.admin === 'admin' || p.admin === 'superadmin',
+        isLid: canonical.endsWith('@lid'),
+      };
+    });
+}
+
+/**
+ * URL da foto de perfil (CDN do WhatsApp, EXPIRA). `null` = **sem foto pública**,
+ * que é resultado legítimo e precisa ser distinguível de falha.
+ *
+ * NÃO usa o `call()` deste arquivo de propósito, por duas razões medidas:
+ *  - `call()` lança `Error` genérico com o status só embutido na string, então
+ *    404 (sem foto) e 500 (Evolution com problema) chegariam idênticos ao sweep —
+ *    e "sem foto" cairia no contador de falhas até o participante ser expulso da
+ *    fila sem nunca receber o carimbo de `avatar_fetched_at`;
+ *  - `call()` não tem timeout (nenhum `AbortSignal`), e este é um sweep de dezenas
+ *    de chamadas seriais: uma pendurada trava o ciclo inteiro.
+ */
+export async function fetchProfilePictureUrl(
+  deps: EvolutionDeps, instance: string, number: string,
+): Promise<string | null> {
+  const f = deps.fetch ?? fetch;
+  const res = await f(`${deps.baseUrl}/chat/fetchProfilePictureUrl/${instance}`, {
+    method: 'POST',
+    headers: { apikey: deps.apiKey, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ number }),
+    signal: AbortSignal.timeout(15000),
+  } as any);
+  // 404/400 = não há foto pública para esse número. Não é erro.
+  if (res.status === 404 || res.status === 400) return null;
+  if (!res.ok) throw new Error(`Evolution fetchProfilePictureUrl → ${res.status}`);
+  const r = await res.json().catch(() => null);
+  const url = (r as any)?.profilePictureUrl ?? (r as any)?.profilePicUrl ?? null;
+  return typeof url === 'string' && url.length > 0 ? url : null;
+}
+
+/**
  * Lista os grupos da instância. Shape do retorno da Evolution varia por versão —
  * cobrimos array direto e {groups:[...]}; cada item tem id ('<id>@g.us') + subject.
+ *
+ * NÃO usa o `call()` deste arquivo de propósito (mesma razão de
+ * `fetchProfilePictureUrl` abaixo): `call()` não tem timeout, e
+ * `?getParticipants=true` é a chamada mais pesada que fazemos à Evolution — o
+ * `groupFetchAllParticipating` do Baileys sobre TODOS os grupos do número
+ * (~140 em produção). Se pendurar, o guard `running` do cron de grupos
+ * (`group-sync-cron.ts`) só reseta no `finally`, que nunca chega — o ciclo
+ * morre até o próximo restart do processo. Timeout aqui, não no `call()`
+ * genérico: `call()` é usado por todo o resto do worker, e mudar o timeout
+ * default é risco fora do escopo desta feature.
  */
+const FETCH_ALL_GROUPS_TIMEOUT_MS = 120_000;
+
 export async function fetchAllGroups(
   deps: EvolutionDeps,
-  instance: string
-): Promise<Array<{ jid: string; subject: string | null }>> {
-  const r = await call(deps, 'GET', `/group/fetchAllGroups/${instance}?getParticipants=false`);
+  instance: string,
+  opts?: { participants?: boolean },
+): Promise<Array<{ jid: string; subject: string | null; participants?: Array<{ phone: string; isAdmin: boolean; isLid: boolean }> }>> {
+  const want = opts?.participants === true;
+  const f = deps.fetch ?? fetch;
+  const res = await f(`${deps.baseUrl}/group/fetchAllGroups/${instance}?getParticipants=${want}`, {
+    method: 'GET',
+    headers: { apikey: deps.apiKey, 'Content-Type': 'application/json' },
+    signal: AbortSignal.timeout(FETCH_ALL_GROUPS_TIMEOUT_MS),
+  } as any);
+  if (!res.ok) throw new Error(`Evolution fetchAllGroups ${instance} → ${res.status}`);
+  const r: any = await res.json();
   const arr: any[] = Array.isArray(r) ? r : Array.isArray(r?.groups) ? r.groups : [];
   return arr
     .filter((g) => typeof g?.id === 'string')
-    .map((g) => ({ jid: normalizeGroupJid(g.id), subject: g.subject ?? g.subjectName ?? null }));
+    .map((g) => ({
+      jid: normalizeGroupJid(g.id),
+      subject: g.subject ?? g.subjectName ?? null,
+      ...(want ? { participants: parseParticipants(g.participants) } : {}),
+    }));
 }
