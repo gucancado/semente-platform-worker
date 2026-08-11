@@ -29,6 +29,12 @@ export async function runGroupSyncCycle(
   pool: Pool, deps: EvolutionDeps, budgets: { avatars: number; identities: number },
   log: { info: Function; error: Function },
 ): Promise<void> {
+  // `whatsapp_number_id IS NOT NULL` já EXCLUI as linhas de escopo 'agent'
+  // (grupo da organização, hoje só 'saturno' — ver group-links.ts). Esse
+  // escopo não tem número/instância Evolution pra sincronizar roster/subject
+  // nem orçamento de avatares — fica de fora do ciclo até o número da
+  // organização existir de fato em `whatsapp_numbers`. Não é uma omissão: é
+  // o filtro que já protege esse caso, documentado aqui pra quem for mexer.
   const { rows } = await pool.query(
     `SELECT whatsapp_number_id AS id, jid
        FROM whatsapp_groups

@@ -2,8 +2,9 @@ import type { FastifyInstance } from 'fastify';
 import type { Pool } from 'pg';
 import { listLinkedGroups, resolveLinkedGroup, type LinkedGroup } from './group-links.js';
 import { listThreadMessages } from './read-queries.js';
+import { listGroupMessagesByAgent } from './group-agent-messages.js';
 import { exportConversation } from './export.js';
-import { listParticipants } from './group-participants.js';
+import { listParticipants, type GroupParticipant } from './group-participants.js';
 import { presignGet, whatsappMediaBucket } from '../integrations/r2.js';
 import { requirePanelToken } from './provision-routes.js';
 import { defaultRouteAuthz, gateAdmin, type RouteAuthz } from './route-authz.js';
@@ -14,9 +15,8 @@ import { emptyToUndefined } from './query-coerce.js';
  * Contrato `group_v1` — leitura READ-ONLY da conversa de um grupo de WhatsApp
  * INTERNO da equipe, no contexto do workspace do CLIENTE sobre o qual o grupo
  * conversa. NÃO é o CRM de atendimento (esse é `read-routes.ts`, number-centric,
- * com triagem/oportunidades): aqui um único número (saturno) serve N workspaces,
- * e quem autoriza é o VÍNCULO grupo→workspace, não a membership no workspace do
- * número.
+ * com triagem/oportunidades): aqui um único número/agente interno serve N
+ * workspaces, e quem autoriza é o VÍNCULO grupo→workspace.
  *
  * Ordem de checagem, em TODA rota com :jid (a ordem é o gate de privacidade):
  *   1. workspace_id ausente        → 400
@@ -26,19 +26,41 @@ import { emptyToUndefined } from './query-coerce.js';
  *   5. dados
  * O gate ANTES da resolução é deliberado: um não-admin recebe 403 sem descobrir
  * se aquele grupo existe.
+ *
+ * ⚠️ GATE 2 REMOVIDO (decisão de produto, 2026-08-11): havia um segundo gate
+ * aqui ("é membro do workspace do NÚMERO ⇒ é da equipe") que barrava um admin
+ * do workspace do CLIENTE de ler a conversa interna sobre ele — só que o
+ * número real que monitora os grupos é da ORGANIZAÇÃO, não tem workspace
+ * próprio, e não vai ganhar um tão cedo. Sem um "workspace do número" pra
+ * checar, o gate não tinha mais como funcionar. A autorização hoje é SÓ
+ * admin do workspace vinculado (gate 1 acima) — o dono do produto aceitou
+ * conscientemente o risco de um admin do cliente ver essa conversa. Não
+ * reintroduzir sem uma decisão de produto nova (ver `group-links.ts`).
  */
 
-/** Envelope comum; `number` é o do saturno (informativo, não é escopo de autz). */
+/**
+ * Envelope comum. `numberId` é informativo (não é escopo de autz) e só existe
+ * no escopo 'number' — no escopo 'agent' (grupo da organização, sem número)
+ * fica `null`. `scope` deixa explícito pro consumidor (painel) qual dos dois
+ * é, já que roster/export têm disponibilidade diferente por escopo.
+ */
 function groupContext(g: LinkedGroup) {
-  return { workspaceId: g.linkedWorkspaceId, group: { jid: g.jid, subject: g.subject }, numberId: g.numberId };
+  return {
+    workspaceId: g.linkedWorkspaceId,
+    group: { jid: g.jid, subject: g.subject },
+    numberId: g.scope.kind === 'number' ? g.scope.numberId : null,
+    scope: g.scope.kind,
+  };
 }
+
+type ParticipantView = Awaited<ReturnType<typeof withAvatarUrls>>[number];
 
 /**
  * Roster com `avatarKey` (interno) trocado por `avatarUrl` presigned (público).
  * Presign curto (120s) — o mesmo TTL da rota de áudio. Falha de R2 não derruba
  * o roster: o avatar cai pras iniciais no lugar de quebrar a resposta inteira.
  */
-async function withAvatarUrls(raw: Awaited<ReturnType<typeof listParticipants>>) {
+async function withAvatarUrls(raw: GroupParticipant[]) {
   return Promise.all(raw.map(async (p) => {
     let avatarUrl: string | null = null;
     if (p.avatarKey) {
@@ -58,7 +80,7 @@ export function registerGroupReadRoutes(
   const auth = requirePanelToken(deps.panelToken);
 
   /**
-   * Passos 1-5 comuns. Devolve o grupo, ou null quando a resposta já foi enviada.
+   * Passos 1-4 comuns. Devolve o grupo, ou null quando a resposta já foi enviada.
    *
    * O gate roda no `workspace_id` que o CALLER alegou (query param) — não no
    * `linkedWorkspaceId` do banco, que só existe depois de resolver. A igualdade
@@ -73,32 +95,7 @@ export function registerGroupReadRoutes(
     if (!await gateAdmin(req, reply, ws, authz)) return null;
     const g = await resolveLinkedGroup(deps.pool, ws, req.params.jid);
     if (!g) { reply.code(404).send({ error: 'group_not_linked' }); return null; }
-    // Gate 2 — EQUIPE. Ver comentário de `assertTeamMember`.
-    if (!await gateTeam(req, reply, g, authz)) return null;
     return g;
-  }
-
-  /**
-   * Segundo gate: o ator também precisa ser MEMBRO do workspace do NÚMERO.
-   *
-   * Por que não basta "admin do workspace do cliente": o workspace do cliente no
-   * Bloquim pode ter pessoas do próprio cliente, inclusive como admin — e o que
-   * esta rota devolve é a conversa INTERNA da equipe *sobre* esse cliente.
-   * Sozinho, o gate de admin entregaria essa conversa exatamente a quem ela
-   * discute. Ser membro do workspace do número interno (saturno) é a definição
-   * operacional de "é da equipe", e o cliente nunca é.
-   *
-   * 403 sem distinguir de "não é admin": quem não passa aqui não deve aprender
-   * que o vínculo existe.
-   */
-  async function gateTeam(req: any, reply: any, g: LinkedGroup, authzImpl: RouteAuthz): Promise<boolean> {
-    try {
-      await authzImpl.assertMember(req.actingUser, g.numberWorkspaceId);
-      return true;
-    } catch {
-      reply.code(403).send({ error: 'forbidden' });
-      return false;
-    }
   }
 
   // ── GET /whatsapp/groups ─────────────────────────────────────────────────────
@@ -109,29 +106,27 @@ export function registerGroupReadRoutes(
     if (!req.actingUser) return reply.code(400).send({ error: 'x-acting-user required' });
     if (!await gateAdmin(req, reply, ws, authz)) return;
     const linked = await listLinkedGroups(deps.pool, ws);
-    // Gate 2 (equipe) por grupo: sem ser membro do workspace do número, o grupo
-    // simplesmente não entra na lista — mesma política do gateTeam das rotas
-    // individuais, sem revelar nada por diferença de resposta.
-    const allowed = [];
-    for (const g of linked) {
-      try {
-        await authz.assertMember(req.actingUser, g.numberWorkspaceId);
-        allowed.push(g);
-      } catch { /* não é da equipe → o grupo não existe pra ele */ }
-    }
     const groups = [];
-    for (const g of allowed) {
-      // Última mensagem + contagem por grupo. Escopo pelo NÚMERO (é onde as
-      // mensagens vivem), nunca por workspace_id = <cliente>. `lastText` é
-      // CONTEÚDO de conversa, não metadado: o filtro triplo aqui é a mesma
-      // fronteira de isolamento da rota de mensagens, não uma otimização.
-      const { rows } = await deps.pool.query(
-        `SELECT MAX(created_at) AS last_at, COUNT(*)::int AS count,
-                (ARRAY_AGG(text ORDER BY created_at DESC))[1] AS last_text
-           FROM messages
-          WHERE whatsapp_number_id = $1 AND workspace_id = $2 AND identifier = $3`,
-        [g.numberId, g.numberWorkspaceId, g.jid],
-      );
+    for (const g of linked) {
+      // Última mensagem + contagem por grupo. Escopo pela MESMA chave que
+      // identifica a conversa daquele grupo (número+workspace, ou agent) — é
+      // a mesma fronteira de isolamento da rota de mensagens, não uma
+      // otimização. `lastText` é CONTEÚDO de conversa, não metadado.
+      const { rows } = g.scope.kind === 'number'
+        ? await deps.pool.query(
+            `SELECT MAX(created_at) AS last_at, COUNT(*)::int AS count,
+                    (ARRAY_AGG(text ORDER BY created_at DESC))[1] AS last_text
+               FROM messages
+              WHERE whatsapp_number_id = $1 AND workspace_id = $2 AND identifier = $3`,
+            [g.scope.numberId, g.scope.numberWorkspaceId, g.jid],
+          )
+        : await deps.pool.query(
+            `SELECT MAX(created_at) AS last_at, COUNT(*)::int AS count,
+                    (ARRAY_AGG(text ORDER BY created_at DESC))[1] AS last_text
+               FROM messages
+              WHERE agent = $1 AND whatsapp_number_id IS NULL AND identifier = $2`,
+            [g.scope.agent, g.jid],
+          );
       const r = rows[0] ?? {};
       groups.push({
         jid: g.jid,
@@ -151,17 +146,25 @@ export function registerGroupReadRoutes(
     const g = await gateAndResolve(req, reply);
     if (!g) return;
     const { limit, cursor } = req.query;
-    const result = await listThreadMessages(deps.pool, {
-      workspaceId: g.numberWorkspaceId,   // DADOS: workspace do número
-      numberId: g.numberId,
-      identifier: g.jid,
-      limit: Number(limit ?? 50),
-      cursor: emptyToUndefined(cursor),
-    });
+    const result = g.scope.kind === 'number'
+      ? await listThreadMessages(deps.pool, {
+          workspaceId: g.scope.numberWorkspaceId,   // DADOS: workspace do número
+          numberId: g.scope.numberId,
+          identifier: g.jid,
+          limit: Number(limit ?? 50),
+          cursor: emptyToUndefined(cursor),
+        })
+      : await listGroupMessagesByAgent(deps.pool, {
+          agent: g.scope.agent,
+          identifier: g.jid,
+          limit: Number(limit ?? 50),
+          cursor: emptyToUndefined(cursor),
+        });
     logAccess(deps.pool, {
       actor: req.actingUser, action: 'group_messages',
       workspaceId: g.linkedWorkspaceId,   // AUDITORIA: workspace do cliente
-      numberId: g.numberId, identifier: g.jid,
+      numberId: g.scope.kind === 'number' ? g.scope.numberId : null,
+      identifier: g.jid,
     });
     return reply.send({ schema: 'group_v1', context: groupContext(g), ...result });
   });
@@ -170,11 +173,21 @@ export function registerGroupReadRoutes(
   app.get('/whatsapp/groups/:jid/export', { preHandler: auth }, async (req: any, reply) => {
     const g = await gateAndResolve(req, reply);
     if (!g) return;
+    if (g.scope.kind === 'agent') {
+      // exportConversation (export.ts) é number-scoped por construção (usa
+      // isGroupThread + listThreadMessages com numberId/workspaceId — nenhum
+      // dos dois existe pra um grupo da organização). Adaptá-la pro escopo
+      // 'agent' seria invasivo numa feature que, além de nova, ainda está
+      // INERTE em produção (zero vínculos criados). Preferimos um erro
+      // explícito a inventar um export que leia o escopo errado ou finja
+      // sucesso com transcript vazio.
+      return reply.code(501).send({ error: 'export_nao_suportado_para_grupo_da_organizacao' });
+    }
     const { since, until, max_messages, order } = req.query;
     const ord = order === 'head' || order === 'tail' ? order : undefined;
     const out = await exportConversation(deps.pool, {
-      workspaceId: g.numberWorkspaceId,
-      numberId: g.numberId,
+      workspaceId: g.scope.numberWorkspaceId,
+      numberId: g.scope.numberId,
       identifier: g.jid,
       since: emptyToUndefined(since),
       until: emptyToUndefined(until),
@@ -183,7 +196,7 @@ export function registerGroupReadRoutes(
     });
     logAccess(deps.pool, {
       actor: req.actingUser, action: 'group_export',
-      workspaceId: g.linkedWorkspaceId, numberId: g.numberId, identifier: g.jid,
+      workspaceId: g.linkedWorkspaceId, numberId: g.scope.numberId, identifier: g.jid,
       meta: { messageCount: out.messageCount },
     });
     return reply.send({ schema: 'group_v1', context: groupContext(g), ...out });
@@ -193,11 +206,17 @@ export function registerGroupReadRoutes(
   app.get('/whatsapp/groups/:jid/participants', { preHandler: auth }, async (req: any, reply) => {
     const g = await gateAndResolve(req, reply);
     if (!g) return;
-    const raw = await listParticipants(deps.pool, g.id);
-    const participants = await withAvatarUrls(raw);
+    // Roster depende do NÚMERO (é a instância Evolution que o cron usa pra
+    // sincronizar — ver group-sync-cron.ts). No escopo 'agent' não há número,
+    // então não há roster coletado — `[]` explícito, não uma query que hoje
+    // coincide em devolver vazia. Fica assim até o número da organização
+    // existir de fato em `whatsapp_numbers`.
+    const participants: ParticipantView[] = g.scope.kind === 'agent'
+      ? []
+      : await withAvatarUrls(await listParticipants(deps.pool, g.id));
     logAccess(deps.pool, {
       actor: req.actingUser, action: 'group_participants',
-      workspaceId: g.linkedWorkspaceId, numberId: g.numberId, identifier: g.jid,
+      workspaceId: g.linkedWorkspaceId, numberId: g.scope.kind === 'number' ? g.scope.numberId : null, identifier: g.jid,
     });
     return reply.send({ schema: 'group_v1', context: groupContext(g), participants });
   });
@@ -213,17 +232,25 @@ export function registerGroupReadRoutes(
   app.get('/whatsapp/groups/:jid/view', { preHandler: auth }, async (req: any, reply) => {
     const g = await gateAndResolve(req, reply);
     if (!g) return;
-    const [msgs, rawParticipants] = await Promise.all([
-      listThreadMessages(deps.pool, {
-        workspaceId: g.numberWorkspaceId, numberId: g.numberId, identifier: g.jid,
-        limit: Number(req.query.limit ?? 50), cursor: emptyToUndefined(req.query.cursor),
-      }),
-      listParticipants(deps.pool, g.id),
-    ]);
-    const participants = await withAvatarUrls(rawParticipants);
+    const limit = Number(req.query.limit ?? 50);
+    const cursor = emptyToUndefined(req.query.cursor);
+    let msgs: { messages: unknown[]; nextCursor: string | null };
+    let participants: ParticipantView[];
+    if (g.scope.kind === 'number') {
+      const [m, rawParticipants] = await Promise.all([
+        listThreadMessages(deps.pool, { workspaceId: g.scope.numberWorkspaceId, numberId: g.scope.numberId, identifier: g.jid, limit, cursor }),
+        listParticipants(deps.pool, g.id),
+      ]);
+      msgs = m;
+      participants = await withAvatarUrls(rawParticipants);
+    } else {
+      // Escopo 'agent': sem número, sem roster (mesma decisão de /participants acima).
+      msgs = await listGroupMessagesByAgent(deps.pool, { agent: g.scope.agent, identifier: g.jid, limit, cursor });
+      participants = [];
+    }
     logAccess(deps.pool, {
       actor: req.actingUser, action: 'group_messages',
-      workspaceId: g.linkedWorkspaceId, numberId: g.numberId, identifier: g.jid,
+      workspaceId: g.linkedWorkspaceId, numberId: g.scope.kind === 'number' ? g.scope.numberId : null, identifier: g.jid,
     });
     return reply.send({
       schema: 'group_v1', context: groupContext(g),
