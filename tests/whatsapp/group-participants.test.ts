@@ -80,13 +80,15 @@ test('listParticipants mapeia snake→camel e serializa a data', async () => {
   assert.equal(p.lastSeenAt, '2026-08-10T12:00:00.000Z');
 });
 
-// Quem saiu do grupo tem last_seen_at do sync ANTERIOR, menor que o updated_at
-// que o upsert do grupo acabou de gravar. É esse o marcador de "visto agora" —
-// não existe (nem precisa) uma coluna sync_started_at.
-test('listParticipants filtra por last_seen_at >= updated_at do grupo', async () => {
+// Quem saiu do grupo tem last_seen_at do sync ANTERIOR, menor que o
+// participants_synced_at que o upsert do grupo acabou de gravar. É esse o
+// marcador de "roster visto agora" — deliberadamente NÃO é `updated_at`
+// (esse avança em todo sync de subject, mesmo sem tocar participante nenhum;
+// usá-lo esvaziaria o roster a cada reconexão que não pediu participantes).
+test('listParticipants filtra por last_seen_at >= participants_synced_at do grupo', async () => {
   let sql = '';
   const pool = { query: async (s: string) => { sql = s; return { rows: [] }; } } as any;
   await listParticipants(pool, 7);
   assert.match(sql, /whatsapp_groups/);
-  assert.match(sql, /last_seen_at\s*>=/);
+  assert.match(sql, /last_seen_at\s*>=\s*g\.participants_synced_at/);
 });

@@ -43,11 +43,16 @@ export async function upsertParticipants(
 /**
  * Roster ATUAL do grupo, admins primeiro, depois por nome.
  *
- * O corte `last_seen_at >= g.updated_at` é o que separa quem está no grupo de
- * quem saiu: o upsert do grupo grava `updated_at = NOW()` ANTES de gravar os
- * participantes, então todo mundo visto no sync corrente tem `last_seen_at`
- * posterior, e quem saiu ficou com a data do sync anterior. Grupo nunca
- * sincronizado com participantes devolve lista vazia (nenhum participante ainda).
+ * O corte `last_seen_at >= g.participants_synced_at` é o que separa quem está
+ * no grupo de quem saiu: o upsert do grupo grava `participants_synced_at =
+ * NOW()` ANTES de gravar os participantes (só quando o sync pediu roster —
+ * ver `syncGroupSubjects`), então todo mundo visto no sync corrente tem
+ * `last_seen_at` posterior, e quem saiu ficou com a data do sync anterior.
+ * NÃO é `whatsapp_groups.updated_at` (esse avança em todo sync de subject,
+ * mesmo sem tocar participante nenhum — usá-lo esvaziaria o roster a cada
+ * reconexão). Grupo nunca sincronizado com participantes tem
+ * `participants_synced_at` NULL → `last_seen_at >= NULL` nunca é verdadeiro →
+ * lista vazia (correto: não há roster conhecido).
  */
 export async function listParticipants(pool: Pool, groupId: number): Promise<GroupParticipant[]> {
   const { rows } = await pool.query(
@@ -55,7 +60,7 @@ export async function listParticipants(pool: Pool, groupId: number): Promise<Gro
             p.bloquim_user_id, p.bloquim_name, p.last_seen_at
        FROM whatsapp_group_participants p
        JOIN whatsapp_groups g ON g.id = p.group_id
-      WHERE p.group_id = $1 AND p.last_seen_at >= g.updated_at
+      WHERE p.group_id = $1 AND p.last_seen_at >= g.participants_synced_at
       ORDER BY p.is_admin DESC, COALESCE(p.bloquim_name, p.push_name, p.phone)`,
     [groupId],
   );

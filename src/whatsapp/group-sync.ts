@@ -12,10 +12,19 @@ import { upsertParticipants } from './group-participants.js';
  * grupo→workspace do cliente (mig 057), preenchido à mão e independente do
  * workspace do número.
  *
- * ⚠️ A ORDEM importa: o upsert do grupo grava `updated_at = NOW()` ANTES dos
- * participantes daquele grupo. É isso que faz `last_seen_at >= g.updated_at`
- * (o corte de `listParticipants`) significar "visto neste sync" — inverter a
- * ordem faria o roster inteiro sumir da tela.
+ * ⚠️ `participants_synced_at` é o marcador PRÓPRIO do roster — NÃO reusar
+ * `updated_at` (esse avança em TODO sync, inclusive os subject-only do
+ * on-connect, que não tocam participante nenhum; usá-lo como corte esvaziaria
+ * o roster inteiro assim que uma reconexão acontecesse depois do cron). Só
+ * avança quando `wantPeople` é true (`CASE WHEN $5 ...`); do contrário a
+ * coluna fica INTOCADA (`whatsapp_groups.participants_synced_at` no ELSE do
+ * UPDATE).
+ *
+ * ⚠️ A ORDEM importa: o upsert do grupo grava `participants_synced_at = NOW()`
+ * ANTES dos participantes daquele grupo. É isso que faz
+ * `last_seen_at >= g.participants_synced_at` (o corte de `listParticipants`)
+ * significar "visto neste sync" — inverter a ordem faria o roster inteiro
+ * sumir da tela.
  */
 export async function syncGroupSubjects(
   pool: Pool,
@@ -32,12 +41,13 @@ export async function syncGroupSubjects(
   for (const g of groups) {
     if (!g.subject) continue;
     const { rows } = await pool.query(
-      `INSERT INTO whatsapp_groups (jid, subject, whatsapp_number_id, workspace_id, updated_at)
-       VALUES ($1, $2, $3, $4, NOW())
+      `INSERT INTO whatsapp_groups (jid, subject, whatsapp_number_id, workspace_id, updated_at, participants_synced_at)
+       VALUES ($1, $2, $3, $4, NOW(), CASE WHEN $5 THEN NOW() ELSE NULL END)
        ON CONFLICT (whatsapp_number_id, jid) WHERE whatsapp_number_id IS NOT NULL
-       DO UPDATE SET subject = EXCLUDED.subject, workspace_id = EXCLUDED.workspace_id, updated_at = NOW()
+       DO UPDATE SET subject = EXCLUDED.subject, workspace_id = EXCLUDED.workspace_id, updated_at = NOW(),
+         participants_synced_at = CASE WHEN $5 THEN NOW() ELSE whatsapp_groups.participants_synced_at END
        RETURNING id`,
-      [g.jid, g.subject, numberId, num.workspaceId],
+      [g.jid, g.subject, numberId, num.workspaceId, wantPeople],
     );
     synced++;
     const groupId = rows[0] ? Number(rows[0].id) : null;

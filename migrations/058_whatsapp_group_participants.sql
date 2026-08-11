@@ -27,3 +27,9 @@ CREATE TABLE IF NOT EXISTS whatsapp_group_participants (
 
 CREATE INDEX IF NOT EXISTS idx_wa_group_participants_group
   ON whatsapp_group_participants (group_id);
+
+-- Marcador PRÓPRIO de "roster sincronizado", separado de whatsapp_groups.updated_at
+-- (que avança em TODO sync de subject, inclusive os subject-only do on-connect,
+-- sem tocar participante nenhum — usá-lo como corte esvaziaria o roster inteiro
+-- assim que qualquer reconexão acontecesse depois do cron de participantes).
+ALTER TABLE whatsapp_groups ADD COLUMN IF NOT EXISTS participants_synced_at TIMESTAMPTZ;
