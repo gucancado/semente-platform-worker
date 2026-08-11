@@ -265,7 +265,10 @@ export async function runJudgmentForConversation(
     return { applied: [], skipped: ['invalid_decision'], stale: rec.stale, judged: true };
   }
 
-  const result = await applyFn(pool, ctx, parsed.decision, { model: provider.model });
+  const result = await applyFn(pool, ctx, parsed.decision, {
+    model: provider.model,
+    stickyDiscarded: parsed.stickyDiscarded,
+  });
   return { ...result, judged: true };
 }
 
@@ -275,6 +278,18 @@ export interface JudgmentSweepResult {
   stale: number;
   errors: number;
   skippedByCap: number;
+  /**
+   * Conversas em que o LLM foi chamado (custo pago) e o CLAIM caiu no UNIQUE — ou seja,
+   * aquele input já tinha sido julgado e a decisão foi descartada. Em regime saudável é
+   * ZERO: a query de pendentes não deveria devolver input já visto.
+   *
+   * Existe porque a ausência desse contador escondeu por 11 dias o bug de precisão do
+   * watermark (ms × µs): 143 chamadas produziram 50 julgamentos e o resumo dizia
+   * "processed 26, applied 1", que se lê como "a IA decidiu não agir", não como
+   * "24 chamadas viraram lixo". Qualquer valor > 0 sustentado é sinal de que a
+   * eligibilidade e o CLAIM discordam sobre o que já foi julgado.
+   */
+  alreadyJudged: number;
 }
 
 export interface RunSweepDeps extends RunJudgmentDeps {
@@ -329,18 +344,31 @@ export async function runJudgmentSweep(
   let applied = 0;
   let stale = 0;
   let errors = 0;
+  let alreadyJudged = 0;
   for (const conv of all) {
     try {
       const r = await runJudgmentForConversation(pool, provider, conv, deps);
       if (r.stale) stale += 1;
       if (r.applied.length > 0) applied += 1;
+      if (r.skipped.includes('already_judged')) alreadyJudged += 1;
     } catch (err) {
       errors += 1;
       console.warn(`[ai-judgment] julgamento falhou (${conv.numberId}:${conv.identifier}): ${(err as Error).message}`);
     }
   }
 
-  return { processed: all.length, applied, stale, errors, skippedByCap };
+  // Chamada de LLM paga cujo resultado foi descartado no CLAIM. Zero é o esperado —
+  // qualquer valor aqui é desperdício de custo E sinal de divergência entre a query de
+  // pendentes e o watermark gravado (foi assim que o bug de precisão ms×µs passou 11
+  // dias despercebido). WARN, não info: não é um estado normal de operação.
+  if (alreadyJudged > 0) {
+    console.warn(
+      `[ai-judgment] ${alreadyJudged}/${all.length} conversa(s) já tinham julgamento para o mesmo input — ` +
+      `o LLM foi chamado e a decisão descartada (custo desperdiçado). Suspeite da eligibilidade em PENDING_SQL.`,
+    );
+  }
+
+  return { processed: all.length, applied, stale, errors, skippedByCap, alreadyJudged };
 }
 
 export interface StartRunnerOpts {

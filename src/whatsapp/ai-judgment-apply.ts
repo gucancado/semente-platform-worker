@@ -53,6 +53,14 @@ export interface ApplyJudgmentResult {
  *  para provar a orquestração sem tocar Postgres. `model` vai pra coluna de auditoria. */
 export interface ApplyJudgmentDeps {
   model?: string | null;
+  /**
+   * Dimensões que o validador (D3) anulou por trava humana (`sticky:is_lead`,
+   * `sticky:qualify`, `sticky:status`). Entram no `skipped` da row de auditoria pra que
+   * "quantas vezes o humano venceu a IA" seja consultável em SQL — antes disso o sticky
+   * só existia em stdout. Não afeta nenhuma escrita: quando chega aqui a decisão já veio
+   * com essas dimensões em null.
+   */
+  stickyDiscarded?: string[];
   computeSticky?: typeof computeSticky;
   applyLeadUpdate?: typeof applyLeadUpdate;
   applyOppPatchInTx?: typeof applyOppPatchInTx;
@@ -181,7 +189,9 @@ export async function applyJudgment(
 
   return withConversationLock<ApplyJudgmentResult>(pool, ctx.numberId, ctx.identifier, async (client) => {
     const applied: string[] = [];
-    const skipped: string[] = [];
+    // Semeado com o que o validador já anulou por trava humana: a auditoria tem que
+    // registrar a dimensão que a IA TENTOU mexer e não pôde, não só o que ela escreveu.
+    const skipped: string[] = [...(deps.stickyDiscarded ?? [])];
 
     // ── 1. STALE: chegou mensagem nova desde o snapshot? ──
     const wm = await client.query(

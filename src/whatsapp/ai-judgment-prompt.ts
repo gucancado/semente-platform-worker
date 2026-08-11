@@ -297,7 +297,7 @@ function warn(msg: string): void {
 export function parseJudgmentDecision(
   raw: string,
   ctx: JudgmentContext,
-): { ok: true; decision: JudgmentDecision } | { ok: false; error: string } {
+): { ok: true; decision: JudgmentDecision; stickyDiscarded: string[] } | { ok: false; error: string } {
   const obj = tryParseObject(raw);
   if (!obj) return { ok: false, error: 'output não é um objeto JSON válido' };
 
@@ -305,11 +305,19 @@ export function parseJudgmentDecision(
   if (!parsed.success) return { ok: false, error: 'estrutura do JSON inválida' };
   const r = parsed.data;
 
+  // Dimensões que a IA respondeu e foram anuladas por decisão humana anterior. Vão pro
+  // `applied.skipped` da row de auditoria (D4) — antes disso o sticky só existia como
+  // linha de stdout, então "com que frequência o humano vence a IA" não era consultável
+  // no banco, que é justamente a métrica de qualidade do motor. Códigos ESTÁVEIS
+  // (`sticky:<dimensão>`) porque isto é para ser agregado em query, não lido por humano.
+  const stickyDiscarded: string[] = [];
+
   // ── triagem ──
   let triage = r.triage;
   let notLeadReason = r.not_lead_reason;
   if (ctx.sticky.isLead && triage !== null) {
     warn('triage descartada: dimensão is_lead travada por humano');
+    stickyDiscarded.push('sticky:is_lead');
     triage = null;
   }
   if (triage !== 'not_lead') {
@@ -338,10 +346,12 @@ export function parseJudgmentDecision(
       let lossReason = r.open_opp.loss_reason;
       if (ctx.sticky.isQualified && qualify !== null) {
         warn('open_opp.qualify descartado: qualificação travada por humano');
+        stickyDiscarded.push('sticky:qualify');
         qualify = null;
       }
       if (ctx.sticky.status && status !== null) {
         warn('open_opp.status descartado: status travado por humano');
+        stickyDiscarded.push('sticky:status');
         status = null;
       }
       if (lossReason !== null) {
@@ -377,6 +387,7 @@ export function parseJudgmentDecision(
       closedAction = null;
     } else if (closedAction === 'reabrir' && ctx.sticky.status) {
       warn('closed_action=reabrir descartado: status travado por humano');
+      stickyDiscarded.push('sticky:status');
       closedAction = null;
     }
   }
@@ -400,5 +411,9 @@ export function parseJudgmentDecision(
   return {
     ok: true,
     decision: { triage, notLeadReason, openOpp, closedAction, tags, rationale: r.rationale },
+    // Dedupe: `sticky:status` pode ser empurrado duas vezes (open_opp.status e
+    // closed_action=reabrir são mutuamente exclusivos por estado, mas o contrato não
+    // depende disso) — a auditoria quer a dimensão travada, não quantas vezes bateu.
+    stickyDiscarded: [...new Set(stickyDiscarded)],
   };
 }

@@ -193,6 +193,31 @@ test('ordem: lock → watermark → open_opp → last_closed → claim → stick
   ]);
 });
 
+test('stickyDiscarded do validador entra no `skipped` gravado na row de auditoria', async () => {
+  // A pendência não era "o sticky não funciona" — funciona. Era que a supressão só
+  // aparecia em stdout, então não dava pra medir em SQL quantas vezes a decisão humana
+  // prevaleceu sobre a IA. Aqui o rótulo tem que sobreviver até o UPDATE de `applied`.
+  const order: string[] = [];
+  const { pool, calls } = makeFakePool({
+    watermark: () => ({ rows: [{ m: new Date('2026-07-30T10:00:00.000Z') }] }),
+    open_opp: () => ({ rows: [] }),
+    claim: () => ({ rows: [{ id: 99 }] }),
+    last_closed: () => ({ rows: [] }),
+  }, order);
+  const { deps } = makeDeps(order);
+  const res = await applyJudgment(pool, baseCtx(), baseDecision({ triage: 'lead' }), {
+    ...deps,
+    stickyDiscarded: ['sticky:is_lead', 'sticky:qualify'],
+  });
+  assert.deepEqual(res.skipped, ['sticky:is_lead', 'sticky:qualify']);
+  assert.deepEqual(res.applied, ['triage:lead'], 'auditoria não altera o que é escrito');
+
+  const update = calls.find((c) => c.key === 'applied_update');
+  assert.ok(update, 'a row de auditoria foi atualizada');
+  const persisted = JSON.parse(String(update!.params[1]));
+  assert.deepEqual(persisted.skipped, ['sticky:is_lead', 'sticky:qualify'], 'chegou ao jsonb');
+});
+
 test('triagem não-lead com opp ganha (LeadCascadeGanhoError) pula SÓ a triagem; patch da opp segue', async () => {
   const order: string[] = [];
   const { pool } = makeFakePool({

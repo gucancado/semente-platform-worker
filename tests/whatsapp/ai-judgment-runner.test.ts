@@ -409,6 +409,23 @@ test('runJudgmentSweep: conta applied e stale por conversa', async () => {
   assert.equal(result.applied, 1);
   assert.equal(result.stale, 1);
   assert.equal(result.errors, 0);
+  // A 3ª conversa caiu no CLAIM (already_judged): LLM chamado, decisão descartada.
+  // Sem esse contador o resumo do run diz "processed 3, applied 1" e o desperdício
+  // fica invisível — foi o que escondeu o bug de precisão do watermark por 11 dias.
+  assert.equal(result.alreadyJudged, 1);
+});
+
+test('runJudgmentSweep: alreadyJudged é 0 quando nada bate no CLAIM (regime saudável)', async () => {
+  const pool = {} as unknown as Pool;
+  const result = await runJudgmentSweep(pool, fakeProvider(), {
+    fetchWorkspaces: async () => [{ workspaceId: 'ws', pipelineSince: 'PS' }],
+    fetchPending: async () => [pending(1, 'T2'), pending(2, 'T1')],
+    ...sweepDeps({
+      applyFn: (async () => ({ applied: ['triage:lead'], skipped: [], stale: false })) as any,
+    }),
+  });
+  assert.equal(result.alreadyJudged, 0);
+  assert.equal(result.applied, 2);
 });
 
 test('2 runs: decisão inválida grava judgment → 2º run NÃO re-chama o LLM (watermark avançou, anti-runaway)', async () => {

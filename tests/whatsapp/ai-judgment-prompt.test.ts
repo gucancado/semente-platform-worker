@@ -199,6 +199,40 @@ test('validador: sticky força triage e qualify a null', () => {
   assert.ok(r.ok);
   assert.equal(r.decision.triage, null); // is_lead travado
   assert.equal(r.decision.openOpp?.qualify, null); // qualify travado
+  // Auditável: o descarte por trava humana vira código estável, que o aplicador grava
+  // no `applied.skipped`. Antes isso só existia como linha de stdout, então "com que
+  // frequência o humano vence a IA" — a métrica de qualidade do motor — não era
+  // consultável no banco.
+  assert.deepEqual(r.stickyDiscarded.sort(), ['sticky:is_lead', 'sticky:qualify']);
+});
+
+test('validador: sem trava humana, stickyDiscarded é vazio', () => {
+  const raw = JSON.stringify({
+    triage: 'lead',
+    not_lead_reason: null,
+    open_opp: { qualify: true, status: null, loss_reason: null },
+    closed_action: null,
+    tags: [],
+    rationale: 'x',
+  });
+  const r = parseJudgmentDecision(raw, ctx({ openOpp }));
+  assert.ok(r.ok);
+  assert.deepEqual(r.stickyDiscarded, []);
+  assert.equal(r.decision.triage, 'lead'); // nada foi anulado
+});
+
+test('validador: sticky:status não duplica quando status e reabrir batem na mesma trava', () => {
+  const raw = JSON.stringify({
+    triage: null,
+    not_lead_reason: null,
+    open_opp: { qualify: null, status: 'ganho', loss_reason: null },
+    closed_action: null,
+    tags: [],
+    rationale: 'x',
+  });
+  const r = parseJudgmentDecision(raw, ctx({ openOpp, sticky: { ...NO_STICKY, status: true } }));
+  assert.ok(r.ok);
+  assert.deepEqual(r.stickyDiscarded, ['sticky:status']);
 });
 
 test('validador: loss_reason fora do catálogo e nao_lead → null', () => {
