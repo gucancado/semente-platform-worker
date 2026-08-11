@@ -48,6 +48,8 @@ const TZ = 'America/Sao_Paulo';
 export type LocalTime = {
   /** Hora 0-23 no fuso America/Sao_Paulo. */
   hour: number;
+  /** Minuto 0-59 no fuso America/Sao_Paulo. */
+  minute: number;
   /** 1=segunda ... 7=domingo (ISO), no fuso America/Sao_Paulo. */
   isoWeekday: number;
   /** Data local YYYY-MM-DD no fuso America/Sao_Paulo. */
@@ -83,9 +85,11 @@ export function localTimeInSaoPaulo(now: Date): LocalTime {
   const day = get('day');
   let hour = Number(get('hour'));
   if (hour === 24) hour = 0; // Intl pode emitir '24' para meia-noite
+  const minute = Number(get('minute'));
   const weekday = get('weekday'); // 'Mon'..'Sun'
   return {
     hour,
+    minute,
     isoWeekday: WEEKDAY_TO_ISO[weekday] ?? 0,
     date: `${year}-${month}-${day}`, // en-CA => YYYY-MM-DD
   };

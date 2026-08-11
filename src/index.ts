@@ -35,6 +35,7 @@ import { startOutboxDispatcher } from './events/dispatcher.js';
 import { startLuaScheduler } from './lua/scheduler.js';
 import { startFirefliesImportCron } from './integrations/fireflies/import-cron.js';
 import { startProvisioningReaperCron } from './whatsapp/provisioning-reaper.js';
+import { startGroupSyncCron } from './whatsapp/group-sync-cron.js';
 import { startConnectionAlertSweep } from './whatsapp/connection-alerts.js';
 import { startPresenceKeepalive } from './whatsapp/presence-keepalive.js';
 import { startTranscriptionPoller } from './transcription/poller.js';
@@ -241,6 +242,14 @@ async function main() {
   startProvisioningReaperCron(app.log, {
     pool,
     evolution: { baseUrl: config.EVOLUTION_API_URL, apiKey: config.EVOLUTION_API_KEY },
+  });
+
+  // Cron diário (04:30 BRT) dos grupos vinculados: subjects + roster + fotos + identidades.
+  startGroupSyncCron(app.log, {
+    pool,
+    evolution: { baseUrl: config.EVOLUTION_API_URL, apiKey: config.EVOLUTION_API_KEY },
+    avatarBudget: config.GROUP_AVATAR_BUDGET_PER_RUN,
+    identityBudget: 50,
   });
 
   // Sweep de queda de conexão WhatsApp: alerta (painel + WhatsApp Saturno) quando um
