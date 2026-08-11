@@ -13,6 +13,7 @@ import { registerEpisodesRoutes } from './episodes/routes.js';
 import { registerMemoriaRoutes } from './lua/routes.js';
 import { registerProvisionRoutes } from './whatsapp/provision-routes.js';
 import { registerReadRoutes } from './whatsapp/read-routes.js';
+import { registerGroupReadRoutes } from './whatsapp/group-read-routes.js';
 import { registerBoardRoutes } from './whatsapp/board-routes.js';
 import { registerWriteRoutes } from './whatsapp/write-routes.js';
 import { registerOpportunityRoutes } from './whatsapp/opportunity-routes.js';
@@ -149,6 +150,8 @@ async function main() {
     registerReadRoutes(scope, { pool, panelToken: config.PANEL_TOKEN });
     // GET /whatsapp/board (CRM v3 Fase C): projeção das 5 colunas do kanban.
     registerBoardRoutes(scope, { pool, panelToken: config.PANEL_TOKEN });
+    // Contrato group_v1: conversa de grupo INTERNO no workspace do cliente.
+    registerGroupReadRoutes(scope, { pool, panelToken: config.PANEL_TOKEN });
   });
 
   // Contrato de ESCRITA WhatsApp (painel central): auth X-Panel-Token.
