@@ -10,6 +10,7 @@ import { requirePanelToken } from './provision-routes.js';
 import { defaultRouteAuthz, gateAdmin, type RouteAuthz } from './route-authz.js';
 import { logAccess as defaultLogAccess, type LogAccessFn } from './access-log.js';
 import { emptyToUndefined } from './query-coerce.js';
+import { searchGroupMessages, resolveAnchor, listMessagesAround } from './group-search.js';
 
 /**
  * Contrato `group_v1` — leitura READ-ONLY da conversa de um grupo de WhatsApp
@@ -222,6 +223,31 @@ export function registerGroupReadRoutes(
     return reply.send({ schema: 'group_v1', context: groupContext(g), participants });
   });
 
+  // ── GET /whatsapp/groups/:jid/search ─────────────────────────────────────────
+  // Busca ILIKE na conversa do grupo. Validação de INPUT (q) roda ANTES do
+  // gate — mesma classe do `workspace_id required`: 400 de formato não revela
+  // nada. Access log NUNCA grava o q cru (PII), só o tamanho.
+  app.get('/whatsapp/groups/:jid/search', { preHandler: auth }, async (req: any, reply) => {
+    const rawQ = typeof req.query.q === 'string' ? req.query.q.trim() : '';
+    if (rawQ.length < 2) return reply.code(400).send({ error: 'q_too_short' });
+    if (rawQ.length > 200) return reply.code(400).send({ error: 'q_too_long' });
+    const g = await gateAndResolve(req, reply);
+    if (!g) return;
+    const parsed = Number.parseInt(req.query.limit, 10);
+    const limit = Number.isNaN(parsed) ? 30 : Math.min(100, Math.max(1, parsed));
+    const { hits, truncated } = await searchGroupMessages(deps.pool, {
+      scope: g.scope, identifier: g.jid, q: rawQ, limit,
+    });
+    logAccess(deps.pool, {
+      actor: req.actingUser, action: 'group_search',
+      workspaceId: g.linkedWorkspaceId,
+      numberId: g.scope.kind === 'number' ? g.scope.numberId : null,
+      identifier: g.jid,
+      meta: { qLength: rawQ.length, hitCount: hits.length },
+    });
+    return reply.send({ schema: 'group_v1', context: groupContext(g), hits, truncated });
+  });
+
   // ── GET /whatsapp/groups/:jid/view ───────────────────────────────────────────
   // Agregador do que a PÁGINA precisa: mensagens + roster num gate só.
   //
@@ -231,8 +257,30 @@ export function registerGroupReadRoutes(
   // A página precisa de grupo + mensagens + participantes; em rotas separadas
   // seriam 3 pares de gates por render, somados ao que o layout já faz.
   app.get('/whatsapp/groups/:jid/view', { preHandler: auth }, async (req: any, reply) => {
+    const around = emptyToUndefined(req.query.around);
+    if (around !== undefined && !/^\d+$/.test(around)) {
+      return reply.code(400).send({ error: 'around_invalid' });
+    }
     const g = await gateAndResolve(req, reply);
     if (!g) return;
+    if (around) {
+      const anchor = await resolveAnchor(deps.pool, { scope: g.scope, identifier: g.jid, id: around });
+      if (!anchor) return reply.code(404).send({ error: 'message_not_in_group' });
+      const [m, rawParticipants] = await Promise.all([
+        listMessagesAround(deps.pool, { scope: g.scope, identifier: g.jid, anchor }),
+        listParticipants(deps.pool, g.id),
+      ]);
+      logAccess(deps.pool, {
+        actor: req.actingUser, action: 'group_messages',
+        workspaceId: g.linkedWorkspaceId, numberId: g.scope.kind === 'number' ? g.scope.numberId : null, identifier: g.jid,
+      });
+      return reply.send({
+        schema: 'group_v1', context: groupContext(g),
+        group: { jid: g.jid, subject: g.subject },
+        ...m, participants: await withAvatarUrls(rawParticipants),
+        anchorId: Number(around),
+      });
+    }
     const limit = Number(req.query.limit ?? 50);
     const cursor = emptyToUndefined(req.query.cursor);
     let msgs: { messages: unknown[]; nextCursor: string | null };
