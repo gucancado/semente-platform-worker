@@ -5,6 +5,8 @@ export type GroupParticipant = {
   pushName: string | null;
   isAdmin: boolean;
   isLid: boolean;
+  /** LID de privacidade (dígitos, sem '@lid') — usado pra resolver menções `@<lid>` no texto. */
+  lid: string | null;
   avatarKey: string | null;
   bloquimUserId: string | null;
   bloquimName: string | null;
@@ -27,36 +29,44 @@ export type GroupParticipant = {
  * eles), e se o marcador vier depois ele fica LOGO À FRENTE do `last_seen_at`
  * que acabou de ser gravado — o `>=` falha pro lote inteiro e a lista some.
  * Omitir `syncedAt` mantém o `NOW()` do banco (usado só em teste).
+ *
+ * `lid`, igual a `push_name`, só sobrescreve quando o novo valor não é nulo
+ * (COALESCE) — nem toda chamada à Evolution traz o `id` cru (ex.: quando o
+ * telefone já é conhecido de um sync anterior sem o LID), e nulo não pode
+ * apagar um LID já persistido.
  */
 export async function upsertParticipants(
   pool: Pool,
   groupId: number,
-  people: Array<{ phone: string; pushName: string | null; isAdmin: boolean; isLid: boolean }>,
+  people: Array<{ phone: string; pushName: string | null; isAdmin: boolean; isLid: boolean; lid?: string | null }>,
   syncedAt?: Date,
 ): Promise<number> {
   let n = 0;
   for (const p of people) {
+    const lid = p.lid ?? null;
     if (syncedAt) {
       await pool.query(
-        `INSERT INTO whatsapp_group_participants (group_id, phone, push_name, is_admin, is_lid, last_seen_at)
+        `INSERT INTO whatsapp_group_participants (group_id, phone, push_name, is_admin, is_lid, lid, last_seen_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)
+         ON CONFLICT (group_id, phone) DO UPDATE
+           SET push_name = COALESCE(EXCLUDED.push_name, whatsapp_group_participants.push_name),
+               is_admin = EXCLUDED.is_admin,
+               is_lid = EXCLUDED.is_lid,
+               lid = COALESCE(EXCLUDED.lid, whatsapp_group_participants.lid),
+               last_seen_at = EXCLUDED.last_seen_at`,
+        [groupId, p.phone, p.pushName, p.isAdmin, p.isLid, lid, syncedAt],
+      );
+    } else {
+      await pool.query(
+        `INSERT INTO whatsapp_group_participants (group_id, phone, push_name, is_admin, is_lid, lid)
          VALUES ($1, $2, $3, $4, $5, $6)
          ON CONFLICT (group_id, phone) DO UPDATE
            SET push_name = COALESCE(EXCLUDED.push_name, whatsapp_group_participants.push_name),
                is_admin = EXCLUDED.is_admin,
                is_lid = EXCLUDED.is_lid,
-               last_seen_at = EXCLUDED.last_seen_at`,
-        [groupId, p.phone, p.pushName, p.isAdmin, p.isLid, syncedAt],
-      );
-    } else {
-      await pool.query(
-        `INSERT INTO whatsapp_group_participants (group_id, phone, push_name, is_admin, is_lid)
-         VALUES ($1, $2, $3, $4, $5)
-         ON CONFLICT (group_id, phone) DO UPDATE
-           SET push_name = COALESCE(EXCLUDED.push_name, whatsapp_group_participants.push_name),
-               is_admin = EXCLUDED.is_admin,
-               is_lid = EXCLUDED.is_lid,
+               lid = COALESCE(EXCLUDED.lid, whatsapp_group_participants.lid),
                last_seen_at = NOW()`,
-        [groupId, p.phone, p.pushName, p.isAdmin, p.isLid],
+        [groupId, p.phone, p.pushName, p.isAdmin, p.isLid, lid],
       );
     }
     n++;
@@ -82,7 +92,7 @@ export async function upsertParticipants(
  */
 export async function listParticipants(pool: Pool, groupId: number): Promise<GroupParticipant[]> {
   const { rows } = await pool.query(
-    `SELECT p.phone, p.push_name, p.is_admin, p.is_lid, p.avatar_key,
+    `SELECT p.phone, p.push_name, p.is_admin, p.is_lid, p.lid, p.avatar_key,
             p.bloquim_user_id, p.bloquim_name, p.last_seen_at
        FROM whatsapp_group_participants p
        JOIN whatsapp_groups g ON g.id = p.group_id
@@ -95,6 +105,7 @@ export async function listParticipants(pool: Pool, groupId: number): Promise<Gro
     pushName: r.push_name ?? null,
     isAdmin: r.is_admin === true,
     isLid: r.is_lid === true,
+    lid: r.lid ?? null,
     avatarKey: r.avatar_key ?? null,
     bloquimUserId: r.bloquim_user_id ?? null,
     bloquimName: r.bloquim_name ?? null,

@@ -42,7 +42,8 @@ import { emptyToUndefined } from './query-coerce.js';
  * Envelope comum. `numberId` é informativo (não é escopo de autz) e só existe
  * no escopo 'number' — no escopo 'agent' (grupo da organização, sem número)
  * fica `null`. `scope` deixa explícito pro consumidor (painel) qual dos dois
- * é, já que roster/export têm disponibilidade diferente por escopo.
+ * é, já que EXPORT tem disponibilidade diferente por escopo (roster não —
+ * `listParticipants` funciona igual nos dois, ver /participants abaixo).
  */
 function groupContext(g: LinkedGroup) {
   return {
@@ -206,14 +207,14 @@ export function registerGroupReadRoutes(
   app.get('/whatsapp/groups/:jid/participants', { preHandler: auth }, async (req: any, reply) => {
     const g = await gateAndResolve(req, reply);
     if (!g) return;
-    // Roster depende do NÚMERO (é a instância Evolution que o cron usa pra
-    // sincronizar — ver group-sync-cron.ts). No escopo 'agent' não há número,
-    // então não há roster coletado — `[]` explícito, não uma query que hoje
-    // coincide em devolver vazia. Fica assim até o número da organização
-    // existir de fato em `whatsapp_numbers`.
-    const participants: ParticipantView[] = g.scope.kind === 'agent'
-      ? []
-      : await withAvatarUrls(await listParticipants(deps.pool, g.id));
+    // Roster é chaveado por `whatsapp_group_participants.group_id`, que
+    // aponta pro `id` (PK surrogate, mig 030) de `whatsapp_groups` — a linha
+    // existe IGUAL nos dois escopos, então `listParticipants(g.id)` funciona
+    // pra 'number' e pra 'agent' sem distinção. O escopo 'agent' é
+    // sincronizado por `syncAgentGroupParticipants` (agent-group-sync.ts),
+    // não pelo `syncGroupSubjects` do escopo 'number' — mas grava na MESMA
+    // tabela.
+    const participants: ParticipantView[] = await withAvatarUrls(await listParticipants(deps.pool, g.id));
     logAccess(deps.pool, {
       actor: req.actingUser, action: 'group_participants',
       workspaceId: g.linkedWorkspaceId, numberId: g.scope.kind === 'number' ? g.scope.numberId : null, identifier: g.jid,
@@ -236,6 +237,8 @@ export function registerGroupReadRoutes(
     const cursor = emptyToUndefined(req.query.cursor);
     let msgs: { messages: unknown[]; nextCursor: string | null };
     let participants: ParticipantView[];
+    // Roster vem de `listParticipants(g.id)` nos DOIS escopos (ver comentário
+    // na rota /participants acima) — só as MENSAGENS divergem por escopo.
     if (g.scope.kind === 'number') {
       const [m, rawParticipants] = await Promise.all([
         listThreadMessages(deps.pool, { workspaceId: g.scope.numberWorkspaceId, numberId: g.scope.numberId, identifier: g.jid, limit, cursor }),
@@ -244,9 +247,12 @@ export function registerGroupReadRoutes(
       msgs = m;
       participants = await withAvatarUrls(rawParticipants);
     } else {
-      // Escopo 'agent': sem número, sem roster (mesma decisão de /participants acima).
-      msgs = await listGroupMessagesByAgent(deps.pool, { agent: g.scope.agent, identifier: g.jid, limit, cursor });
-      participants = [];
+      const [m, rawParticipants] = await Promise.all([
+        listGroupMessagesByAgent(deps.pool, { agent: g.scope.agent, identifier: g.jid, limit, cursor }),
+        listParticipants(deps.pool, g.id),
+      ]);
+      msgs = m;
+      participants = await withAvatarUrls(rawParticipants);
     }
     logAccess(deps.pool, {
       actor: req.actingUser, action: 'group_messages',
