@@ -114,18 +114,27 @@ export async function loadTitleRules(): Promise<TitleRule[]> {
 
 /**
  * Resolve workspace pelo TÍTULO quando o domínio não resolveu (método 'none').
- * Casa cada `pattern` como substring do título (lowercased). Se os patterns que
- * casam apontam pra UM workspace → 'title'; se divergem (2+ workspaces) → 'none'
- * (ambíguo, não chuta); nenhum casa → 'none'. Determinístico: independe da ordem.
+ * Casa cada `pattern` como substring do título (lowercased); nenhum casa → 'none'.
+ * Determinístico: independe da ordem das regras.
+ *
+ * O pattern mais longo vence. Quando os patterns que casam apontam pra
+ * workspaces DIFERENTES, ele só vence se SUBSUMIR todos os outros — isto é, se
+ * cada um deles for substring dele ('bluma rh' contém 'bluma'). Aí não há
+ * dúvida: é a sub-unidade, não o cliente genérico. Patterns disjuntos de
+ * workspaces diferentes ('hoenka' e 'luhma' no mesmo título) continuam
+ * ambíguos → 'none'. Especificidade é diferente de palpite: sem essa distinção,
+ * cadastrar a regra da sub-unidade tornaria o título ambíguo e a reunião
+ * deixaria de ser atribuída — e sem workspace ela nunca dispara a coleta.
  */
 export function resolveByTitle(title: string | null | undefined, rules: TitleRule[]): AttributionResult {
+  const none: AttributionResult = { workspace_id: null, project_slug: null, method: 'none', unresolved_domains: [] };
   const t = (title ?? '').toLowerCase();
-  if (!t) return { workspace_id: null, project_slug: null, method: 'none', unresolved_domains: [] };
+  if (!t) return none;
   const matched = rules.filter((r) => r.pattern && t.includes(r.pattern));
-  if (matched.length === 0) return { workspace_id: null, project_slug: null, method: 'none', unresolved_domains: [] };
+  if (matched.length === 0) return none;
+  const best = [...matched].sort((a, b) => b.pattern.length - a.pattern.length)[0]!;
+  const subsumesAll = matched.every((r) => best.pattern.includes(r.pattern));
   const workspaces = new Set(matched.map((r) => r.workspace_id));
-  if (workspaces.size > 1) return { workspace_id: null, project_slug: null, method: 'none', unresolved_domains: [] };
-  // Empate de patterns no mesmo workspace: escolhe o pattern mais específico (mais longo).
-  const best = matched.sort((a, b) => b.pattern.length - a.pattern.length)[0]!;
+  if (workspaces.size > 1 && !subsumesAll) return none;
   return { workspace_id: best.workspace_id, project_slug: best.project_slug, method: 'title', unresolved_domains: [] };
 }

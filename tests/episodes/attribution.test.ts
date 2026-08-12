@@ -88,3 +88,44 @@ test('resolveByTitle: título vazio/nulo → none', () => {
   assert.equal(resolveByTitle(null, TITLE_RULES).method, 'none');
   assert.equal(resolveByTitle('', TITLE_RULES).method, 'none');
 });
+
+// ── Especificidade cross-workspace: sub-unidade de cliente ──
+// Caso real (2026-08-11): "Bluma RH + BeeAds" casava com o pattern genérico
+// 'bluma' (Bluma CF) e ia pro workspace errado. Adicionar 'bluma rh' apontando
+// pro workspace do RH tornava o título AMBÍGUO e a reunião deixava de ser
+// atribuída — pior que o bug original, porque sem workspace ela nunca dispara.
+
+const SUB_UNIT_RULES = [
+  { pattern: 'bluma', workspace_id: 'wks-bluma-cf', project_slug: null },
+  { pattern: 'bluma rh', workspace_id: 'wks-bluma-rh', project_slug: 'rh' },
+  { pattern: 'hoenka', workspace_id: 'wks-hoenka', project_slug: null },
+];
+
+test('resolveByTitle: pattern superconjunto vence o genérico de OUTRO workspace', () => {
+  const r = resolveByTitle('Bluma RH + BeeAds | Alinhamento', SUB_UNIT_RULES);
+  assert.equal(r.method, 'title');
+  assert.equal(r.workspace_id, 'wks-bluma-rh');
+  assert.equal(r.project_slug, 'rh');
+});
+
+test('resolveByTitle: o genérico segue valendo pra quem não tem regra específica', () => {
+  const r = resolveByTitle('Bluma CF + BeeAds | Acompanhamento', SUB_UNIT_RULES);
+  assert.equal(r.method, 'title');
+  assert.equal(r.workspace_id, 'wks-bluma-cf');
+});
+
+test('resolveByTitle: patterns disjuntos de workspaces diferentes seguem ambíguos', () => {
+  // 'bluma rh' é o mais longo, mas não contém 'hoenka' → não há vencedor.
+  const r = resolveByTitle('Bluma RH + Hoenka | sync', SUB_UNIT_RULES);
+  assert.equal(r.method, 'none');
+  assert.equal(r.workspace_id, null);
+});
+
+test('resolveByTitle: patterns de mesmo tamanho e workspaces diferentes → none', () => {
+  const rules = [
+    { pattern: 'bluma cf', workspace_id: 'wks-bluma-cf', project_slug: null },
+    { pattern: 'bluma rh', workspace_id: 'wks-bluma-rh', project_slug: null },
+  ];
+  const r = resolveByTitle('Bluma CF + Bluma RH | fusão', rules);
+  assert.equal(r.method, 'none');
+});
