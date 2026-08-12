@@ -45,6 +45,32 @@ function makeLinkPool(rows: any[]) {
   } as any;
 }
 
+/**
+ * Pool que resolve o vínculo E o roster (`listParticipants`) — usado pelas
+ * rotas /participants e /view, que hoje chamam `listParticipants(g.id)` nos
+ * DOIS escopos (número e agent). A checagem de `whatsapp_group_participants`
+ * TEM que vir antes da de `whatsapp_groups`: o SELECT de `listParticipants`
+ * faz `... FROM whatsapp_group_participants p JOIN whatsapp_groups g ...`,
+ * então contém as DUAS substrings — testar `whatsapp_groups` primeiro
+ * devolveria a linha de vínculo (`linkRows`) como se fosse participante.
+ */
+function makeLinkAndParticipantsPool(linkRows: any[], participantRows: any[]) {
+  return {
+    query: async (sql: string) => {
+      if (sql.includes('whatsapp_group_participants')) return { rows: participantRows };
+      if (sql.includes('whatsapp_groups')) return { rows: linkRows };
+      throw new Error(`DB call inesperada: ${sql}`);
+    },
+  } as any;
+}
+
+// Linha crua de `whatsapp_group_participants` (shape snake_case do SELECT de
+// listParticipants) — mesmo participante medido em produção (LID+telefone).
+const PARTICIPANT_ROW = {
+  phone: '+553196039118', push_name: 'Gustavo Cançado', is_admin: true, is_lid: false, lid: '166730898927796',
+  avatar_key: null, bloquim_user_id: null, bloquim_name: null, last_seen_at: new Date('2026-08-10T12:00:00Z'),
+};
+
 const LINK_ROW = {
   id: 7, jid: '+120363001', subject: 'Symmetry CWB + BeeAds',
   whatsapp_number_id: 3, number_workspace_id: 'ws-saturno', agent: null, linked_workspace_id: 'ws-cliente',
@@ -218,12 +244,15 @@ test('(l) export — escopo agent responde 501 explícito (export não é number
   await app.close();
 });
 
-test('(m) participants — escopo agent devolve [] sem tocar em whatsapp_group_participants', async () => {
+// Fix (2026-08-12): o escopo agent tem roster de fato desde
+// `syncAgentGroupParticipants` (agent-group-sync.ts) — o special-case que
+// devolvia `[]` incondicionalmente escondia esses dados do painel. Agora
+// `listParticipants(g.id)` roda IGUAL nos dois escopos (a PK surrogate `id`
+// de `whatsapp_groups` não distingue escopo).
+test('(m) participants — escopo agent lê o roster persistido (listParticipants funciona igual pros dois escopos)', async () => {
   const app = Fastify({ logger: false });
-  // Qualquer query além da de whatsapp_groups derruba o teste — prova que
-  // listParticipants nem é chamado no escopo agent.
   registerGroupReadRoutes(app, {
-    pool: makeLinkPool([AGENT_LINK_ROW]), panelToken: PANEL_TOKEN, authz: allPass(), logAccess: noopLog,
+    pool: makeLinkAndParticipantsPool([AGENT_LINK_ROW], [PARTICIPANT_ROW]), panelToken: PANEL_TOKEN, authz: allPass(), logAccess: noopLog,
   });
   const res = await app.inject({
     method: 'GET',
@@ -231,13 +260,18 @@ test('(m) participants — escopo agent devolve [] sem tocar em whatsapp_group_p
     headers: ACTOR_HEADERS,
   });
   assert.equal(res.statusCode, 200);
-  assert.deepEqual(res.json().participants, []);
+  const participants = res.json().participants;
+  assert.equal(participants.length, 1);
+  assert.equal(participants[0].phone, '+553196039118');
+  assert.equal(participants[0].lid, '166730898927796');
+  assert.equal(participants[0].pushName, 'Gustavo Cançado');
   await app.close();
 });
 
-test('(n) view — escopo agent devolve mensagens + participants:[] (sem número)', async () => {
+test('(n) view — escopo agent devolve mensagens + roster (não mais participants:[])', async () => {
   const pool = {
     query: async (sql: string) => {
+      if (sql.includes('whatsapp_group_participants')) return { rows: [PARTICIPANT_ROW] };
       if (sql.includes('whatsapp_groups')) return { rows: [AGENT_LINK_ROW] };
       return { rows: [] }; // listGroupMessagesByAgent → sem mensagens
     },
@@ -251,7 +285,8 @@ test('(n) view — escopo agent devolve mensagens + participants:[] (sem número
   });
   assert.equal(res.statusCode, 200);
   const body = res.json();
-  assert.deepEqual(body.participants, []);
+  assert.equal(body.participants.length, 1);
+  assert.equal(body.participants[0].lid, '166730898927796');
   assert.deepEqual(body.messages, []);
   assert.equal(body.context.numberId, null);
   assert.equal(body.context.scope, 'agent');
