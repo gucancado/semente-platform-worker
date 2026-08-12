@@ -50,6 +50,28 @@ export function segmentsToTurns(segments: VexaSegment[], firstStart: number): Ep
   return turns;
 }
 
+/** Piso de importação: abaixo disso a coleta não vira episódio. */
+export const MIN_TURNS_TO_IMPORT = 3;
+export const MIN_SPEECH_MS_TO_IMPORT = 30_000;
+
+/**
+ * Houve fala suficiente pra isso ser uma reunião? Sala muda em que o Whisper
+ * alucinou uma legenda ("Legendas pela comunidade Amara.org") produzia episódio
+ * de 0 min / 1 turn — que no painel do cliente parece dado, não falha.
+ *
+ * O critério é FALA, deliberadamente não `duration_seconds`: quando o Vexa
+ * manda start/end da reunião, duration é tempo de PAREDE (sala aberta 20 min),
+ * e um único ruído de 0,25s passaria pelo piso.
+ */
+export function episodeHasEnoughContent(input: Pick<EpisodeInput, 'turns'>): boolean {
+  const turns = input.turns ?? [];
+  if (turns.length >= MIN_TURNS_TO_IMPORT) return true;
+  const first = turns[0];
+  const last = turns[turns.length - 1];
+  if (!first || !last) return false;
+  return (last.ended_at_ms ?? 0) - (first.started_at_ms ?? 0) >= MIN_SPEECH_MS_TO_IMPORT;
+}
+
 export function vexaMeetingToEpisodeInput(m: VexaMeeting, rawR2Key: string | null): EpisodeInput {
   const segments = dedupSegments(m.segments ?? []);
   const firstSegment = segments[0];

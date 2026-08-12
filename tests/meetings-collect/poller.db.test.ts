@@ -101,7 +101,7 @@ test('inatividade > limite → stopBot + import', async () => {
   assert.equal(r!.status, 'imported');
 });
 
-test('zero segments + admissão estourada → failed/not_admitted', async () => {
+test('zero segments + admissão estourada → failed/silent_room', async () => {
   const row = await createCollectedMeeting(pool, { meetCode: 'abc-defg-hij', workspaceId: null, requestedBy: 'u' });
   // created_at ~agora; força now 20 min à frente
   const now = new Date(Date.now() + 20 * 60_000);
@@ -109,7 +109,7 @@ test('zero segments + admissão estourada → failed/not_admitted', async () => 
   await runMeetingsCollectBatch(baseDeps({ 'abc-defg-hij': meeting }, now));
   const r = await getCollectedMeeting(pool, row.id);
   assert.equal(r!.status, 'failed');
-  assert.equal(r!.failure_reason, 'not_admitted');
+  assert.equal(r!.failure_reason, 'silent_room');
 });
 
 test('ainda ativa, com segments recentes → segue coletando', async () => {

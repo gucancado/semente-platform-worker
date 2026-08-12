@@ -2,7 +2,7 @@ import type { Pool } from 'pg';
 import type { VexaClient, VexaMeeting } from '../integrations/vexa/client.js';
 import type { CollectedMeetingRow } from './db.js';
 import { updateCollectedMeeting, listQueuedMeetings, countActiveCollections } from './db.js';
-import { vexaMeetingToEpisodeInput } from '../integrations/vexa/normalize.js';
+import { vexaMeetingToEpisodeInput, episodeHasEnoughContent } from '../integrations/vexa/normalize.js';
 import type { insertEpisodeWithTurns } from '../episodes/db.js';
 
 export type MeetingsCollectDeps = {
@@ -67,13 +67,31 @@ function lastSegmentDate(meeting: VexaMeeting): Date | null {
   return new Date(maxEnd * 1000);
 }
 
-/** R2 (JSON bruto) ANTES, TX depois. Idempotente: insertEpisode dedup por (external_source, external_id). */
+/**
+ * R2 (JSON bruto) ANTES, TX depois. Idempotente: insertEpisode dedup por (external_source, external_id).
+ *
+ * Funil ÚNICO de importação (3 chamadores) — por isso o piso mora aqui e não
+ * nos call sites: abaixo dele a coleta vira `silent_room` em vez de episódio.
+ */
 export async function importCollectedMeeting(
   deps: MeetingsCollectDeps, row: CollectedMeetingRow, meeting: VexaMeeting,
 ): Promise<void> {
   const rawKey = `vexa/${meeting.id}.json`;
-  await deps.putAndVerify(rawKey, JSON.stringify(meeting), 'application/json');
   const input = vexaMeetingToEpisodeInput(meeting, rawKey);
+  if (!episodeHasEnoughContent(input)) {
+    // Mesmo rótulo do caminho sem NENHUM segment: é o mesmo fenômeno (ninguém
+    // falou), só que com um ruído no meio. Não sobe o JSON bruto — o log do bot
+    // já é a evidência, e um objeto no R2 sem episódio é lixo órfão.
+    await updateCollectedMeeting(deps.pool, row.id, {
+      status: 'failed', failureReason: 'silent_room', vexaMeetingId: meeting.id,
+    });
+    deps.log?.info?.(
+      { id: row.id, turns: input.turns.length },
+      'meetings-collect: abaixo do piso de fala; não importado',
+    );
+    return;
+  }
+  await deps.putAndVerify(rawKey, JSON.stringify(meeting), 'application/json');
   input.title = row.title ?? null; // título vem da entidade (agenda/painel), não do Vexa
   input.workspace_id = row.workspace_id;
   input.attribution_method = 'manual';
@@ -119,11 +137,16 @@ export async function processCollectedMeeting(deps: MeetingsCollectDeps, row: Co
     return;
   }
 
-  // zero segments: checa timeout de admissão
+  // Zero segments por `admissionTimeoutMin`. O rótulo é `silent_room` porque é
+  // o que a condição de fato mede: ninguém falou. Chamava-se `not_admitted` e
+  // isso mentia — desde o bot autenticado a admissão leva ~1s, e o carimbo
+  // aparecia em sala vazia, sala muda e STT quebrado indistintamente, mandando
+  // o diagnóstico pro lado errado. Rows antigas com `not_admitted` seguem no
+  // banco (a causa real delas é ambígua); os mapas de rótulo traduzem as duas.
   const waitedMs = now - new Date(row.created_at).getTime();
   if (waitedMs > deps.admissionTimeoutMin * 60_000) {
     await deps.vexa.stopBot(row.meet_code).catch(() => {});
-    await updateCollectedMeeting(deps.pool, row.id, { status: 'failed', failureReason: 'not_admitted', vexaMeetingId: meeting.id });
+    await updateCollectedMeeting(deps.pool, row.id, { status: 'failed', failureReason: 'silent_room', vexaMeetingId: meeting.id });
     return;
   }
   await updateCollectedMeeting(deps.pool, row.id, { vexaMeetingId: meeting.id });

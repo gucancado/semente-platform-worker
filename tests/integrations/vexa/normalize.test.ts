@@ -72,3 +72,43 @@ test('fixture sintética: agrupa o monólogo de um speaker só', () => {
   assert.equal((ep.participants ?? []).length, 1); // só "Gustavo Cançado"
   assert.equal(ep.turns.length, 1); // todos os segments do mesmo speaker → 1 turn
 });
+
+// ── Piso de importação (caso Luhma, 12/08/2026) ───────────────────────────────
+// Sala muda produziu 1 segment com alucinação do Whisper em silêncio
+// ("Legendas pela comunidade Amara.org", 0,256s) e isso virou um episódio de
+// 0 min / 1 turn no painel do cliente — pior que uma falha limpa, porque um
+// episódio de zero minuto parece dado. O piso é sobre FALA, nunca sobre
+// duration_seconds: quando o Vexa manda start/end da reunião, duration é tempo
+// de PAREDE (a sala aberta 20 min), e um único ruído passaria pelo piso.
+import { episodeHasEnoughContent } from '../../../src/integrations/vexa/normalize.js';
+
+const turn = (i: number, startMs: number, endMs: number) => ({
+  turn_index: i, speaker_name: 'Speaker', speaker_label: 'Speaker',
+  started_at_ms: startMs, ended_at_ms: endMs, text: 'x',
+});
+const withTurns = (turns: ReturnType<typeof turn>[], durationSeconds: number | null = null) =>
+  ({ turns, duration_seconds: durationSeconds }) as any;
+
+test('piso: 1 turn curto (alucinação em sala muda) não importa', () => {
+  assert.equal(episodeHasEnoughContent(withTurns([turn(0, 0, 256)])), false);
+});
+
+test('piso: 3+ turns importam mesmo curtos (conversa real e breve)', () => {
+  assert.equal(
+    episodeHasEnoughContent(withTurns([turn(0, 0, 500), turn(1, 600, 1200), turn(2, 1300, 1800)])),
+    true,
+  );
+});
+
+test('piso: 2 turns com 30s+ de fala importam', () => {
+  assert.equal(episodeHasEnoughContent(withTurns([turn(0, 0, 2000), turn(1, 5000, 31000)])), true);
+});
+
+test('piso: duration_seconds de PAREDE não salva 1 ruído', () => {
+  // sala aberta 20 min, um único blip de 0,25s → continua abaixo do piso
+  assert.equal(episodeHasEnoughContent(withTurns([turn(0, 0, 256)], 1200)), false);
+});
+
+test('piso: zero turns não importa', () => {
+  assert.equal(episodeHasEnoughContent(withTurns([])), false);
+});
