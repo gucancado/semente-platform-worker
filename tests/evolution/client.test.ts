@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createEvolutionInstance, getConnectionState, sendText, ensureEvolutionInstance, setPresenceUnavailable } from '../../src/evolution/client.js';
+import { createEvolutionInstance, getConnectionState, sendText, ensureEvolutionInstance, setPresenceUnavailable, fetchGroupParticipants } from '../../src/evolution/client.js';
 
 function mockFetch(handler: (url: string, init: any) => { status: number; body: any }) {
   return async (url: string, init: any) => {
@@ -66,6 +66,53 @@ test('setPresenceUnavailable posta presence=unavailable no endpoint da instânci
   assert.equal(seen.init.method, 'POST');
   assert.equal(seen.init.headers['apikey'], 'k');
   assert.equal(JSON.parse(seen.init.body).presence, 'unavailable');
+});
+
+// Shape MEDIDO em produção (instância 'saturno'):
+// GET /group/participants/saturno?groupJid=<digitos>@g.us →
+// {"participants":[{"id":"166730898927796@lid","phoneNumber":"553196039118@s.whatsapp.net","admin":"admin","name":"Gustavo Cançado","imgUrl":"..."}]}
+test('fetchGroupParticipants monta a URL sem "+" e com "@g.us", e parseia o roster', async () => {
+  let seenUrl = '';
+  let seenInit: any = null;
+  const deps = {
+    baseUrl: 'https://evo', apiKey: 'k',
+    fetch: (async (url: string, init: any) => {
+      seenUrl = url;
+      seenInit = init;
+      return {
+        ok: true, status: 200,
+        json: async () => ({
+          participants: [{
+            id: '166730898927796@lid', phoneNumber: '553196039118@s.whatsapp.net',
+            admin: 'admin', name: 'Gustavo Cançado', imgUrl: 'https://pps.whatsapp.net/x',
+          }],
+        }),
+      } as any;
+    }) as any,
+  };
+  const out = await fetchGroupParticipants(deps, 'saturno', '+120363001234567890');
+  assert.equal(seenUrl, 'https://evo/group/participants/saturno?groupJid=120363001234567890@g.us', 'jid interno perde o "+" e ganha "@g.us"');
+  assert.equal(seenInit.method, 'GET');
+  assert.equal(seenInit.headers['apikey'], 'k');
+  assert.deepEqual(out, [{
+    phone: '+553196039118', isAdmin: true, isLid: false, lid: '166730898927796', pushName: 'Gustavo Cançado',
+  }]);
+});
+
+test('fetchGroupParticipants trata 404 como roster vazio, não como falha', async () => {
+  const deps = {
+    baseUrl: 'https://evo', apiKey: 'k',
+    fetch: (async () => ({ ok: false, status: 404, json: async () => ({ error: 'not found' }) })) as any,
+  };
+  assert.deepEqual(await fetchGroupParticipants(deps, 'saturno', '+120363001'), []);
+});
+
+test('fetchGroupParticipants propaga erro em status de falha diferente de 404', async () => {
+  const deps = {
+    baseUrl: 'https://evo', apiKey: 'k',
+    fetch: (async () => ({ ok: false, status: 500, json: async () => ({}) })) as any,
+  };
+  await assert.rejects(() => fetchGroupParticipants(deps, 'saturno', '+120363001'), /500/);
 });
 
 test('ensureEvolutionInstance: webhook falha após create → rollback (deleteInstance) e propaga', async () => {

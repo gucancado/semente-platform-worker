@@ -125,8 +125,18 @@ export async function getBase64FromMediaMessage(
   return { base64: typeof r?.base64 === 'string' ? r.base64 : '', mimetype: r?.mimetype ?? null };
 }
 
+export type ParsedParticipant = {
+  phone: string;
+  isAdmin: boolean;
+  isLid: boolean;
+  /** Dígitos do LID de privacidade (sem '@lid'), ou `null` quando o `id` cru não era um LID. */
+  lid: string | null;
+  /** Nome de exibição (`name` no payload de /group/participants), ou `null` quando ausente. */
+  pushName: string | null;
+};
+
 /**
- * Participantes crus da Evolution → `{ phone, isAdmin, isLid }`.
+ * Participantes crus da Evolution → `{ phone, isAdmin, isLid, lid, pushName }`.
  *
  * O telefone TEM que sair no mesmo formato do `author` das mensagens, que é
  * `normalizeGroupJid(canonicalJid(key.participant, key.participantAlt))`
@@ -138,9 +148,15 @@ export async function getBase64FromMediaMessage(
  * `isLid` = o payload não trouxe o alt e o id continua sendo LID. Não é erro (é
  * o que o WhatsApp entrega); só não é telefone, e quem consome trata assim.
  *
+ * `lid` é extraído do `id` CRU, independente de `isLid`/da resolução via alt:
+ * mesmo quando o telefone real É conhecido (ex.: `GET /group/participants`
+ * medido em produção devolve `id` LID + `phoneNumber` real no MESMO objeto),
+ * o LID daquela pessoa continua existindo e precisa ser persistido — é o único
+ * jeito de resolver as menções `@<lid>` que aparecem no TEXTO das mensagens.
+ *
  * `admin` vem como 'admin' | 'superadmin' | null.
  */
-export function parseParticipants(raw: any): Array<{ phone: string; isAdmin: boolean; isLid: boolean }> {
+export function parseParticipants(raw: any): ParsedParticipant[] {
   if (!Array.isArray(raw)) return [];
   return raw
     .filter((p) => typeof p?.id === 'string')
@@ -148,10 +164,13 @@ export function parseParticipants(raw: any): Array<{ phone: string; isAdmin: boo
       // A Evolution não é consistente no nome do campo alternativo entre
       // endpoints; aceitamos os shapes conhecidos e caímos no id quando não vem.
       const canonical = canonicalJid(p.id, p.jidAlt ?? p.participantAlt ?? p.phoneNumber ?? null);
+      const rawId = p.id as string;
       return {
         phone: normalizeGroupJid(canonical),
         isAdmin: p.admin === 'admin' || p.admin === 'superadmin',
         isLid: canonical.endsWith('@lid'),
+        lid: rawId.endsWith('@lid') ? rawId.slice(0, -'@lid'.length) : null,
+        pushName: typeof p.name === 'string' && p.name.length > 0 ? p.name : null,
       };
     });
 }
@@ -206,7 +225,7 @@ export async function fetchAllGroups(
   deps: EvolutionDeps,
   instance: string,
   opts?: { participants?: boolean },
-): Promise<Array<{ jid: string; subject: string | null; participants?: Array<{ phone: string; isAdmin: boolean; isLid: boolean }> }>> {
+): Promise<Array<{ jid: string; subject: string | null; participants?: ParsedParticipant[] }>> {
   const want = opts?.participants === true;
   const f = deps.fetch ?? fetch;
   const res = await f(`${deps.baseUrl}/group/fetchAllGroups/${instance}?getParticipants=${want}`, {
@@ -224,4 +243,43 @@ export async function fetchAllGroups(
       subject: g.subject ?? g.subjectName ?? null,
       ...(want ? { participants: parseParticipants(g.participants) } : {}),
     }));
+}
+
+/**
+ * Roster de UM grupo via `GET /group/participants/{instance}?groupJid=<id>@g.us`
+ * — usado pelo sync do escopo 'agent' (`agent-group-sync.ts`), que não tem
+ * como pedir `fetchAllGroups?getParticipants=true` porque o grupo não é
+ * VARRIDO por número (é uma linha legada sem `whatsapp_number_id`); a Evolution
+ * só devolve LID+telefone+nome juntos nesse endpoint específico, medido em
+ * produção como `{"participants":[{"id":"<lid>@lid","phoneNumber":"<jid>",
+ * "admin":"admin"|"superadmin"|null,"name":string|null,"imgUrl":string}]}`.
+ *
+ * `groupJid` chega no formato interno ('+<dígitos>', igual a `messages.identifier`)
+ * — removemos o '+' e acrescentamos '@g.us', que é o que a Evolution espera.
+ *
+ * NÃO usa o `call()` genérico deste arquivo, mesma razão de
+ * `fetchProfilePictureUrl`/`fetchAllGroups` acima: `call()` não tem timeout, e
+ * este helper roda em loop (um grupo por vez) dentro do sync do escopo agent —
+ * uma chamada pendurada travaria o ciclo inteiro sem prazo.
+ *
+ * 404 = grupo não encontrado pela Evolution (saiu do grupo, jid errado, etc.) →
+ * trata como "sem roster" (`[]`), não como falha — é resultado legítimo, não
+ * motivo pra derrubar o sync do grupo.
+ */
+export async function fetchGroupParticipants(
+  deps: EvolutionDeps,
+  instance: string,
+  groupJid: string,
+): Promise<ParsedParticipant[]> {
+  const digits = groupJid.startsWith('+') ? groupJid.slice(1) : groupJid;
+  const f = deps.fetch ?? fetch;
+  const res = await f(`${deps.baseUrl}/group/participants/${instance}?groupJid=${digits}@g.us`, {
+    method: 'GET',
+    headers: { apikey: deps.apiKey, 'Content-Type': 'application/json' },
+    signal: AbortSignal.timeout(30000),
+  } as any);
+  if (res.status === 404) return [];
+  if (!res.ok) throw new Error(`Evolution fetchGroupParticipants ${instance} → ${res.status}`);
+  const r: any = await res.json();
+  return parseParticipants(r?.participants);
 }

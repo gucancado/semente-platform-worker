@@ -86,7 +86,7 @@ export async function syncGroupSubjects(
       try {
         stored = await upsertParticipants(
           pool, groupId,
-          g.participants.map((p) => ({ phone: p.phone, pushName: null, isAdmin: p.isAdmin, isLid: p.isLid })),
+          g.participants.map((p) => ({ phone: p.phone, pushName: p.pushName, isAdmin: p.isAdmin, isLid: p.isLid, lid: p.lid })),
           syncedAt,
         );
       } catch { /* segue */ }
