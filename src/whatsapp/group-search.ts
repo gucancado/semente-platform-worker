@@ -1,5 +1,6 @@
 import type { Pool } from 'pg';
 import type { GroupScope } from './group-links.js';
+import type { Msg } from './read-queries.js';
 
 /**
  * Busca group-scoped + janela ancorada do contrato `group_v1`.
@@ -83,4 +84,81 @@ export async function searchGroupMessages(pool: Pool, p: {
     snippet: buildSnippet(r.text ?? '', p.q),
   }));
   return { hits, truncated };
+}
+
+/** SELECT compartilhado da janela — mesmo shape `Msg` dos leitores. */
+const MSG_SELECT = `SELECT m.id, m.direction, m.text, m.agent, m.created_at, m.author,
+        m.kind, m.transcription_status, m.media_duration_s, m.media_key,
+        w.push_name AS author_name
+   FROM messages m
+   LEFT JOIN webhook_logs w
+     ON w.evolution_event_id = m.evolution_event_id
+    AND w.whatsapp_number_id IS NOT DISTINCT FROM m.whatsapp_number_id
+    AND m.direction = 'inbound'`;
+
+function mapMsg(r: any): Msg {
+  return {
+    id: Number(r.id),
+    direction: r.direction,
+    text: r.text,
+    agent: r.agent,
+    createdAt: r.created_at.toISOString(),
+    author: r.author,
+    authorName: r.author_name,
+    kind: r.kind,
+    transcriptionStatus: r.transcription_status,
+    mediaDurationS: r.media_duration_s,
+    hasMedia: r.media_key != null,
+  };
+}
+
+/**
+ * Resolve a mensagem-âncora POR ID **dentro do escopo do grupo** — id de outra
+ * conversa não resolve (a rota devolve 404 sem revelar existência). `id` é
+ * string de dígitos validada na rota (BIGSERIAL; sem Number() no WHERE).
+ */
+export async function resolveAnchor(pool: Pool, p: {
+  scope: GroupScope; identifier: string; id: string;
+}): Promise<{ id: string; createdAt: Date } | null> {
+  const w = scopeWhere(p.scope, p.identifier);
+  const n = w.params.length;
+  const { rows } = await pool.query(
+    `SELECT m.id, m.created_at FROM messages m WHERE ${w.sql} AND m.id = $${n + 1}::bigint LIMIT 1`,
+    [...w.params, p.id],
+  );
+  if (rows.length === 0) return null;
+  return { id: String(rows[0].id), createdAt: rows[0].created_at };
+}
+
+/**
+ * Janela de mensagens em volta da âncora, por TUPLA (created_at, id).
+ * Metade antiga (<=, inclui a âncora) + metade nova (>) — sem overlap por
+ * construção, então o merge é concat (novas revertidas primeiro) e o
+ * resultado sai DESC como os leitores. `nextCursor` segue a convenção
+ * existente (base64 do createdAt) — limitação timestamp-only pré-existente
+ * do contrato; a página não pagina hoje.
+ */
+export async function listMessagesAround(pool: Pool, p: {
+  scope: GroupScope; identifier: string;
+  anchor: { id: string; createdAt: Date };
+  half?: number;
+}): Promise<{ messages: Msg[]; nextCursor: string | null }> {
+  const half = p.half ?? 25;
+  const w = scopeWhere(p.scope, p.identifier);
+  const n = w.params.length;
+  const params = [...w.params, p.anchor.createdAt, p.anchor.id, half];
+  const [older, newer] = await Promise.all([
+    pool.query(
+      `${MSG_SELECT} WHERE ${w.sql} AND (m.created_at, m.id) <= ($${n + 1}::timestamptz, $${n + 2}::bigint)
+        ORDER BY m.created_at DESC, m.id DESC LIMIT $${n + 3}`, params),
+    pool.query(
+      `${MSG_SELECT} WHERE ${w.sql} AND (m.created_at, m.id) > ($${n + 1}::timestamptz, $${n + 2}::bigint)
+        ORDER BY m.created_at ASC, m.id ASC LIMIT $${n + 3}`, params),
+  ]);
+  const olderMsgs = older.rows.map(mapMsg);            // já DESC
+  const newerMsgs = newer.rows.map(mapMsg).reverse();  // ASC → DESC
+  const messages = [...newerMsgs, ...olderMsgs];
+  const last = olderMsgs.at(-1);
+  const nextCursor = olderMsgs.length === half && last ? Buffer.from(last.createdAt).toString('base64') : null;
+  return { messages, nextCursor };
 }
