@@ -25,6 +25,7 @@ const NUMBER_ROW = {
   subject: 'Symmetry CWB + BeeAds',
   whatsapp_number_id: 3,
   number_workspace_id: 'ws-saturno',
+  number_phone: '+553196039118',
   agent: null,
   linked_workspace_id: 'ws-cliente',
 };
@@ -50,7 +51,7 @@ test('resolveLinkedGroup mapeia row com número → scope.kind "number"', async 
     jid: '+120363001',
     subject: 'Symmetry CWB + BeeAds',
     linkedWorkspaceId: 'ws-cliente',
-    scope: { kind: 'number', numberId: 3, numberWorkspaceId: 'ws-saturno' },
+    scope: { kind: 'number', numberId: 3, numberWorkspaceId: 'ws-saturno', numberPhone: '+553196039118' },
   });
   assert.deepEqual(calls[0].params, ['ws-cliente', '+120363001']);
 });

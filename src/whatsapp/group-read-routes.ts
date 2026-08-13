@@ -52,6 +52,10 @@ function groupContext(g: LinkedGroup) {
     group: { jid: g.jid, subject: g.subject },
     numberId: g.scope.kind === 'number' ? g.scope.numberId : null,
     scope: g.scope.kind,
+    // Telefone do número observador (escopo number; null no agent). O painel
+    // usa pra ATRIBUIR mensagens outbound — num leitor terceiro não existe
+    // "você", e fromMe de grupo costuma vir sem `author`.
+    observerPhone: g.scope.kind === 'number' ? g.scope.numberPhone : null,
   };
 }
 

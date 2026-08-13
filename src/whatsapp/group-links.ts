@@ -21,7 +21,7 @@ import type { Pool } from 'pg';
  * gate 2 sem uma decisão de produto nova.
  */
 export type GroupScope =
-  | { kind: 'number'; numberId: number; numberWorkspaceId: string }
+  | { kind: 'number'; numberId: number; numberWorkspaceId: string; numberPhone: string | null }
   | { kind: 'agent'; agent: string };
 
 export type LinkedGroup = {
@@ -49,6 +49,7 @@ const SELECT = `
   SELECT g.id, g.jid, g.subject,
          g.whatsapp_number_id,
          n.workspace_id AS number_workspace_id,
+         n.phone AS number_phone,
          g.agent,
          g.linked_workspace_id
     FROM whatsapp_groups g
@@ -72,7 +73,12 @@ function map(r: any): LinkedGroup | null {
   if (r.whatsapp_number_id != null) {
     return {
       ...base,
-      scope: { kind: 'number', numberId: Number(r.whatsapp_number_id), numberWorkspaceId: r.number_workspace_id },
+      // `numberPhone` alimenta o `observerPhone` do contexto group_v1: a
+      // superfície de grupos é um leitor TERCEIRO, e mensagem outbound
+      // (enviada pelo próprio número observador) precisa de um AUTOR pra ser
+      // atribuída — sem isso ela renderiza como "enviada por você", que ali
+      // não existe.
+      scope: { kind: 'number', numberId: Number(r.whatsapp_number_id), numberWorkspaceId: r.number_workspace_id, numberPhone: r.number_phone ?? null },
     };
   }
   if (r.agent) {
