@@ -1,6 +1,7 @@
 import { pool } from '../db.js';
 import { config } from '../config.js';
-import { syncAgentGroupParticipants } from '../whatsapp/agent-group-sync.js';
+import { syncAgentGroupParticipants, syncNumberGroupParticipants } from '../whatsapp/agent-group-sync.js';
+import { getNumber } from '../whatsapp/numbers.js';
 
 /**
  * Roda `syncAgentGroupParticipants` pra todos os agents que têm PELO MENOS UM
@@ -29,7 +30,26 @@ async function main() {
       results[agent] = { error: err instanceof Error ? err.message : String(err) };
     }
   }
-  console.log(JSON.stringify({ agents: rows.length, results }, null, 2));
+  // Escopo 'number' (desde 2026-08-13): mesmo sync por-grupo, na instância do
+  // número — o payload do fetchAllGroups não traz nome/LID (ver
+  // agent-group-sync.ts).
+  const { rows: numRows } = await pool.query(
+    `SELECT DISTINCT whatsapp_number_id AS id
+       FROM whatsapp_groups
+      WHERE linked_workspace_id IS NOT NULL AND whatsapp_number_id IS NOT NULL`,
+  );
+  for (const r of numRows) {
+    const numberId = Number(r.id);
+    try {
+      const num = await getNumber(pool, numberId);
+      results[`number:${numberId}`] = num
+        ? await syncNumberGroupParticipants(pool, evolution, num.evolutionInstance, numberId)
+        : { error: 'numero nao encontrado' };
+    } catch (err) {
+      results[`number:${numberId}`] = { error: err instanceof Error ? err.message : String(err) };
+    }
+  }
+  console.log(JSON.stringify({ agents: rows.length, numbers: numRows.length, results }, null, 2));
   await pool.end();
 }
 

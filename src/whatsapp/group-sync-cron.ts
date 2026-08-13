@@ -1,7 +1,7 @@
 import type { Pool } from 'pg';
 import type { EvolutionDeps } from '../evolution/client.js';
 import { syncGroupSubjects } from './group-sync.js';
-import { syncAgentGroupParticipants } from './agent-group-sync.js';
+import { syncAgentGroupParticipants, syncNumberGroupParticipants } from './agent-group-sync.js';
 import { sweepGroupAvatars } from './group-avatars.js';
 import { resolveGroupIdentities } from './group-identity.js';
 import { getNumber } from './numbers.js';
@@ -13,21 +13,19 @@ import { localTimeInSaoPaulo } from '../lua/scheduler.js';
  * escopos possíveis (`number` e o legado `agent`, ver `group-links.ts`).
  *
  * Só toca números/agents que têm PELO MENOS UM grupo vinculado: sem vínculo,
- * nada aqui tem consumidor, e `fetchAllGroups?getParticipants=true` é a
- * chamada mais cara que fazemos à Evolution (o `groupFetchAllParticipating`
- * do Baileys sobre ~140 grupos) — não pode rodar "por via das dúvidas".
+ * nada aqui tem consumidor.
  *
- * ⚠️ LGPD/escopo: a chamada à Evolution devolve o roster de TODOS os grupos do
- * número numa tacada só (não dá pra pedir só os vinculados), mas a
- * PERSISTÊNCIA do roster (o que `syncGroupSubjects` grava em
- * `whatsapp_group_participants`) é restrita aos jids vinculados DAQUELE
- * número — por isso a query abaixo traz `(numberId, jid)` em vez de só
- * `DISTINCT numberId`, e monta um `Set<jid>` por número (`participantScope`).
- * Sem essa restrição o worker coletaria e armazenaria telefone de gente em
- * ~140 grupos alheios à feature, e multiplicaria à toa o custo do upsert
- * (uma query por pessoa). O escopo 'agent' não tem esse problema: cada grupo
- * é buscado individualmente por jid (`fetchGroupParticipants`, ver
- * `agent-group-sync.ts`), então a restrição já vem do próprio SELECT.
+ * O roster vem do MESMO caminho nos DOIS escopos desde 2026-08-13: uma
+ * chamada `fetchGroupParticipants` POR grupo vinculado (traz name+lid),
+ * na instância do número (escopo 'number') ou do agent (escopo 'agent').
+ * O caminho antigo do escopo 'number' — o payload de participantes do
+ * `fetchAllGroups?getParticipants=true`, com `participantScope` limitando a
+ * persistência por LGPD — foi abandonado: além de ser a chamada mais cara
+ * que fazíamos à Evolution (o `groupFetchAllParticipating` do Baileys sobre
+ * ~140 grupos), o payload dele NÃO traz nome nem LID (medido 2026-08-13:
+ * 9/9 rosters number-scoped 100% sem push_name → painel degradava pra
+ * telefone mascarado). O per-grupo já é restrito aos vinculados pelo próprio
+ * SELECT — a preocupação de LGPD do escopo amplo desaparece junto.
  */
 export async function runGroupSyncCycle(
   pool: Pool, deps: EvolutionDeps, budgets: { avatars: number; identities: number },
@@ -39,24 +37,26 @@ export async function runGroupSyncCycle(
   // porque não tem `whatsapp_numbers`/instância pra resolver aqui — a
   // instância Evolution do agent é o PRÓPRIO nome do agent.
   const { rows } = await pool.query(
-    `SELECT whatsapp_number_id AS id, jid
+    `SELECT DISTINCT whatsapp_number_id AS id
        FROM whatsapp_groups
       WHERE linked_workspace_id IS NOT NULL AND whatsapp_number_id IS NOT NULL`,
   );
-  const linkedJidsByNumber = new Map<number, Set<string>>();
   for (const r of rows) {
     const numberId = Number(r.id);
-    if (!linkedJidsByNumber.has(numberId)) linkedJidsByNumber.set(numberId, new Set());
-    linkedJidsByNumber.get(numberId)!.add(r.jid as string);
-  }
-  for (const [numberId, linkedJids] of linkedJidsByNumber) {
     const num = await getNumber(pool, numberId);
     if (!num) continue;
     try {
-      const synced = await syncGroupSubjects(pool, deps, numberId, { participants: true, participantScope: linkedJids });
+      // Subjects only (`participants: false`): o payload de participantes do
+      // `fetchAllGroups` NÃO traz nome/LID (medido 2026-08-13 — 9/9 rosters
+      // number-scoped sem push_name), então o roster dos grupos VINCULADOS
+      // vem do MESMO caminho por-grupo do escopo 'agent'
+      // (`fetchGroupParticipants`, que traz name+lid), na instância do número.
+      // De quebra some a chamada mais cara da Evolution deste ciclo.
+      const synced = await syncGroupSubjects(pool, deps, numberId, { participants: false });
+      const roster = await syncNumberGroupParticipants(pool, deps, num.evolutionInstance, numberId);
       const avatars = await sweepGroupAvatars(pool, deps, num.evolutionInstance, budgets.avatars);
       const ids = await resolveGroupIdentities(pool, budgets.identities);
-      log.info({ numberId, synced, avatars, ids }, 'group-sync: ciclo concluído');
+      log.info({ numberId, synced, roster, avatars, ids }, 'group-sync: ciclo concluído');
     } catch (err) {
       // Um número com problema não pode derrubar o ciclo dos outros.
       log.error({ numberId, err }, 'group-sync: ciclo falhou');

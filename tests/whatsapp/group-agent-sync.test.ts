@@ -11,7 +11,7 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { syncAgentGroupParticipants } from '../../src/whatsapp/agent-group-sync.js';
+import { syncAgentGroupParticipants, syncNumberGroupParticipants } from '../../src/whatsapp/agent-group-sync.js';
 
 const GROUP_ROWS = [
   { id: 11, jid: '+120363099' },
@@ -148,4 +148,27 @@ test('syncAgentGroupParticipants: nenhum grupo vinculado do agent → resultado 
 
   const out = await syncAgentGroupParticipants(pool, deps, 'saturno');
   assert.deepEqual(out, { groupsAttempted: 0, groupsSynced: 0, participants: 0, failed: 0 });
+});
+
+test('syncNumberGroupParticipants: seleciona por whatsapp_number_id e usa a instância do número', async () => {
+  const { pool, calls } = makePool({ participantsByJid: {} });
+  const urls: string[] = [];
+  const deps = {
+    baseUrl: 'https://evo', apiKey: 'k',
+    fetch: (async (url: string) => {
+      urls.push(url);
+      return { ok: true, status: 200, json: async () => ({ participants: [RAW_PARTICIPANT] }) } as any;
+    }) as any,
+  };
+
+  const out = await syncNumberGroupParticipants(pool, deps, 'ws-abc-123', 7);
+
+  const discover = calls.find((c) => c.sql.includes('whatsapp_number_id = $1'))!;
+  assert.ok(discover, 'SELECT de descoberta filtra pelo número');
+  assert.match(discover.sql, /linked_workspace_id IS NOT NULL/);
+  assert.deepEqual(discover.params, [7]);
+  assert.ok(urls.length > 0 && urls.every((u) => u.includes('/group/participants/ws-abc-123')),
+    `toda chamada usa a instância do número (${urls.join(', ')})`);
+  assert.equal(out.groupsAttempted, 2);
+  assert.equal(out.groupsSynced, 2);
 });

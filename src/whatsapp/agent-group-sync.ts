@@ -53,12 +53,48 @@ export async function syncAgentGroupParticipants(
       WHERE linked_workspace_id IS NOT NULL AND whatsapp_number_id IS NULL AND agent = $1`,
     [agent],
   );
+  return syncGroupRosters(pool, deps, agent, rows as Array<{ id: number; jid: string }>);
+}
+
+/**
+ * MESMO sync, escopo 'number': grupos VINCULADOS observados por um número de
+ * `whatsapp_numbers`, roster buscado POR GRUPO via `fetchGroupParticipants`
+ * na instância DO número. Existe porque o payload de participantes do
+ * `fetchAllGroups?getParticipants=true` (o caminho antigo do cron pra esse
+ * escopo) NÃO traz `name` nem `id` cru — medido em produção 2026-08-13:
+ * 9/9 grupos number-scoped com roster 100% sem push_name, contra 17/17
+ * agent-scoped COM nome via o endpoint por-grupo. Sem nome no roster, o
+ * painel degrada pra telefone mascarado em todo autor sem push_name de
+ * mensagem (caso Luhma).
+ */
+export async function syncNumberGroupParticipants(
+  pool: Pool,
+  deps: EvolutionDeps,
+  instance: string,
+  numberId: number,
+): Promise<AgentGroupSyncResult> {
+  const { rows } = await pool.query(
+    `SELECT id, jid
+       FROM whatsapp_groups
+      WHERE linked_workspace_id IS NOT NULL AND whatsapp_number_id = $1`,
+    [numberId],
+  );
+  return syncGroupRosters(pool, deps, instance, rows as Array<{ id: number; jid: string }>);
+}
+
+/** Núcleo compartilhado dos dois escopos — loop por grupo, best-effort. */
+async function syncGroupRosters(
+  pool: Pool,
+  deps: EvolutionDeps,
+  instance: string,
+  rows: Array<{ id: number; jid: string }>,
+): Promise<AgentGroupSyncResult> {
   const out: AgentGroupSyncResult = { groupsAttempted: rows.length, groupsSynced: 0, participants: 0, failed: 0 };
   for (const g of rows) {
     const groupId = Number(g.id);
     const jid = g.jid as string;
     try {
-      const participants = await fetchGroupParticipants(deps, agent, jid);
+      const participants = await fetchGroupParticipants(deps, instance, jid);
       if (participants.length === 0) continue;
       // Capturado por grupo — cada grupo é uma chamada HTTP separada, então
       // não dá pra reusar um `syncedAt` só pra todos (ver comentário acima).
