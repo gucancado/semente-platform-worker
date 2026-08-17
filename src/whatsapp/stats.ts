@@ -99,6 +99,94 @@ export type Stats = {
   triage: { queue: number; hiddenGroups: number; note: string };
 };
 
+// The number-filter clause reused across all per-thread queries.
+// When $2 IS NULL it becomes a no-op (workspace alone is the scope).
+const NUM_FILTER = `AND ($2::int IS NULL OR m.whatsapp_number_id = $2)`;
+
+/**
+ * ⚠️ `AS MATERIALIZED` nos DOIS CTEs abaixo NÃO é estilo — é a correção do
+ * incidente de 2026-08-17 (dashboard do número 19 / recanto-de-moria fora do ar
+ * com `57014 canceling statement due to statement timeout`). NÃO remover.
+ *
+ * Desde o PG12 um CTE não-recursivo referenciado UMA vez é inlinado, e aí o
+ * planner pode transformar `identifier IN (SELECT ... FROM threads_in_period)`
+ * num Nested Loop Semi Join cujo lado interno é um AGREGADO RE-EXECUTADO por
+ * linha externa. Como `threads_in_period` ⊂ `threads_scoped` ⊂ query externa
+ * varrem `messages` três vezes pela mesma chave, o resultado é CÚBICO no número
+ * de mensagens do número — e o planner só escapa disso por sorte, quando a
+ * estimativa de linhas está boa e ele prefere Hash Join.
+ *
+ * Foi exatamente essa sorte que faltou: `whatsapp_numbers` #19 nasceu DEPOIS do
+ * último autoanalyze de `messages`, então `whatsapp_number_id = 19` não estava em
+ * estatística nenhuma, a estimativa virou `rows=1`, e o plano flipou pra loop.
+ * Medido no schema de repro (estatística sem o 19): forma inlinada = timeout aos
+ * 30s com 1.208 mensagens; forma materializada = 16ms. Um número com 32.455
+ * mensagens e estatística boa roda em 63ms — ou seja, a falha é INVERSA ao
+ * volume, é sobre o plano.
+ *
+ * Autoanalyze não conserta isso sozinho: o gatilho é ~10% da tabela (≈9.8k linhas
+ * hoje), e um número novo entra com bem menos que isso, então a estimativa fica
+ * ruim indefinidamente. A cerca de materialização tira o runtime das mãos do
+ * planner — o CTE é computado UMA vez, num tuplestore, e nada pode re-executá-lo.
+ *
+ * Não há perda: os CTEs já carregam o predicado completo de workspace/número, não
+ * existe predicado de fora pra empurrar pra dentro deles.
+ */
+
+// ── Shared period CTE ────────────────────────────────────────────────────────
+// Materialises the set of thread identifiers that fall within [since, until]
+// according to periodBasis.
+//
+// arrival:  thread qualifies if MIN(m.created_at) ∈ [since, until].
+// activity: thread qualifies if ANY m.created_at ∈ [since, until].
+//
+// Open bounds (since=null / until=null) are handled naturally by the CASE
+// expressions — when $3 IS NULL the lower bound is always satisfied, and
+// likewise for $4. No special-case branch needed for "no window".
+//
+// All per-thread queries (total/byKind/byLeadStatus/byStage/byTemperature/
+// bySource/byTag) restrict their inner scans to this set, ensuring all
+// buckets are homogeneous under a period window.
+export const THREADS_IN_PERIOD_CTE = `
+  threads_in_period AS MATERIALIZED (
+    SELECT m.identifier
+      FROM messages m
+     WHERE m.workspace_id = $1 ${NUM_FILTER}
+     GROUP BY m.identifier
+    HAVING CASE WHEN $5 = 'activity'
+                THEN bool_or(($3::timestamptz IS NULL OR m.created_at >= $3)
+                         AND ($4::timestamptz IS NULL OR m.created_at <= $4))
+                ELSE (($3::timestamptz IS NULL OR MIN(m.created_at) >= $3)
+                  AND ($4::timestamptz IS NULL OR MIN(m.created_at) <= $4))
+           END
+  )`;
+
+// threads_scoped = threads_in_period filtrado por `kind` ($6). Deriva is_group por
+// thread (has_author via bool_or + EXISTS em whatsapp_groups) e aplica o predicado kind.
+// Usado pelos buckets thread-level (stage/temperature/source/tag). NÃO usado pela
+// mainQuery (que precisa do escopo TOTAL para byKind) nem pela ingestQuery (imune).
+export const THREADS_SCOPED_CTE = `${THREADS_IN_PERIOD_CTE},
+  threads_scoped AS MATERIALIZED (
+    SELECT a.identifier
+      FROM (
+        SELECT m.identifier, bool_or(m.author IS NOT NULL) AS has_author
+          FROM messages m
+         WHERE m.workspace_id = $1 ${NUM_FILTER}
+           AND m.identifier IN (SELECT identifier FROM threads_in_period)
+         GROUP BY m.identifier
+      ) a
+      LEFT JOIN LATERAL (
+        SELECT g2.jid FROM whatsapp_groups g2
+         WHERE g2.jid = a.identifier
+           AND g2.whatsapp_number_id IN ${WORKSPACE_NUMBERS}
+           AND ($2::int IS NULL OR g2.whatsapp_number_id = $2)
+         LIMIT 1
+      ) g ON TRUE
+     WHERE ($6 = 'all'
+         OR ($6 = 'dm' AND NOT (a.has_author OR g.jid IS NOT NULL))
+         OR ($6 = 'group' AND (a.has_author OR g.jid IS NOT NULL)))
+  )`;
+
 /**
  * Compute aggregate stats for a workspace (optionally scoped to one number
  * and/or a time window).
@@ -135,64 +223,6 @@ export async function getStats(
     kind,
   ];
 
-  // The number-filter clause reused across all per-thread queries.
-  // When $2 IS NULL it becomes a no-op (workspace alone is the scope).
-  const numFilter = `AND ($2::int IS NULL OR m.whatsapp_number_id = $2)`;
-
-  // ── Shared period CTE ────────────────────────────────────────────────────────
-  // Materialises the set of thread identifiers that fall within [since, until]
-  // according to periodBasis.
-  //
-  // arrival:  thread qualifies if MIN(m.created_at) ∈ [since, until].
-  // activity: thread qualifies if ANY m.created_at ∈ [since, until].
-  //
-  // Open bounds (since=null / until=null) are handled naturally by the CASE
-  // expressions — when $3 IS NULL the lower bound is always satisfied, and
-  // likewise for $4. No special-case branch needed for "no window".
-  //
-  // All per-thread queries (total/byKind/byLeadStatus/byStage/byTemperature/
-  // bySource/byTag) restrict their inner scans to this set, ensuring all
-  // buckets are homogeneous under a period window.
-  const periodCte = `
-  threads_in_period AS (
-    SELECT m.identifier
-      FROM messages m
-     WHERE m.workspace_id = $1 ${numFilter}
-     GROUP BY m.identifier
-    HAVING CASE WHEN $5 = 'activity'
-                THEN bool_or(($3::timestamptz IS NULL OR m.created_at >= $3)
-                         AND ($4::timestamptz IS NULL OR m.created_at <= $4))
-                ELSE (($3::timestamptz IS NULL OR MIN(m.created_at) >= $3)
-                  AND ($4::timestamptz IS NULL OR MIN(m.created_at) <= $4))
-           END
-  )`;
-
-  // threads_scoped = threads_in_period filtrado por `kind` ($6). Deriva is_group por
-  // thread (has_author via bool_or + EXISTS em whatsapp_groups) e aplica o predicado kind.
-  // Usado pelos buckets thread-level (stage/temperature/source/tag). NÃO usado pela
-  // mainQuery (que precisa do escopo TOTAL para byKind) nem pela ingestQuery (imune).
-  const scopedCte = `${periodCte},
-  threads_scoped AS (
-    SELECT a.identifier
-      FROM (
-        SELECT m.identifier, bool_or(m.author IS NOT NULL) AS has_author
-          FROM messages m
-         WHERE m.workspace_id = $1 ${numFilter}
-           AND m.identifier IN (SELECT identifier FROM threads_in_period)
-         GROUP BY m.identifier
-      ) a
-      LEFT JOIN LATERAL (
-        SELECT g2.jid FROM whatsapp_groups g2
-         WHERE g2.jid = a.identifier
-           AND g2.whatsapp_number_id IN ${WORKSPACE_NUMBERS}
-           AND ($2::int IS NULL OR g2.whatsapp_number_id = $2)
-         LIMIT 1
-      ) g ON TRUE
-     WHERE ($6 = 'all'
-         OR ($6 = 'dm' AND NOT (a.has_author OR g.jid IS NOT NULL))
-         OR ($6 = 'group' AND (a.has_author OR g.jid IS NOT NULL)))
-  )`;
-
   // The 6 aggregate queries below are independent (no data dependency) and share
   // the same immutable params, so we fire them in parallel.
 
@@ -209,7 +239,7 @@ export async function getStats(
   // Empty workspace → the inner subquery returns 0 rows → COUNT(*) = 0 but bare
   // SUM(...) would be NULL; COALESCE(...,0) keeps every field a number (IMPORTANT #1).
   const mainQuery = pool.query(
-    `WITH ${periodCte}
+    `WITH ${THREADS_IN_PERIOD_CTE}
      SELECT
        COUNT(*) FILTER (WHERE kind_match)::int AS total,
        COALESCE(SUM(CASE WHEN is_group THEN 1 ELSE 0 END), 0)::int AS group_count,
@@ -229,7 +259,7 @@ export async function getStats(
            SELECT m.identifier,
                   bool_or(m.author IS NOT NULL) AS has_author
              FROM messages m
-            WHERE m.workspace_id = $1 ${numFilter}
+            WHERE m.workspace_id = $1 ${NUM_FILTER}
               AND m.identifier IN (SELECT identifier FROM threads_in_period)
             GROUP BY m.identifier
          ) a
@@ -296,12 +326,12 @@ export async function getStats(
   // ── (2) byStage — per thread ──────────────────────────────────────────────
   // Threads without a thread_meta row → stage = NULL (bucketed as "null").
   const stageQuery = pool.query(
-    `WITH ${scopedCte}
+    `WITH ${THREADS_SCOPED_CTE}
      SELECT COALESCE(tm.lead_stage, 'null') AS stage, COUNT(*)::int AS cnt
        FROM (
          SELECT DISTINCT m.identifier
            FROM messages m
-          WHERE m.workspace_id = $1 ${numFilter}
+          WHERE m.workspace_id = $1 ${NUM_FILTER}
             AND m.identifier IN (SELECT identifier FROM threads_scoped)
        ) t
        LEFT JOIN LATERAL (
@@ -320,12 +350,12 @@ export async function getStats(
   // ── (3) byTemperature — per thread ───────────────────────────────────────
   // Mirrors byStage, using lead_temperature instead. Key "null" = no temperature set.
   const temperatureQuery = pool.query(
-    `WITH ${scopedCte}
+    `WITH ${THREADS_SCOPED_CTE}
      SELECT COALESCE(tm.lead_temperature, 'null') AS temperature, COUNT(*)::int AS cnt
        FROM (
          SELECT DISTINCT m.identifier
            FROM messages m
-          WHERE m.workspace_id = $1 ${numFilter}
+          WHERE m.workspace_id = $1 ${NUM_FILTER}
             AND m.identifier IN (SELECT identifier FROM threads_scoped)
        ) t
        LEFT JOIN LATERAL (
@@ -344,12 +374,12 @@ export async function getStats(
   // ── (4) bySource — per thread ────────────────────────────────────────────
   // Mirrors byStage, using lead_source instead. Key "null" = no source set.
   const sourceQuery = pool.query(
-    `WITH ${scopedCte}
+    `WITH ${THREADS_SCOPED_CTE}
      SELECT COALESCE(tm.lead_source, 'null') AS source, COUNT(*)::int AS cnt
        FROM (
          SELECT DISTINCT m.identifier
            FROM messages m
-          WHERE m.workspace_id = $1 ${numFilter}
+          WHERE m.workspace_id = $1 ${NUM_FILTER}
             AND m.identifier IN (SELECT identifier FROM threads_scoped)
        ) t
        LEFT JOIN LATERAL (
@@ -379,7 +409,7 @@ export async function getStats(
   const ingestQuery = pool.query(
     `SELECT COALESCE(m.ingest_source, 'live') AS src, COUNT(*)::int AS cnt
        FROM messages m
-      WHERE m.workspace_id = $1 ${numFilter}
+      WHERE m.workspace_id = $1 ${NUM_FILTER}
         AND ($3::timestamptz IS NULL OR m.created_at >= $3)
         AND ($4::timestamptz IS NULL OR m.created_at <= $4)
       GROUP BY COALESCE(m.ingest_source, 'live')`,
@@ -400,7 +430,7 @@ export async function getStats(
   // Period- and kind-filtered for coherence: tags are restricted to threads in
   // threads_scoped so that byTag does not diverge from `total` under a window/kind.
   const tagQuery = pool.query(
-    `WITH ${scopedCte}
+    `WITH ${THREADS_SCOPED_CTE}
      SELECT tt.tag, COUNT(DISTINCT tt.identifier)::int AS cnt
        FROM whatsapp_thread_tags tt
       WHERE tt.whatsapp_number_id IN ${WORKSPACE_NUMBERS}
@@ -415,13 +445,13 @@ export async function getStats(
   // números do thread têm expose_groups_in_mcp=FALSE. Período-escopado (threads_in_period)
   // para coerência com total. Referencia $1..$5 (não usa $6/kind) → passa params.slice(0,5).
   const hiddenGroupsQuery = pool.query(
-    `WITH ${periodCte}
+    `WITH ${THREADS_IN_PERIOD_CTE}
      SELECT COUNT(*)::int AS hidden_groups
        FROM (
          SELECT m.identifier
            FROM messages m
            JOIN whatsapp_numbers n ON n.id = m.whatsapp_number_id
-          WHERE m.workspace_id = $1 ${numFilter}
+          WHERE m.workspace_id = $1 ${NUM_FILTER}
             AND m.identifier IN (SELECT identifier FROM threads_in_period)
           GROUP BY m.identifier
          HAVING bool_and(n.expose_groups_in_mcp = FALSE)
