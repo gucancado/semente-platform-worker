@@ -261,13 +261,24 @@ export function registerReadRoutes(
   // ── GET /whatsapp/search ─────────────────────────────────────────────────────
   // workspace_id + number_id in query; searchThreads IS workspace-scoped → authz before DB.
   app.get('/whatsapp/search', { preHandler: auth }, async (req: any, reply) => {
-    const { workspace_id, number_id, query, since, until, kind, lead_status, limit, lead_stage, lead_source, tag, opp, opp_status, opp_tag_id, opp_column } = req.query;
+    const { workspace_id, number_id, query, since, until, kind, lead_status, limit, lead_stage, lead_source, tag, opp, opp_status, opp_tag_id, opp_column, arrival_since, arrival_until } = req.query;
     if (!workspace_id || !number_id || !query) return reply.code(400).send({ error: 'workspace_id, number_id e query required' });
     if (Number.isNaN(Number(number_id))) return reply.code(400).send({ error: 'number_id must be numeric' });
     if (opp_tag_id !== undefined && opp_tag_id !== '' && Number.isNaN(Number(opp_tag_id))) return reply.code(400).send({ error: 'opp_tag_id must be numeric' });
     // Task C3 (§10): mesma validação de opp_column de /whatsapp/threads.
     const oppColumn = parseOppColumnCsv(opp_column);
     if (oppColumn === null) return reply.code(400).send({ error: 'invalid opp_column' });
+    // Janela de CHEGADA da conversa (toggle Novas/Todas). Ortogonal a since/until,
+    // que recortam as mensagens que casam com a busca. Validadas aqui: data inválida
+    // no `::timestamptz` seria 500 do pg em vez de 400.
+    const arrivalSince = emptyToUndefined(arrival_since);
+    if (arrivalSince !== undefined && Number.isNaN(Date.parse(arrivalSince))) {
+      return reply.code(400).send({ error: 'arrival_since must be a valid timestamp' });
+    }
+    const arrivalUntil = emptyToUndefined(arrival_until);
+    if (arrivalUntil !== undefined && Number.isNaN(Date.parse(arrivalUntil))) {
+      return reply.code(400).send({ error: 'arrival_until must be a valid timestamp' });
+    }
     if (!await gateMember(req, reply, workspace_id, authz)) return;
     const k = kind === 'dm' || kind === 'group' ? kind : 'all';
     // Tri-state v3: 'indefinido' aceito além de lead/not_lead; qualquer outro valor → 'all'.
@@ -284,6 +295,8 @@ export function registerReadRoutes(
       // HTTP — mesmo racional do /whatsapp/threads acima.
       oppTagId: emptyToUndefined(opp_tag_id),
       oppColumn: oppColumn ?? undefined,
+      arrivalSince,
+      arrivalUntil,
     });
     const numForCtx = await getNumber(deps.pool, Number(number_id));
     const ctx = numForCtx && numForCtx.workspaceId === workspace_id

@@ -12,6 +12,9 @@
  *      (row em whatsapp_groups OU mensagem com author) ficam FORA do board.
  *   4. Ordenação por última atividade DESC (NULLS LAST) + totais independentes do
  *      limit + paginação por cursor dentro de uma coluna + contactName (push_name).
+ *   5. Janela de criação (toggle Novas/Todas): recorta por o.created_at nas QUATRO
+ *      colunas — ganhos INCLUÍDA, ao contrário do statusFilter — com os totais
+ *      acompanhando, combinando com o statusFilter e com bound aberto.
  */
 import { test, beforeEach, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -48,12 +51,14 @@ async function insertLead(identifier: string, isLead: boolean): Promise<void> {
 
 async function insertOpp(o: {
   identifier: string; status: string; isQualified: boolean | null; lossReason?: string | null;
+  /** Data de CRIAÇÃO da opp — o que o toggle Novas/Todas recorta. Omitido = now(). */
+  createdAt?: string;
 }): Promise<number> {
   const closed = o.status === 'em_andamento' ? null : '2026-07-01T00:00:00Z';
   const { rows } = await pool.query(
-    `INSERT INTO whatsapp_opportunities (whatsapp_number_id, workspace_id, identifier, status, is_qualified, loss_reason, closed_at)
-     VALUES (1,'ws',$1,$2,$3,$4,$5) RETURNING id`,
-    [o.identifier, o.status, o.isQualified, o.lossReason ?? null, closed],
+    `INSERT INTO whatsapp_opportunities (whatsapp_number_id, workspace_id, identifier, status, is_qualified, loss_reason, closed_at, created_at)
+     VALUES (1,'ws',$1,$2,$3,$4,$5,COALESCE($6::timestamptz, now())) RETURNING id`,
+    [o.identifier, o.status, o.isQualified, o.lossReason ?? null, closed, o.createdAt ?? null],
   );
   return Number(rows[0].id);
 }
@@ -169,6 +174,85 @@ test('modo perdido (statusFilter): perdidas caem na coluna de posição; ganhos 
   assert.equal(columns.novas_conversas.total, 1);
   assert.equal(columns.interessados.total, 1);
   assert.equal(columns.negociacoes.total, 1);
+  assert.equal(columns.ganhos.total, 1);
+});
+
+/**
+ * Toggle Novas/Todas: recorte por `o.created_at`. Duas diferenças em relação ao
+ * statusFilter que o teste prova de propósito:
+ *  - vale pras QUATRO colunas, `ganhos` INCLUSIVE (o statusFilter isenta ganhos);
+ *  - os totais acompanham, senão a coluna anuncia um número e mostra outro.
+ * O par velha/nova em cada coluna existe pra distinguir "filtrou" de "sumiu tudo".
+ */
+async function seedTwoEras(): Promise<void> {
+  const ERAS: [string, string][] = [['velha', '2026-06-10T00:00:00Z'], ['nova', '2026-08-10T00:00:00Z']];
+  for (const [era, createdAt] of ERAS) {
+    await insertMsg({ identifier: `${era}_nova`, createdAt: '2026-08-20T00:00:00Z' });
+    await insertOpp({ identifier: `${era}_nova`, status: 'em_andamento', isQualified: null, createdAt });
+
+    await insertMsg({ identifier: `${era}_int`, createdAt: '2026-08-19T00:00:00Z' });
+    await insertLead(`${era}_int`, true);
+    await insertOpp({ identifier: `${era}_int`, status: 'em_andamento', isQualified: false, createdAt });
+
+    await insertMsg({ identifier: `${era}_neg`, createdAt: '2026-08-18T00:00:00Z' });
+    await insertLead(`${era}_neg`, true);
+    await insertOpp({ identifier: `${era}_neg`, status: 'em_andamento', isQualified: true, createdAt });
+
+    await insertMsg({ identifier: `${era}_ganho`, createdAt: '2026-08-17T00:00:00Z' });
+    await insertLead(`${era}_ganho`, true);
+    await insertOpp({ identifier: `${era}_ganho`, status: 'ganho', isQualified: true, createdAt });
+  }
+}
+
+test('janela de criação: recorta as 4 colunas (ganhos incluído) e os totais acompanham', async () => {
+  await seedTwoEras();
+  const { columns } = await getBoard(pool, {
+    workspaceId: 'ws', numberId: 1, limitPerColumn: 30,
+    since: '2026-08-01T00:00:00Z', until: '2026-08-31T23:59:59.999Z',
+  });
+
+  assert.deepEqual(ids(columns.novas_conversas.cards), ['nova_nova']);
+  assert.deepEqual(ids(columns.interessados.cards), ['nova_int']);
+  assert.deepEqual(ids(columns.negociacoes.cards), ['nova_neg']);
+  // A diferença pro statusFilter: ganhos NÃO é isenta da janela de criação.
+  assert.deepEqual(ids(columns.ganhos.cards), ['nova_ganho']);
+
+  for (const col of ['novas_conversas', 'interessados', 'negociacoes', 'ganhos'] as const) {
+    assert.equal(columns[col].total, 1, `${col}: total reflete a janela`);
+  }
+});
+
+test('sem janela (modo Todas): as duas eras aparecem', async () => {
+  await seedTwoEras();
+  const { columns } = await getBoard(pool, { workspaceId: 'ws', numberId: 1, limitPerColumn: 30 });
+  assert.deepEqual(ids(columns.ganhos.cards).sort(), ['nova_ganho', 'velha_ganho']);
+  assert.equal(columns.ganhos.total, 2);
+});
+
+test('janela de criação combina com statusFilter (os dois toggles ao mesmo tempo)', async () => {
+  // Perdida criada DENTRO da janela + perdida criada fora; no modo perdidas só a de dentro.
+  await insertMsg({ identifier: 'p_in', createdAt: '2026-08-20T00:00:00Z' });
+  await insertLead('p_in', true);
+  await insertOpp({ identifier: 'p_in', status: 'perdido', isQualified: true, lossReason: 'sem_orcamento', createdAt: '2026-08-10T00:00:00Z' });
+
+  await insertMsg({ identifier: 'p_out', createdAt: '2026-08-19T00:00:00Z' });
+  await insertLead('p_out', true);
+  await insertOpp({ identifier: 'p_out', status: 'perdido', isQualified: true, lossReason: 'sem_orcamento', createdAt: '2026-06-10T00:00:00Z' });
+
+  const { columns } = await getBoard(pool, {
+    workspaceId: 'ws', numberId: 1, limitPerColumn: 30, statusFilter: 'perdido',
+    since: '2026-08-01T00:00:00Z', until: '2026-08-31T23:59:59.999Z',
+  });
+  assert.deepEqual(ids(columns.negociacoes.cards), ['p_in']);
+  assert.equal(columns.negociacoes.total, 1);
+});
+
+test('bound aberto: só `since` recorta pela esquerda e mantém tudo à direita', async () => {
+  await seedTwoEras();
+  const { columns } = await getBoard(pool, {
+    workspaceId: 'ws', numberId: 1, limitPerColumn: 30, since: '2026-07-01T00:00:00Z',
+  });
+  assert.deepEqual(ids(columns.ganhos.cards), ['nova_ganho']);
   assert.equal(columns.ganhos.total, 1);
 });
 

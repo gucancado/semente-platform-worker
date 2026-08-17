@@ -418,12 +418,22 @@ export async function searchThreads(pool: Pool, p: {
   oppTagId?: string | number;
   /** Task C3 (§10): união (CSV) de colunas do board — casa pela opp MAIS RECENTE do par. */
   oppColumn?: BoardColumn[];
+  /**
+   * Janela de CHEGADA da conversa (toggle Novas/Todas do painel): a conversa entra
+   * só se a PRIMEIRA mensagem dela caiu em [arrivalSince, arrivalUntil]. É o mesmo
+   * recorte do `periodBasis: 'arrival'` do listThreads/getStats, e é ORTOGONAL a
+   * `since`/`until` acima — aqueles recortam quais MENSAGENS casam com a busca
+   * (janela do match); estes recortam quais CONVERSAS podem aparecer. Enviar os
+   * dois é legítimo: "trecho dito no período X, em conversa nascida no período Y".
+   */
+  arrivalSince?: string;
+  arrivalUntil?: string;
 }) {
   const kind = p.kind ?? 'all';
   const leadStatus = p.leadStatus ?? 'all';
 
   // $1=numberId $2=workspaceId $3=query $4=since $5=until $6=kind $7=limit
-  // $8=leadStage $9=leadSource $10=tag
+  // $8=leadStage $9=leadSource $10=tag … $16=arrivalSince $17=arrivalUntil
   const params: unknown[] = [
     p.numberId,
     p.workspaceId,
@@ -442,6 +452,9 @@ export async function searchThreads(pool: Pool, p: {
     p.oppTagId ?? null,
     // $15 = oppColumn (Task C3): array de BoardColumn ou null (sem filtro).
     p.oppColumn && p.oppColumn.length > 0 ? p.oppColumn : null,
+    // $16/$17 = janela de chegada da conversa (toggle Novas/Todas).
+    p.arrivalSince ?? null,
+    p.arrivalUntil ?? null,
   ];
 
   const { rows } = await pool.query(
@@ -516,6 +529,19 @@ export async function searchThreads(pool: Pool, p: {
                    LIMIT 1
                 ) ELSE NULL END AS opp_board_column
        ) opp_col ON TRUE
+       -- Chegada da conversa (toggle Novas/Todas): MIN(created_at) sobre TODAS as
+       -- mensagens do par — não dá pra derivar da CTE hits, que só agrega as que
+       -- casaram com o texto (a 1ª mensagem que casou não é a 1ª da conversa).
+       -- Gateado atrás do CASE como o opp_col: sem janela (caso majoritário) não
+       -- reabre a tabela messages por hit.
+       LEFT JOIN LATERAL (
+         SELECT CASE WHEN ($16::timestamptz IS NOT NULL OR $17::timestamptz IS NOT NULL) THEN (
+                  SELECT MIN(m2.created_at)
+                    FROM messages m2
+                   WHERE m2.whatsapp_number_id = $1 AND m2.workspace_id = $2
+                     AND m2.identifier = h.identifier
+                ) ELSE NULL END AS first_at
+       ) arr ON TRUE
       WHERE ($6 = 'all'
           OR ($6 = 'group' AND (h.has_author OR g.jid IS NOT NULL))
           OR ($6 = 'dm' AND NOT (h.has_author OR g.jid IS NOT NULL)))
@@ -552,6 +578,8 @@ export async function searchThreads(pool: Pool, p: {
                  AND oft.tag_id = $14
             ))
         AND ($15::text[] IS NULL OR opp_col.opp_board_column = ANY($15))
+        AND ($16::timestamptz IS NULL OR arr.first_at >= $16)
+        AND ($17::timestamptz IS NULL OR arr.first_at <= $17)
       ORDER BY h.last_match_at DESC
       LIMIT $7`,
     params);

@@ -214,6 +214,60 @@ test('400 status inválido → invalid status (não toca o DB)', async () => {
   await app.close();
 });
 
+// ── Toggle Novas/Todas (?since / ?until) ─────────────────────────────────────────
+
+test('200: ?since&?until → janela de criação chega nas DUAS queries', async () => {
+  const { pool, state } = makePool({ cards: [], counts: {} }); const app = appFor(pool);
+  const since = '2026-08-01T00:00:00.000-03:00';
+  const until = '2026-08-17T23:59:59.999-03:00';
+  const res = await app.inject({
+    method: 'GET',
+    url: `/whatsapp/board?number_id=1&since=${encodeURIComponent(since)}&until=${encodeURIComponent(until)}`,
+    headers,
+  });
+  assert.equal(res.statusCode, 200);
+  const cardsQ = state.queries.find(q => /ROW_NUMBER\(\) OVER/.test(q.text))!;
+  assert.equal(cardsQ.params[8], since, '$9 = since na query de cards');
+  assert.equal(cardsQ.params[9], until, '$10 = until na query de cards');
+  // Os totais TÊM que ver a mesma janela — senão a coluna diz "12" e mostra 3.
+  const countQ = state.queries.find(q => /GROUP BY board_column/.test(q.text))!;
+  assert.equal(countQ.params[3], since, '$4 = since na query de totais');
+  assert.equal(countQ.params[4], until, '$5 = until na query de totais');
+  await app.close();
+});
+
+test('200: sem since/until → null nos dois lados (modo Todas, bound aberto)', async () => {
+  const { pool, state } = makePool({ cards: [], counts: {} }); const app = appFor(pool);
+  await app.inject({ method: 'GET', url: '/whatsapp/board?number_id=1', headers });
+  const cardsQ = state.queries.find(q => /ROW_NUMBER\(\) OVER/.test(q.text))!;
+  assert.equal(cardsQ.params[8], null, '$9 since null');
+  assert.equal(cardsQ.params[9], null, '$10 until null');
+  const countQ = state.queries.find(q => /GROUP BY board_column/.test(q.text))!;
+  assert.equal(countQ.params[3], null); assert.equal(countQ.params[4], null);
+  await app.close();
+});
+
+test('200: since/until vazios são ignorados (?since= não vira filtro)', async () => {
+  const { pool, state } = makePool({ cards: [], counts: {} }); const app = appFor(pool);
+  const res = await app.inject({ method: 'GET', url: '/whatsapp/board?number_id=1&since=&until=', headers });
+  assert.equal(res.statusCode, 200);
+  const cardsQ = state.queries.find(q => /ROW_NUMBER\(\) OVER/.test(q.text))!;
+  assert.equal(cardsQ.params[8], null, 'vazio → sem filtro, não string vazia no cast');
+  assert.equal(cardsQ.params[9], null);
+  await app.close();
+});
+
+test('400 since/until inválidos (não chegam ao ::timestamptz)', async () => {
+  for (const qs of ['since=ontem', 'until=32/13/2026']) {
+    const { pool, state } = makePool(); const app = appFor(pool);
+    const res = await app.inject({ method: 'GET', url: `/whatsapp/board?number_id=1&${qs}`, headers });
+    assert.equal(res.statusCode, 400, qs);
+    assert.match(res.json().error, /must be a valid timestamp/);
+    assert.equal(state.queries.filter(q => /GROUP BY board_column|ROW_NUMBER/.test(q.text)).length, 0, 'sem query após 400');
+    await app.close();
+  }
+});
+
 test('200: nextCursor setado quando há mais que o limit numa coluna', async () => {
   // 2 cards em novas_conversas, limit 1 → 1 card + nextCursor derivado do 1º.
   const twoInOne: CardRow[] = [

@@ -173,6 +173,7 @@ export const BOARD_COLUMN_CASE_SQL = `
 const BOARD_OPPS_CTE = `
 board_opps AS (
   SELECT o.id AS opp_id, o.identifier, o.title, o.status, o.is_qualified, o.loss_reason,
+         o.created_at AS opp_created_at,
          date_trunc('milliseconds', last.max_at) AS la,
          last.max_at AS last_at_raw,
          (${BOARD_COLUMN_CASE_SQL}) AS board_column,
@@ -247,6 +248,13 @@ function mapBoardCard(r: any): BoardCard {
  * 3 colunas de POSIÇÃO por esse status; `ganhos` IGNORA o filtro (sempre visível).
  * Regra SQL: incluir a opp se `board_column = 'ganhos' OR status = :statusFilter`.
  * Os totais por coluna refletem o filtro.
+ *
+ * `since`/`until` (toggle Novas/Todas): recorta por `o.created_at` — só as
+ * oportunidades CRIADAS na janela. Diferente do `statusFilter`, este recorte vale
+ * pras QUATRO colunas, `ganhos` inclusive: a pergunta é quando a oportunidade
+ * nasceu, não em que estado ela está. Bound aberto (null) = sem limite daquele
+ * lado. Entra no mesmo lugar do statusFilter (antes do ROW_NUMBER, e no COUNT) →
+ * totais, cards e paginação enxergam o mesmo subconjunto.
  */
 export async function getBoard(pool: Pool, p: {
   workspaceId: string;
@@ -255,26 +263,36 @@ export async function getBoard(pool: Pool, p: {
   column?: BoardColumn;
   cursor?: BoardCursor;
   statusFilter?: 'em_andamento' | 'perdido';
+  /** ISO (timestamptz) — início da janela de CRIAÇÃO da opp. Omitido = sem limite. */
+  since?: string;
+  /** ISO (timestamptz) — fim da janela de CRIAÇÃO da opp. Omitido = sem limite. */
+  until?: string;
 }): Promise<{ columns: BoardColumns }> {
   const cursorPresent = p.cursor !== undefined;
   const statusFilter = p.statusFilter ?? 'em_andamento';
+  const since = p.since ?? null;
+  const until = p.until ?? null;
 
   const [countRes, cardRes] = await Promise.all([
     // Totais por coluna — independentes do limit e do `column`/cursor (spec §2).
     // Refletem o statusFilter ($3): posição filtra por status; ganhos sempre entra.
+    // E a janela de criação ($4/$5), que vale pras 4 colunas.
     pool.query(
       `WITH ${BOARD_OPPS_CTE}
        SELECT board_column, COUNT(*)::int AS total
          FROM board_opps
         WHERE board_column IS NOT NULL
           AND (board_column = 'ganhos' OR status = $3)
+          AND ($4::timestamptz IS NULL OR opp_created_at >= $4)
+          AND ($5::timestamptz IS NULL OR opp_created_at <= $5)
         GROUP BY board_column`,
-      [p.numberId, p.workspaceId, statusFilter],
+      [p.numberId, p.workspaceId, statusFilter, since, until],
     ),
     // Cards: ROW_NUMBER por coluna (multi) OU filtrado a uma coluna + cursor (single).
     // $3=column|null $4=cursor.lastMessageAt|null $5=cursor.oppId|null $6=cursorPresent
-    // $7=limit+1 $8=statusFilter. O statusFilter entra ANTES do ROW_NUMBER (particiona
-    // só o subconjunto visível) → paginação e totais coerentes com o toggle.
+    // $7=limit+1 $8=statusFilter $9=since $10=until. O statusFilter e a janela de
+    // criação entram ANTES do ROW_NUMBER (particiona só o subconjunto visível) →
+    // paginação e totais coerentes com os dois toggles.
     pool.query(
       `WITH ${BOARD_OPPS_CTE},
        ranked AS (
@@ -286,6 +304,8 @@ export async function getBoard(pool: Pool, p: {
            FROM board_opps bo
           WHERE board_column IS NOT NULL
             AND (board_column = 'ganhos' OR status = $8)
+            AND ($9::timestamptz IS NULL OR opp_created_at >= $9)
+            AND ($10::timestamptz IS NULL OR opp_created_at <= $10)
             AND ($3::text IS NULL OR board_column = $3)
             AND (NOT $6::boolean OR (
                   ($4::timestamptz IS NOT NULL AND (
@@ -302,6 +322,7 @@ export async function getBoard(pool: Pool, p: {
         p.numberId, p.workspaceId, p.column ?? null,
         p.cursor?.lastMessageAt ?? null, p.cursor?.oppId ?? null,
         cursorPresent, p.limitPerColumn + 1, statusFilter,
+        since, until,
       ],
     ),
   ]);

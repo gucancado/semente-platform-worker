@@ -31,9 +31,11 @@ export function registerBoardRoutes(
   // ── GET /whatsapp/board ──────────────────────────────────────────────────────
   // Sem column → primeira página das 4 colunas. Com column (+cursor) → só aquela.
   // `status` (toggle Em andamento/Perdidas, default em_andamento) filtra as 3 colunas
-  // de posição; `ganhos` sempre entra (spec §2).
+  // de posição; `ganhos` sempre entra (spec §2). `since`/`until` (toggle Novas/Todas)
+  // recortam por data de CRIAÇÃO da oportunidade e valem pras 4 colunas.
   app.get('/whatsapp/board', { preHandler: auth }, async (req: any, reply) => {
-    const { number_id, limit_per_column, column, cursor, status } = req.query as Record<string, string | undefined>;
+    const { number_id, limit_per_column, column, cursor, status, since, until } =
+      req.query as Record<string, string | undefined>;
     if (!number_id) return reply.code(400).send({ error: 'number_id required' });
     if (Number.isNaN(Number(number_id))) return reply.code(400).send({ error: 'number_id must be numeric' });
 
@@ -60,6 +62,18 @@ export function registerBoardRoutes(
       statusFilter = statRaw;
     }
 
+    // since/until: janela de criação da opp (toggle Novas/Todas). Validadas AQUI e
+    // não deixadas pro `::timestamptz` porque data inválida no cast vira 500 opaco
+    // (o pg lança) — o caller merece o 400 que diz o que está errado.
+    const sinceRaw = emptyToUndefined(since);
+    if (sinceRaw !== undefined && Number.isNaN(Date.parse(sinceRaw))) {
+      return reply.code(400).send({ error: 'since must be a valid timestamp' });
+    }
+    const untilRaw = emptyToUndefined(until);
+    if (untilRaw !== undefined && Number.isNaN(Date.parse(untilRaw))) {
+      return reply.code(400).send({ error: 'until must be a valid timestamp' });
+    }
+
     // cursor: só faz sentido "carregar mais" DENTRO de uma coluna (spec §10) → exige column.
     let cursorDecoded: BoardCursor | undefined;
     const curRaw = emptyToUndefined(cursor);
@@ -83,6 +97,8 @@ export function registerBoardRoutes(
       column: col,
       cursor: cursorDecoded,
       statusFilter,
+      since: sinceRaw,
+      until: untilRaw,
     });
     logAccess(deps.pool, { actor: req.actingUser, action: 'board', workspaceId: num.workspaceId, numberId: num.id });
     return reply.send({
