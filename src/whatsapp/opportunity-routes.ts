@@ -163,7 +163,10 @@ export function registerOpportunityRoutes(app: FastifyInstance, deps: {
     if (body.loss_reason !== undefined) patch.lossReason = body.loss_reason;
     const result = await patchOpportunityV3(deps.pool, loaded.opp.id, patch, req.actingUser);
     if (!result.ok) {
-      const code = result.error === 'not_found' ? 404 : result.error === 'desqualificar_ganho' ? 409 : 400;
+      // open_exists = a conversa já tem outra oportunidade aberta (reabrir esbarra no
+      // invariante) → 409, mesmo tratamento do conflito de desqualificar ganho.
+      const code = result.error === 'not_found' ? 404
+        : (result.error === 'desqualificar_ganho' || result.error === 'open_exists') ? 409 : 400;
       return reply.code(code).send({ error: result.error });
     }
     logAccess(deps.pool, { actor: req.actingUser, action: 'update_opportunity', workspaceId: loaded.num.workspaceId, numberId: loaded.num.id, identifier: loaded.opp.identifier });
@@ -187,7 +190,10 @@ export function registerOpportunityRoutes(app: FastifyInstance, deps: {
     if (!await gateAdmin(req, reply, loaded.num.workspaceId, authz)) return;
     const result = await moveOpportunity(deps.pool, loaded.opp.id, column, req.actingUser);
     if (!result.ok) {
-      const code = result.error === 'not_found' ? 404 : result.error === 'desqualificar_ganho' ? 409 : 400;
+      // open_exists = a conversa já tem outra oportunidade aberta (reabrir esbarra no
+      // invariante) → 409, mesmo tratamento do conflito de desqualificar ganho.
+      const code = result.error === 'not_found' ? 404
+        : (result.error === 'desqualificar_ganho' || result.error === 'open_exists') ? 409 : 400;
       return reply.code(code).send({ error: result.error });
     }
     logAccess(deps.pool, { actor: req.actingUser, action: 'move_opportunity', workspaceId: loaded.num.workspaceId, numberId: loaded.num.id, identifier: loaded.opp.identifier });

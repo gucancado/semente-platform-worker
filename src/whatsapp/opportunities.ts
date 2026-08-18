@@ -279,6 +279,18 @@ export async function applyThreadLeadTrue(
 }
 
 /**
+ * A unique violation (23505) do índice parcial `idx_opp_open_pair` (mig 060) é a
+ * rede do invariante "uma aberta por conversa" no nível do banco: pega o que o
+ * `countOpenOpportunities` do create não vê, que é a REABERTURA de uma fechada
+ * enquanto outra já está aberta. `constraint` vem preenchido pelo driver do pg
+ * nesse erro; o teste por nome evita capturar qualquer outra unicidade da tabela.
+ */
+function isOpenPairUniqueViolation(err: unknown): boolean {
+  const e = err as { code?: string; constraint?: string } | null;
+  return e?.code === '23505' && e?.constraint === 'idx_opp_open_pair';
+}
+
+/**
  * Cria oportunidade v3 sob o lock da conversa. v3 contract (mig 053): escreve
  * SÓ is_qualified — a coluna legada `qualification` foi dropada (dual-write saiu
  * junto com o trigger de sincronia da 051). Mantém os eventos `created` +
@@ -437,7 +449,7 @@ export type PatchGuard = (client: PoolClient, current: OppStateV3) => Promise<bo
  */
 export async function patchOpportunityGuarded(
   pool: Pool, opportunityId: number, patch: OppPatchV3, changedBy: string, guard: PatchGuard,
-): Promise<{ ok: true; opportunity: Opportunity } | { ok: false; error: 'not_found' | 'desqualificar_ganho' | 'invalid_value' | 'conflict' }> {
+): Promise<{ ok: true; opportunity: Opportunity } | { ok: false; error: 'not_found' | 'desqualificar_ganho' | 'invalid_value' | 'conflict' | 'open_exists' }> {
   // Descobre o par (número, identifier) pra chave do lock. A leitura autoritativa
   // do estado é refeita DENTRO do lock; se a row sumir lá, devolve not_found.
   const head = await pool.query(`SELECT whatsapp_number_id, identifier FROM whatsapp_opportunities WHERE id = $1`, [opportunityId]);
@@ -463,9 +475,13 @@ export async function patchOpportunityGuarded(
         return { ok: true, opportunity: mapOpportunity(after[0]) };
       });
   } catch (err) {
-    // `open_exists` só nasce na CRIAÇÃO (duas abertas no mesmo par). Chegar aqui, num
-    // patch/move sobre opp que já existe, seria bug — re-lança em vez de alargar o
-    // union de erro deste retorno com um código que o chamador não sabe tratar.
+    // REABRIR uma fechada (patch status=em_andamento, ou qualquer move — as 4 colunas
+    // reabrem) esbarra no índice único parcial quando a conversa já tem OUTRA aberta.
+    // Sem esta tradução o caller receberia o 23505 cru (500); com ela, vira o mesmo
+    // `open_exists` do create — a conversa precisa fechar a aberta antes de reabrir
+    // a antiga. É o caso legítimo de reabertura: avaliação de ganho equivocada ou
+    // cliente que voltou atrás.
+    if (isOpenPairUniqueViolation(err)) return { ok: false, error: 'open_exists' };
     if (err instanceof OppInvariantError) {
       if (err.code === 'open_exists') throw err;
       return { ok: false, error: err.code };
@@ -482,15 +498,20 @@ export async function patchOpportunityGuarded(
  */
 export async function patchOpportunityV3(
   pool: Pool, opportunityId: number, patch: OppPatchV3, changedBy: string,
-): Promise<{ ok: true; opportunity: Opportunity } | { ok: false; error: 'not_found' | 'desqualificar_ganho' | 'invalid_value' }> {
+): Promise<{ ok: true; opportunity: Opportunity } | { ok: false; error: 'not_found' | 'desqualificar_ganho' | 'invalid_value' | 'open_exists' }> {
+  // O cast só descarta o 'conflict' do guarded (guard sempre-true nunca o produz);
+  // 'open_exists' PRECISA passar — é o caller que decide o 409 da reabertura.
   return patchOpportunityGuarded(pool, opportunityId, patch, changedBy, async () => true) as Promise<
-    { ok: true; opportunity: Opportunity } | { ok: false; error: 'not_found' | 'desqualificar_ganho' | 'invalid_value' }
+    { ok: true; opportunity: Opportunity }
+    | { ok: false; error: 'not_found' | 'desqualificar_ganho' | 'invalid_value' | 'open_exists' }
   >;
 }
 
 export type MoveResult =
   | { ok: true; opportunity: Opportunity; column: BoardColumn | null; moved: boolean }
-  | { ok: false; error: 'not_found' | 'invalid_value' | 'desqualificar_ganho' };
+  // `open_exists`: mover reabre a fechada (as 4 colunas reabrem) e a conversa já tem
+  // outra aberta — o invariante de uma-aberta-por-conversa barra o drag.
+  | { ok: false; error: 'not_found' | 'invalid_value' | 'desqualificar_ganho' | 'open_exists' };
 
 /**
  * Rota do drag-and-drop do kanban (spec §5/§10): UMA chamada que executa a
@@ -567,9 +588,13 @@ export async function moveOpportunity(
       return { ok: true, opportunity, column: finalColumn, moved };
     });
   } catch (err) {
-    // `open_exists` só nasce na CRIAÇÃO (duas abertas no mesmo par). Chegar aqui, num
-    // patch/move sobre opp que já existe, seria bug — re-lança em vez de alargar o
-    // union de erro deste retorno com um código que o chamador não sabe tratar.
+    // REABRIR uma fechada (patch status=em_andamento, ou qualquer move — as 4 colunas
+    // reabrem) esbarra no índice único parcial quando a conversa já tem OUTRA aberta.
+    // Sem esta tradução o caller receberia o 23505 cru (500); com ela, vira o mesmo
+    // `open_exists` do create — a conversa precisa fechar a aberta antes de reabrir
+    // a antiga. É o caso legítimo de reabertura: avaliação de ganho equivocada ou
+    // cliente que voltou atrás.
+    if (isOpenPairUniqueViolation(err)) return { ok: false, error: 'open_exists' };
     if (err instanceof OppInvariantError) {
       if (err.code === 'open_exists') throw err;
       return { ok: false, error: err.code };

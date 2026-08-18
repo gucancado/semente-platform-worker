@@ -396,12 +396,18 @@ const baseOppRow = {
 function fakePoolForPatch(opts: {
   headRow?: { whatsapp_number_id: number; identifier: string } | null;
   currentRow: any;
+  updateError?: { code: string; constraint?: string };
 }) {
   const clientCalls: { text: string; params: any[] }[] = [];
   const client = {
     query(text: string, params: any[] = []) {
       clientCalls.push({ text, params });
       if (/^SELECT o\.\*/.test(text)) return Promise.resolve({ rows: [opts.currentRow], rowCount: 1 });
+      // `updateError`: simula o que o Postgres devolve quando o UPDATE de reabertura
+      // esbarra no índice único parcial idx_opp_open_pair (mig 060).
+      if (opts.updateError && /^UPDATE whatsapp_opportunities/.test(text)) {
+        return Promise.reject(Object.assign(new Error('duplicate key'), opts.updateError));
+      }
       return Promise.resolve({ rows: [], rowCount: 0 }); // BEGIN / lock / UPDATE / INSERT events / COMMIT
     },
     release() {},
@@ -420,6 +426,30 @@ function fakePoolForPatch(opts: {
   } as any;
   return { pool, clientCalls };
 }
+
+test('patchOpportunityV3: reabrir com outra ABERTA na conversa → open_exists (23505 traduzido, não 500)', async () => {
+  // Caso real do gesto legítimo de reabertura (ganho avaliado errado, ou cliente que
+  // voltou atrás): o UPDATE bate no índice único parcial porque a conversa já tem
+  // outro card aberto. Sem tradução isso vazaria como erro cru de driver.
+  const { pool } = fakePoolForPatch({
+    currentRow: { id: 5, whatsapp_number_id: 9, identifier: 'c', status: 'ganho', is_qualified: true,
+      loss_reason: null, title: null, closed_at: new Date(), created_at: new Date(), updated_at: new Date(),
+      created_by: 'u1', tags: [] },
+    updateError: { code: '23505', constraint: 'idx_opp_open_pair' },
+  });
+  const res = await patchOpportunityV3(pool, 5, { status: 'em_andamento' }, 'u1');
+  assert.deepEqual(res, { ok: false, error: 'open_exists' });
+});
+
+test('patchOpportunityV3: unique violation de OUTRA constraint não vira open_exists (re-lança)', async () => {
+  const { pool } = fakePoolForPatch({
+    currentRow: { id: 5, whatsapp_number_id: 9, identifier: 'c', status: 'ganho', is_qualified: true,
+      loss_reason: null, title: null, closed_at: new Date(), created_at: new Date(), updated_at: new Date(),
+      created_by: 'u1', tags: [] },
+    updateError: { code: '23505', constraint: 'alguma_outra_unique' },
+  });
+  await assert.rejects(() => patchOpportunityV3(pool, 5, { status: 'em_andamento' }, 'u1'));
+});
 
 test('patchOpportunityGuarded: guard false → conflict, ZERO escrita (nem UPDATE nem eventos)', async () => {
   const { pool, clientCalls } = fakePoolForPatch({ currentRow: baseOppRow });
