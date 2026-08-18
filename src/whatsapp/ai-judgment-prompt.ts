@@ -169,13 +169,22 @@ function renderQuestions(ctx: JudgmentContext): string {
   } else if (ctx.lastClosedOpp) {
     const isGanho = ctx.lastClosedOpp.status === 'ganho';
     const canReopen = !isGanho && !ctx.sticky.status; // §6: ganho NUNCA reabre
-    const opts = ['"nada" (conclusão, despedida ou spam)'];
+    // "nada" é o DEFAULT e precisa dizer isso: com o rótulo antigo ("conclusão,
+    // despedida ou spam") o acompanhamento do que já foi fechado — cliente ativo
+    // pedindo status, mandando documento, marcando retorno — não cabia em nenhuma
+    // opção, e o modelo escapava por "criar_nova". Resultado medido em 2026-08-18:
+    // 93 oportunidades abertas pela IA sobre conversas já fechadas, 71 delas dentro
+    // da janela de newOppAfterDays e etiquetadas pela própria IA como "Cliente
+    // ativo"/"Paciente em acompanhamento" — funil inflado com quem já é cliente.
+    const opts = [
+      '"nada" (PADRÃO: conclusão, despedida, spam, ou acompanhamento do que já foi fechado — cliente ativo pedindo status, enviando documento, marcando retorno ou conversando sobre o caso anterior)',
+    ];
     if (canReopen) opts.push('"reabrir" (retomada da MESMA demanda anterior)');
     opts.push(
-      `"criar_nova" (demanda nova, ou o negócio anterior foi fechado há mais de ${ctx.settings.newOppAfterDays} dias)`,
+      `"criar_nova" (SÓ com demanda NOVA e distinta da anterior — outro caso, produto ou serviço —, ou quando o negócio anterior foi fechado há mais de ${ctx.settings.newOppAfterDays} dias). Na dúvida, responda "nada".`,
     );
     const note = isGanho
-      ? ' A oportunidade anterior foi GANHA (venda concluída): NUNCA reabra — no máximo "criar_nova".'
+      ? ' A oportunidade anterior foi GANHA (venda concluída): NUNCA reabra — no máximo "criar_nova". Continuar atendendo quem já fechou NÃO é oportunidade nova.'
       : ctx.sticky.status
         ? ' (Reabertura indisponível: status travado por decisão humana.)'
         : '';

@@ -31,9 +31,13 @@ export interface TransitionResult {
 }
 
 export class OppInvariantError extends Error {
-  code: 'desqualificar_ganho' | 'invalid_value';
+  // `open_exists`: o par (número, identifier) já tem uma oportunidade ABERTA — uma
+  // nova só nasce quando todas as anteriores estão ganhas ou perdidas. Lançado pelo
+  // `createOpportunityV3` (dentro do lock da conversa), com o índice único parcial
+  // `idx_opp_open_pair` (mig 060) como rede embaixo.
+  code: 'desqualificar_ganho' | 'invalid_value' | 'open_exists';
 
-  constructor(code: 'desqualificar_ganho' | 'invalid_value') {
+  constructor(code: 'desqualificar_ganho' | 'invalid_value' | 'open_exists') {
     super(code);
     this.name = 'OppInvariantError';
     this.code = code;

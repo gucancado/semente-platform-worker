@@ -228,14 +228,18 @@ test('createOpportunityV3: isQualified=false lança invalid_value sem tocar o ba
 // fakePoolForCreate: connect() devolve um client cujo SELECT COUNT responde
 // `anyCount`; INSERT devolve id fixo; o SELECT final (OPP_SELECT) devolve uma row
 // mínima válida. Grava a sequência de queries do client (BEGIN/lock/count/INSERT/...).
-function fakePoolForCreate(opts: { anyCount: number }) {
+function fakePoolForCreate(opts: { anyCount: number; openCount?: number }) {
   const calls: { text: string; params: any[] }[] = [];
   let connected = false;
   const client = {
     query(text: string, params: any[] = []) {
       calls.push({ text, params });
+      // As duas contagens têm o mesmo prefixo; o que as separa é o `status =
+      // 'em_andamento'` do WHERE (countOpenOpportunities). `openCount` default 0 =
+      // conversa sem card aberto, o cenário em que a criação deve seguir.
       if (/SELECT COUNT\(\*\)::int AS n FROM whatsapp_opportunities/.test(text)) {
-        return Promise.resolve({ rows: [{ n: opts.anyCount }], rowCount: 1 });
+        const open = /status = 'em_andamento'/.test(text);
+        return Promise.resolve({ rows: [{ n: open ? (opts.openCount ?? 0) : opts.anyCount }], rowCount: 1 });
       }
       if (/INSERT INTO whatsapp_opportunities/.test(text)) {
         return Promise.resolve({ rows: [{ id: 42 }], rowCount: 1 });
@@ -283,12 +287,26 @@ test('createOpportunityV3 skipIfAnyOpportunity: par sem opportunity (anyCount=0)
   assert.equal(calls.some((c) => /INSERT INTO whatsapp_opportunities/.test(c.text)), true);
 });
 
-test('createOpportunityV3 SEM skipIfAnyOpportunity: nunca conta nada, sempre insere (comportamento pré-existente intocado)', async () => {
-  const { pool, calls } = fakePoolForCreate({ anyCount: 5 }); // mesmo com opps existentes no fake
+test('createOpportunityV3 SEM skipIfAnyOpportunity: par com opp ABERTA → open_exists, sem INSERT', async () => {
+  // Invariante do funil: uma oportunidade nova só nasce com todas as anteriores
+  // ganhas ou perdidas. Vale em TODO caminho de criação — inclusive a rota manual
+  // e o MCP, que antes desta checagem abriam um segundo card em silêncio.
+  const { pool, calls } = fakePoolForCreate({ anyCount: 5, openCount: 1 });
+  await assert.rejects(
+    () => createOpportunityV3(pool, { numberId: 9, workspaceId: 'ws', identifier: 'c', createdBy: 'u1' }),
+    (err: any) => err?.code === 'open_exists',
+  );
+  const texts = calls.map((c) => c.text);
+  assert.equal(texts.some((t) => /INSERT INTO whatsapp_opportunities/.test(t)), false);
+  const lockIdx = texts.findIndex((t) => /pg_advisory_xact_lock/.test(t));
+  const openIdx = texts.findIndex((t) => /status = 'em_andamento'/.test(t));
+  assert.ok(lockIdx >= 0 && lockIdx < openIdx, 'a contagem de abertas roda DEPOIS do lock, na mesma tx');
+});
+
+test('createOpportunityV3 SEM skipIfAnyOpportunity: par só com opps FECHADAS → insere (reabertura é válida)', async () => {
+  const { pool, calls } = fakePoolForCreate({ anyCount: 5, openCount: 0 });
   const result = await createOpportunityV3(pool, { numberId: 9, workspaceId: 'ws', identifier: 'c', createdBy: 'u1' });
   assert.ok(result && !('skipped' in result));
-  assert.equal(calls.some((c) => /SELECT COUNT\(\*\)::int AS n FROM whatsapp_opportunities/.test(c.text)), false,
-    'sem a flag (uso por rota humana), a re-checagem de contagem não roda');
   assert.equal(calls.some((c) => /INSERT INTO whatsapp_opportunities/.test(c.text)), true);
 });
 

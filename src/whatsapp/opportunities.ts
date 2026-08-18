@@ -323,6 +323,14 @@ export async function createOpportunityV3(pool: Pool, p: {
       const anyCount = await countAnyOpportunities(client, p.numberId, p.identifier);
       if (anyCount > 0) return { skipped: true };
     }
+    // Invariante: NUNCA duas abertas no mesmo par — uma oportunidade nova só pode
+    // nascer com todas as anteriores já ganhas ou perdidas. Vive aqui (dentro do
+    // lock da conversa, depois do skip do poller) porque este é o único caminho de
+    // criação das rotas e do MCP, que até então não checavam nada: a checagem
+    // existia só no poller e no closed_action da IA, então a criação manual podia
+    // abrir um segundo card na mesma conversa em silêncio.
+    const openCount = await countOpenOpportunities(client, p.numberId, p.identifier);
+    if (openCount > 0) throw new OppInvariantError('open_exists');
     const isQ = p.isQualified ?? null;
     const tagNames = new Map<number, string>();
     if (p.tagIds?.length) {
@@ -455,7 +463,13 @@ export async function patchOpportunityGuarded(
         return { ok: true, opportunity: mapOpportunity(after[0]) };
       });
   } catch (err) {
-    if (err instanceof OppInvariantError) return { ok: false, error: err.code };
+    // `open_exists` só nasce na CRIAÇÃO (duas abertas no mesmo par). Chegar aqui, num
+    // patch/move sobre opp que já existe, seria bug — re-lança em vez de alargar o
+    // union de erro deste retorno com um código que o chamador não sabe tratar.
+    if (err instanceof OppInvariantError) {
+      if (err.code === 'open_exists') throw err;
+      return { ok: false, error: err.code };
+    }
     throw err;
   }
 }
@@ -553,7 +567,13 @@ export async function moveOpportunity(
       return { ok: true, opportunity, column: finalColumn, moved };
     });
   } catch (err) {
-    if (err instanceof OppInvariantError) return { ok: false, error: err.code };
+    // `open_exists` só nasce na CRIAÇÃO (duas abertas no mesmo par). Chegar aqui, num
+    // patch/move sobre opp que já existe, seria bug — re-lança em vez de alargar o
+    // union de erro deste retorno com um código que o chamador não sabe tratar.
+    if (err instanceof OppInvariantError) {
+      if (err.code === 'open_exists') throw err;
+      return { ok: false, error: err.code };
+    }
     throw err;
   }
 }

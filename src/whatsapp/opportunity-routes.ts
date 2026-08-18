@@ -117,7 +117,12 @@ export function registerOpportunityRoutes(app: FastifyInstance, deps: {
       return reply.send({ schema: 'whatsapp_v1', context: tenantContext(num), opportunity });
     } catch (err) {
       // is_qualified=false na criação → invalid_value (desqualificar é patch, não create).
-      if (err instanceof OppInvariantError) return reply.code(err.code === 'desqualificar_ganho' ? 409 : 400).send({ error: err.code });
+      // open_exists → 409: a conversa já tem uma aberta; é conflito de estado, não
+      // payload inválido (o cliente deve reusar/fechar a existente, não corrigir o corpo).
+      if (err instanceof OppInvariantError) {
+        const conflict = err.code === 'desqualificar_ganho' || err.code === 'open_exists';
+        return reply.code(conflict ? 409 : 400).send({ error: err.code });
+      }
       throw err;
     }
   });
