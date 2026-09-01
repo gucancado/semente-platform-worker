@@ -18,6 +18,7 @@ import type { Pool } from 'pg';
 import { computeSticky, type StickyFlags } from './ai-sticky.js';
 import { listLossReasons } from './loss-reasons.js';
 import { listDisqualifyReasons } from './disqualify-reasons.js';
+import { truncateSafe } from './text-safety.js';
 
 /** Cauda de contexto: últimas N mensagens em/antes do watermark. */
 const TAIL_LIMIT = 30;
@@ -108,7 +109,10 @@ function mapMessage(row: any): JudgmentMessage {
   const text = row.text == null ? '' : String(row.text);
   return {
     direction: row.direction,
-    text: text.length > MAX_TEXT_CHARS ? text.slice(0, MAX_TEXT_CHARS) : text,
+    // truncateSafe, não slice: cortar por unidade UTF-16 parte emoji ao meio e o
+    // surrogate órfão faz o servidor recusar o body inteiro (400 no run inteiro
+    // daquela conversa, todo dia). Ver whatsapp/text-safety.ts.
+    text: truncateSafe(text, MAX_TEXT_CHARS),
     createdAt: toISO(row.created_at) ?? '',
   };
 }

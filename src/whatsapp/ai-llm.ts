@@ -14,6 +14,7 @@
  * já pronto e injetável.
  */
 import OpenAI from 'openai';
+import { stripLoneSurrogates } from './text-safety.js';
 
 export interface JudgmentLlmUsage {
   inputTokens: number;
@@ -72,8 +73,11 @@ export class OpenAIJudgmentLlm implements JudgmentLlm {
       temperature: 0,
       response_format: { type: 'json_object' },
       messages: [
-        { role: 'system', content: system },
-        { role: 'user', content: user },
+        // Rede de segurança: surrogate órfão (emoji partido por algum truncamento
+        // rio acima) faz o parser JSON do servidor recusar o body — 400 e a
+        // conversa nunca é julgada. No-op em texto são. Ver text-safety.ts.
+        { role: 'system', content: stripLoneSurrogates(system) },
+        { role: 'user', content: stripLoneSurrogates(user) },
       ],
     });
     const raw = typeof r?.choices?.[0]?.message?.content === 'string' ? r.choices[0].message.content : '';
