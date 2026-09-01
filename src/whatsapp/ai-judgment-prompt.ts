@@ -49,6 +49,12 @@ Regras invioláveis:
 - "loss_reason" só pode ser um dos códigos do catálogo de motivos de perda apresentado.
 - "tags" só podem ser ids que existam no catálogo de etiquetas apresentado (você apenas
   ACRESCENTA etiquetas; nunca remove).
+- Mensagem cujo texto seja um marcador entre colchetes ("[áudio — transcrição
+  indisponível]", "[áudio longo — não transcrito]", "[áudio sem fala reconhecível]")
+  é um áudio REAL do qual não temos o conteúdo — não é silêncio do cliente nem
+  recusa de informar. Trate como INFORMAÇÃO AUSENTE: qualify=null e oportunidade
+  aberta. NUNCA use esse marcador como base para qualify=false, "perdido" ou
+  not_lead: o que falta é do nosso lado, não do cliente.
 
 Formato exato da resposta (use null onde não se aplicar):
 {"triage":"lead"|"not_lead"|null,"not_lead_reason":"motivo"|null,"open_opp":{"qualify":true|false|null,"status":"ganho"|"perdido"|null,"loss_reason":"codigo"|null}|null,"closed_action":"nada"|"reabrir"|"criar_nova"|null,"tags":[ids],"rationale":"justificativa curta"}
