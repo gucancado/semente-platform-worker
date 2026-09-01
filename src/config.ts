@@ -187,6 +187,11 @@ const EnvSchema = z.object({
   TRANSCRIBE_POLLER_INTERVAL_MS: z.coerce.number().int().positive().default(5_000),
   TRANSCRIBE_POLLER_BATCH_SIZE: z.coerce.number().int().positive().default(20),
   TRANSCRIBE_MAX_ATTEMPTS: z.coerce.number().int().positive().default(4),
+  // Falha SISTÊMICA do provedor (429 sem crédito, 5xx, rede): pausa da fila
+  // inteira (breaker) e teto de idade do retry que não consome tentativa.
+  // Ver src/transcription/error-class.ts para o porquê.
+  TRANSCRIBE_SYSTEMIC_COOLDOWN_MS: z.coerce.number().int().positive().default(600_000), // 10min
+  TRANSCRIBE_SYSTEMIC_MAX_AGE_H: z.coerce.number().int().positive().default(72),
   TRANSCRIBE_MAX_DURATION_S: z.coerce.number().int().positive().default(600),
   R2_BUCKET_WHATSAPP_MEDIA: z.string().optional(),
   INTERNAL_WORKSPACE_ID: z.string().optional(),

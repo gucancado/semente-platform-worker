@@ -64,3 +64,34 @@ test('markTranscriptionRetryOrFail: retry até max, depois failed', async () => 
   assert.equal(rows[0].status, 'failed');
   assert.equal(rows[0].last_error, 'boom');
 });
+
+test('markTranscriptionRetryOrFail: falha SISTÊMICA não consome tentativa e mantém o job vivo', async () => {
+  // Regressão do apagão de 2026-08-24/31: 1.002 jobs viraram `failed` permanente
+  // porque o 429 "no credits" gastou as 4 tentativas de cada um em minutos.
+  const mid = await seedAudioMsg('E1');
+  const j = await insertTranscriptionJob({ message_id: mid, whatsapp_number_id: 1, workspace_id: 'ws-1', instance: 'inst-1', evolution_event_id: 'E1', direction: 'inbound', is_group: false, identifier: '+55a', inbox_id: 10, raw_envelope: {} });
+  await pool.query(`UPDATE transcription_jobs SET attempts=4 WHERE id=$1`, [j.id]);
+
+  const r = await markTranscriptionRetryOrFail(j.id!, 4, 4, '429 You have no credits remaining.', {
+    createdAt: new Date(),
+  });
+  assert.equal(r.retried, true, 'attempts no limite não pode falhar quando a culpa é do ambiente');
+  assert.equal(r.systemic, true);
+
+  const { rows } = await pool.query(`SELECT status, attempts FROM transcription_jobs WHERE id=$1`, [j.id]);
+  assert.equal(rows[0].status, 'pending');
+  assert.equal(rows[0].attempts, 3, 'a tentativa consumida pelo claim é devolvida');
+});
+
+test('markTranscriptionRetryOrFail: sistêmico velho demais vira failed — a fila não é infinita', async () => {
+  const mid = await seedAudioMsg('E1');
+  const j = await insertTranscriptionJob({ message_id: mid, whatsapp_number_id: 1, workspace_id: 'ws-1', instance: 'inst-1', evolution_event_id: 'E1', direction: 'inbound', is_group: false, identifier: '+55a', inbox_id: 10, raw_envelope: {} });
+  const velho = new Date(Date.now() - 100 * 3_600_000); // 100h
+  const r = await markTranscriptionRetryOrFail(j.id!, 1, 4, '429 You have no credits remaining.', {
+    createdAt: velho,
+    systemicMaxAgeH: 72,
+  });
+  assert.equal(r.retried, false);
+  const { rows } = await pool.query(`SELECT status FROM transcription_jobs WHERE id=$1`, [j.id]);
+  assert.equal(rows[0].status, 'failed');
+});

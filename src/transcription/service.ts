@@ -18,6 +18,11 @@ export type ProcessDeps = {
   maxAttempts: number;
   maxDurationS: number;
   debounceMs: number;
+  /** Teto de IDADE (horas) do retry de falha sistêmica — ver error-class.ts. */
+  systemicMaxAgeH?: number;
+  /** Chamado quando a falha foi do AMBIENTE (não do áudio). O poller usa pra
+   *  abrir o circuit breaker; o CLI ignora. */
+  onSystemicFailure?: (error: string) => void;
   r2: {
     putAndVerify: (key: string, body: Buffer, ct: string, bucket?: string) => Promise<void>;
     getObjectBuffer: (key: string, bucket?: string) => Promise<Buffer>;
@@ -101,8 +106,15 @@ export async function processJob(deps: ProcessDeps, job: TranscriptionJob): Prom
     fireTrigger = true;
   } catch (err) {
     const msgErr = (err as Error).message;
-    const res = await markTranscriptionRetryOrFail(job.id, job.attempts, deps.maxAttempts, msgErr);
-    deps.log?.warn({ jobId: job.id, err: msgErr, retried: res.retried }, 'transcription job falhou');
+    const res = await markTranscriptionRetryOrFail(job.id, job.attempts, deps.maxAttempts, msgErr, {
+      createdAt: job.created_at,
+      systemicMaxAgeH: deps.systemicMaxAgeH,
+    });
+    deps.log?.warn({ jobId: job.id, err: msgErr, retried: res.retried, systemic: res.systemic }, 'transcription job falhou');
+    // Falha do AMBIENTE: avisa o poller pra pausar a fila inteira (breaker). Sem
+    // isso, um provedor fora do ar recebe uma rajada de batches por minuto e cada
+    // job volta em 15min só pra tomar o mesmo erro.
+    if (res.systemic) deps.onSystemicFailure?.(msgErr);
     if (!res.retried) {
       await updateMsg(pool, job.message_id, { transcription_status: 'failed', text: '[áudio — transcrição indisponível]' });
       fireTrigger = true; // falha terminal: dispara mesmo assim, não travar o lead

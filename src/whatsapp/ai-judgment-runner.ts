@@ -32,6 +32,7 @@ import {
 import { buildJudgmentPrompt, parseJudgmentDecision } from './ai-judgment-prompt.js';
 import { applyJudgment, recordUnappliedJudgment, type ApplyJudgmentResult } from './ai-judgment-apply.js';
 import { judgmentCost, type JudgmentLlm } from './ai-llm.js';
+import { assessSweepHealth } from './ai-sweep-health.js';
 
 const DEFAULT_TICK_MS = 60 * 60_000; // 1h
 const MIN_TICK_MS = 15 * 60_000; // clamp de segurança: env abaixo disso vira 15min (anti-runaway de custo)
@@ -137,6 +138,17 @@ function toISO(v: unknown): string | null {
 // eternamente verdadeiro e toda conversa já julgada volta como pendente em todo run: o
 // LLM é chamado (custo pago), o CLAIM cai no UNIQUE e a decisão é descartada. Medido em
 // prod: 143 chamadas → 50 julgamentos (65% de desperdício), 34/34 conversas zumbis.
+//
+// ÁUDIO AINDA NA FILA ADIA A CONVERSA ($4 = janela em horas). O texto do áudio é
+// insumo da triagem: julgar antes da transcrição faz o LLM ler
+// `[áudio — transcrição indisponível]` no lugar da fala do cliente, e o julgamento
+// NÃO se refaz sozinho depois — a transcrição preenche `messages.text` sem mexer em
+// `created_at`, então o watermark já queimou e a conversa não volta como pendente.
+// Medido no apagão de 2026-08-24/31: 169 conversas julgadas às cegas sobre 587 áudios.
+// A janela existe pra que um job eternamente preso (mídia que a Evolution não entrega
+// mais) não congele a triagem da conversa pra sempre: passadas as horas da janela, o
+// julgamento acontece com o que houver. Só `pending` adia — job `failed` já é terminal
+// e esperar por ele não melhoraria nada.
 const PENDING_SQL = `/* ai:pending */
   SELECT m.whatsapp_number_id, m.identifier, m.workspace_id,
          MAX(m.created_at) AS last_message_at,
@@ -160,16 +172,26 @@ const PENDING_SQL = `/* ai:pending */
         WHERE m2.whatsapp_number_id = m.whatsapp_number_id AND m2.identifier = m.identifier
           AND m2.author IS NOT NULL
      )
+     AND NOT EXISTS (
+       SELECT 1 FROM transcription_jobs tj
+        WHERE tj.whatsapp_number_id = m.whatsapp_number_id AND tj.identifier = m.identifier
+          AND tj.status = 'pending'
+          AND tj.created_at > NOW() - ($4 || ' hours')::INTERVAL
+     )
    GROUP BY m.whatsapp_number_id, m.identifier, m.workspace_id, j.watermark
   HAVING date_trunc('milliseconds', MAX(m.created_at)) > COALESCE(j.watermark, $2::timestamptz)
    ORDER BY MAX(m.created_at) DESC
    LIMIT $3`;
 
+/** Janela em que um áudio ainda por transcrever ADIA o julgamento da conversa. */
+export const DEFAULT_AUDIO_GRACE_H = 48;
+
 export async function fetchPendingConversations(
   pool: Pool,
-  args: { workspaceId: string; pipelineSince: unknown; limit: number },
+  args: { workspaceId: string; pipelineSince: unknown; limit: number; audioGraceHours?: number },
 ): Promise<PendingConversation[]> {
-  const { rows } = await pool.query(PENDING_SQL, [args.workspaceId, args.pipelineSince, args.limit]);
+  const graceH = args.audioGraceHours ?? DEFAULT_AUDIO_GRACE_H;
+  const { rows } = await pool.query(PENDING_SQL, [args.workspaceId, args.pipelineSince, args.limit, String(graceH)]);
   return rows.map((r: any) => ({
     numberId: Number(r.whatsapp_number_id),
     identifier: String(r.identifier),
@@ -392,7 +414,18 @@ export function startJudgmentRunner(pool: Pool, provider: JudgmentLlm, opts: Sta
     running = true;
     try {
       const r = await runJudgmentSweep(pool, provider);
-      opts.log?.info({ ...r }, 'ai-judgment: run concluído');
+      const health = assessSweepHealth(r);
+      if (health.level === 'ok') {
+        opts.log?.info({ ...r }, 'ai-judgment: run concluído');
+      } else {
+        // Level ERROR de propósito: um run 100% quebrado tinha o MESMO formato de
+        // log INFO de um run em que a IA decidiu não agir, e foi assim que 7 dias
+        // de triagem parada passaram sem ninguém notar (2026-08-24/31).
+        (opts.log?.error ?? ((o: any, m?: string) => console.error('[ai-judgment]', m, o)))(
+          { ...r, health: health.level, reason: health.reason },
+          `ai-judgment: run ${health.level.toUpperCase()} — ${health.reason}`,
+        );
+      }
     } catch (err) {
       (opts.log?.error ?? ((o: any) => console.error('[ai-judgment] run falhou:', o)))(
         { err: (err as Error).message },

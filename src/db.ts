@@ -1,6 +1,7 @@
 import pg from 'pg';
 import type { PoolClient } from 'pg';
 import { config } from './config.js';
+import { planTranscriptionRetry } from './transcription/error-class.js';
 
 export const pool = new pg.Pool({
   connectionString: config.DATABASE_URL,
@@ -636,6 +637,9 @@ export type TranscriptionJob = {
   id: number; message_id: number; whatsapp_number_id: number; workspace_id: string | null;
   instance: string; evolution_event_id: string; direction: string; is_group: boolean;
   identifier: string; inbox_id: number | null; raw_envelope: any; status: string; attempts: number;
+  /** Nascimento do job — a IDADE (não a contagem de tentativas) é o que limita o
+   *  retry de falha sistêmica em `planTranscriptionRetry`. */
+  created_at: Date;
 };
 
 export async function insertTranscriptionJob(a: {
@@ -653,7 +657,7 @@ export async function insertTranscriptionJob(a: {
   return { id: rows[0]?.id ?? null };
 }
 
-const TJ_COLS = `id, message_id, whatsapp_number_id, workspace_id, instance, evolution_event_id, direction, is_group, identifier, inbox_id, raw_envelope, status, attempts`;
+const TJ_COLS = `id, message_id, whatsapp_number_id, workspace_id, instance, evolution_event_id, direction, is_group, identifier, inbox_id, raw_envelope, status, attempts, created_at`;
 // RETURNING num UPDATE ... FROM due precisa qualificar as colunas com `t.` — sem
 // isso `id` é ambíguo (a CTE `due` também tem `id`). Espelha claimDuePendingTriggers.
 const TJ_COLS_T = TJ_COLS.split(', ').map((c) => `t.${c}`).join(', ');
@@ -685,18 +689,72 @@ export async function getTranscriptionJobByMessageId(messageId: number): Promise
   return rows[0] ?? null;
 }
 
+/**
+ * Devolve ao pool jobs que foram CLAIMADOS mas não chegaram a ser processados
+ * (o breaker cortou o batch). O claim já somou +1 em attempts e empurrou
+ * scheduled_at 5min à frente; sem desfazer isso, a proteção contra o apagão
+ * cobraria uma tentativa de cada job que ela mesma poupou.
+ * Só mexe em quem continua 'pending' — job que virou done/failed no meio-tempo
+ * não é reaberto.
+ */
+export async function releaseTranscriptionClaims(jobIds: number[], delaySec: number): Promise<void> {
+  if (jobIds.length === 0) return;
+  await pool.query(
+    `UPDATE transcription_jobs
+        SET attempts = GREATEST(attempts - 1, 0),
+            scheduled_at = NOW() + ($2 || ' seconds')::INTERVAL,
+            updated_at = NOW()
+      WHERE id = ANY($1::bigint[]) AND status = 'pending'`,
+    [jobIds, String(delaySec)]);
+}
+
 export async function markTranscriptionDone(jobId: number): Promise<void> {
   await pool.query(`UPDATE transcription_jobs SET status='done', raw_envelope='{}'::jsonb, last_error=NULL, updated_at=NOW() WHERE id=$1`, [jobId]);
 }
 
-export async function markTranscriptionRetryOrFail(jobId: number, attempts: number, maxAttempts: number, error: string): Promise<{ retried: boolean }> {
-  if (attempts >= maxAttempts) {
+/**
+ * Aplica o plano de `planTranscriptionRetry` (política pura em
+ * transcription/error-class.ts — a decisão mora lá, aqui só o UPDATE).
+ *
+ * A diferença que importa em falha SISTÊMICA (429 sem crédito, 5xx, rede):
+ * `attempts` volta atrás. O claim já somou +1 antes de processar, então devolver
+ * a tentativa é o que impede um apagão do provedor de queimar as 4 chances de
+ * cada job em minutos e transformar a fila inteira em `failed` permanente —
+ * exatamente o que aconteceu em 2026-08-24 (1.002 áudios só voltaram por UPDATE
+ * manual, 7 dias depois).
+ */
+export async function markTranscriptionRetryOrFail(
+  jobId: number,
+  attempts: number,
+  maxAttempts: number,
+  error: string,
+  opts?: { createdAt?: Date | string | null; systemicMaxAgeH?: number; now?: Date },
+): Promise<{ retried: boolean; systemic: boolean }> {
+  const now = opts?.now ?? new Date();
+  const createdAt = opts?.createdAt ? new Date(opts.createdAt) : null;
+  const ageH = createdAt ? (now.getTime() - createdAt.getTime()) / 3_600_000 : 0;
+  const plan = planTranscriptionRetry({
+    error,
+    attempts,
+    maxAttempts,
+    ageH,
+    systemicMaxAgeH: opts?.systemicMaxAgeH ?? 72,
+  });
+
+  if (plan.action === 'fail') {
     await pool.query(`UPDATE transcription_jobs SET status='failed', last_error=$2, updated_at=NOW() WHERE id=$1`, [jobId, error]);
-    return { retried: false };
+    return { retried: false, systemic: plan.systemic };
   }
-  const backoffSec = Math.min(attempts * 30, 300);
+
+  // consumesAttempt=false devolve o +1 do claim (GREATEST protege contra corrida
+  // com um reset manual de attempts feito no meio do processamento).
+  const attemptsExpr = plan.consumesAttempt ? 'attempts' : 'GREATEST(attempts - 1, 0)';
   await pool.query(
-    `UPDATE transcription_jobs SET status='pending', scheduled_at = NOW() + ($2 || ' seconds')::INTERVAL, last_error=$3, updated_at=NOW() WHERE id=$1`,
-    [jobId, String(backoffSec), error]);
-  return { retried: true };
+    `UPDATE transcription_jobs
+        SET status='pending', attempts = ${attemptsExpr},
+            scheduled_at = NOW() + ($2 || ' seconds')::INTERVAL,
+            last_error=$3, updated_at=NOW()
+      WHERE id=$1`,
+    [jobId, String(plan.backoffSec), error]);
+  return { retried: true, systemic: plan.systemic };
 }
