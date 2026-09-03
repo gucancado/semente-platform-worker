@@ -1,12 +1,12 @@
 import type { Pool } from 'pg';
 import { updateNumberStatus, getNumberByInstance, upsertConnectedNumber, claimNumberByPhone, normalizePhone } from './numbers.js';
 import { getProvisioning, deleteProvisioning, markProvisioningBlocked } from './provisioning.js';
-import { markLinkConsumed } from './provision-links.js';
+import { markLinkConsumed, settleReconnectLinks } from './provision-links.js';
 import { seedDefaultReasons } from './disqualify-reasons.js';
 import { seedDefaultSourceSignals } from './source-signals.js';
 import { getOrCreateSettings } from './workspace-settings.js';
 import { config } from '../config.js';
-import { deleteInstance } from '../evolution/client.js';
+import { deleteInstance, logoutInstance } from '../evolution/client.js';
 import { syncGroupSubjectsDebounced } from './group-sync.js';
 import { enqueueConnectionEvent } from './connection-alerts.js';
 
@@ -46,6 +46,22 @@ export async function handleConnectionEvent(pool: Pool, payload: any): Promise<b
   }
 
   // status === 'connected'
+
+  // Links de reconexão desta instância se liquidam AQUI — o webhook é a única
+  // autoridade sobre o open real (o polling das rotas perde um open→close rápido).
+  // Roda ANTES de qualquer escrita em whatsapp_numbers porque updateNumberStatus
+  // sobrescreve o phone: telefone divergente = pareamento indevido por link vazado,
+  // e deixá-lo gravar trocaria a identidade do número mantendo todo o histórico.
+  // Derruba a sessão com logout — NUNCA delete: a instância é a do cliente.
+  const settle = await settleReconnectLinks(pool, instance, extractPhone(payload.data));
+  if (settle.kind === 'mismatch') {
+    const evoDeps = { baseUrl: config.EVOLUTION_API_URL, apiKey: config.EVOLUTION_API_KEY };
+    logoutInstance(evoDeps, instance).catch((err) =>
+      console.error('[reconnect-link] logout pós-mismatch falhou:', (err as Error).message));
+    console.error(`[reconnect-link] telefone divergente em ${instance} (esperado ${settle.expectedPhone}) — sessão derrubada, link bloqueado`);
+    return true;
+  }
+
   let numberId: number | null = null;
   const existing = await getNumberByInstance(pool, instance);
   if (existing) {
