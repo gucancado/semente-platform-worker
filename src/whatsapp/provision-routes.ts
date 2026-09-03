@@ -124,6 +124,57 @@ export function registerProvisionRoutes(app: FastifyInstance, deps: { pool: Pool
     return reply.send({ token: link.token, expiresAt: link.expiresAt, maxClicks: link.maxClicks });
   });
 
+  /**
+   * Emite link de RECONEXÃO. Exatamente UMA forma por chamada:
+   *  - { number_id, workspace_id } → número de workspace. O proxy do painel valida
+   *    admin via SSO; AQUI se confere que o número pertence ao workspace (autoridade
+   *    final — sem isso, admin do workspace A emitiria link deslogado pra número do B).
+   *  - { instance, label?, expected_phone } → instância de SISTEMA (ex.: saturno).
+   *    Não exposta por proxy nenhum do painel; só o CLI a alcança.
+   */
+  app.post('/admin/whatsapp/reconnect-links', async (req: any, reply) => {
+    const { number_id, workspace_id, instance, label, expected_phone } = req.body ?? {};
+    if (number_id != null && instance != null) {
+      return reply.code(400).send({ error: 'exactly_one_of_number_id_or_instance' });
+    }
+
+    let targetInstance: string;
+    let targetLabel: string | null;
+    let workspaceId: string | null;
+    let expectedPhone: string | undefined;
+
+    if (number_id != null) {
+      // Obrigatório, não opcional: omitir não pode pular o controle de posse.
+      if (typeof workspace_id !== 'string' || !workspace_id) {
+        return reply.code(400).send({ error: 'workspace_id required' });
+      }
+      const n = await getNumber(deps.pool, Number(number_id));
+      if (!n || n.workspaceId !== workspace_id) return reply.code(404).send({ error: 'not found' });
+      expectedPhone = normalizePhone(n.phone);
+      // Número que nunca conectou não tem telefone pra travar — e reconectar o
+      // que nunca conectou é o fluxo de CONEXÃO, não este.
+      if (!expectedPhone) return reply.code(409).send({ error: 'number_never_connected' });
+      targetInstance = n.evolutionInstance;
+      targetLabel = n.label ?? n.phone ?? null;
+      workspaceId = n.workspaceId;
+    } else if (typeof instance === 'string' && INSTANCE_NAME_RE.test(instance.trim())) {
+      expectedPhone = normalizePhone(typeof expected_phone === 'string' ? expected_phone : undefined);
+      if (!expectedPhone) return reply.code(400).send({ error: 'expected_phone required' });
+      targetInstance = instance.trim();
+      targetLabel = typeof label === 'string' && label.trim() ? label.trim() : null;
+      workspaceId = null;
+    } else {
+      return reply.code(400).send({ error: 'number_id or valid instance required' });
+    }
+
+    const token = generateLinkToken();
+    const row = await createReconnectLink(deps.pool, {
+      token, targetInstance, targetLabel, expectedPhone, workspaceId,
+      createdBy: req.actingUser ?? null, maxClicks: LINK_MAX_CLICKS, ttlDays: LINK_TTL_DAYS,
+    });
+    return reply.send({ token, expiresAt: row.expiresAt, maxClicks: row.maxClicks });
+  });
+
   // Estado do link (a página pública valida antes de renderizar o QR).
   app.get('/admin/whatsapp/provision-links/:token', async (req: any, reply) => {
     const link = await getProvisionLink(deps.pool, String(req.params.token));
@@ -134,6 +185,8 @@ export function registerProvisionRoutes(app: FastifyInstance, deps: { pool: Pool
       clicksUsed: link.clicksUsed,
       maxClicks: link.maxClicks,
       expiresAt: link.expiresAt,
+      targetInstance: link.targetInstance,
+      targetLabel: link.targetLabel,
     });
   });
 

@@ -175,3 +175,72 @@ test('POST/GET/DELETE do provisionamento recusam token de reconexão com 404 sem
   assert.equal(del.statusCode, 404);
   assert.ok(!calls.some((c) => c.includes('/instance/delete')), calls.join(' | '));
 });
+
+// ── emissão ──────────────────────────────────────────────────────────
+
+test('emissão por instância exige expected_phone e valida charset', async () => {
+  const { app } = buildApp('close');
+  const ok = await app.inject({
+    method: 'POST', url: '/admin/whatsapp/reconnect-links', headers: H,
+    payload: { instance: 'saturno', label: 'Saturno · monitor', expected_phone: '+553195950748' },
+  });
+  assert.equal(ok.statusCode, 200);
+  const link = await getProvisionLink(pool, ok.json().token);
+  assert.equal(link?.targetInstance, 'saturno');
+  assert.equal(link?.expectedPhone, '+553195950748');
+  assert.equal(link?.workspaceId, null);
+
+  const semFone = await app.inject({ method: 'POST', url: '/admin/whatsapp/reconnect-links', headers: H, payload: { instance: 'saturno' } });
+  assert.equal(semFone.statusCode, 400);
+  const charset = await app.inject({ method: 'POST', url: '/admin/whatsapp/reconnect-links', headers: H, payload: { instance: 'a/b', expected_phone: '+5531' } });
+  assert.equal(charset.statusCode, 400);
+});
+
+test('emissão por number_id deriva tudo do número e exige workspace_id CORRETO', async () => {
+  const { app } = buildApp('close');
+  const ins = await pool.query(
+    `INSERT INTO whatsapp_numbers (workspace_id, phone, evolution_instance, label, status)
+     VALUES ('ws-9', '+5531999', 'ws-9-abc', 'comercial', 'disconnected') RETURNING id`,
+  );
+  const id = Number(ins.rows[0].id);
+
+  const semWs = await app.inject({ method: 'POST', url: '/admin/whatsapp/reconnect-links', headers: H, payload: { number_id: id } });
+  assert.equal(semWs.statusCode, 400); // obrigatório — omitir não pula o controle
+
+  const wsErrado = await app.inject({ method: 'POST', url: '/admin/whatsapp/reconnect-links', headers: H, payload: { number_id: id, workspace_id: 'ws-invasor' } });
+  assert.equal(wsErrado.statusCode, 404);
+
+  const ok = await app.inject({ method: 'POST', url: '/admin/whatsapp/reconnect-links', headers: H, payload: { number_id: id, workspace_id: 'ws-9' } });
+  assert.equal(ok.statusCode, 200);
+  const link = await getProvisionLink(pool, ok.json().token);
+  assert.equal(link?.targetInstance, 'ws-9-abc');
+  assert.equal(link?.expectedPhone, '+5531999');
+  assert.equal(link?.workspaceId, 'ws-9');
+  assert.equal(link?.targetLabel, 'comercial');
+});
+
+test('emissão recusa número sem telefone e as duas formas juntas', async () => {
+  const { app } = buildApp('close');
+  const ins = await pool.query(
+    `INSERT INTO whatsapp_numbers (workspace_id, phone, evolution_instance, status)
+     VALUES ('ws-9', NULL, 'ws-9-nulo', 'connecting') RETURNING id`,
+  );
+  const semFone = await app.inject({
+    method: 'POST', url: '/admin/whatsapp/reconnect-links', headers: H,
+    payload: { number_id: Number(ins.rows[0].id), workspace_id: 'ws-9' },
+  });
+  assert.equal(semFone.statusCode, 409);
+  const ambas = await app.inject({
+    method: 'POST', url: '/admin/whatsapp/reconnect-links', headers: H,
+    payload: { number_id: 1, workspace_id: 'ws-9', instance: 'saturno', expected_phone: '+55' },
+  });
+  assert.equal(ambas.statusCode, 400);
+});
+
+test('GET provision-links/:token devolve targetInstance/targetLabel', async () => {
+  const { app } = buildApp('close');
+  const token = await mkReconnect();
+  const res = await app.inject({ method: 'GET', url: `/admin/whatsapp/provision-links/${token}`, headers: H });
+  assert.equal(res.json().targetInstance, 'saturno');
+  assert.equal(res.json().targetLabel, 'Saturno');
+});
