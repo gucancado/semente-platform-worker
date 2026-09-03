@@ -19,6 +19,7 @@
     "whatsapp:migrate-legacy": "tsx src/cli/migrate-legacy-whatsapp.ts",
     "whatsapp:sync-agent-groups": "tsx src/cli/sync-agent-groups.ts",
     "whatsapp:reconnect-link": "tsx src/cli/reconnect-link.ts",
+    "whatsapp:check-group-links": "tsx src/cli/check-group-links.ts",
     "transcribe:pending": "tsx src/transcription/cli.ts pending",
     "transcribe:redo": "tsx src/transcription/cli.ts redo",
     "lua:sample": "tsx eval/lua/sample.ts",

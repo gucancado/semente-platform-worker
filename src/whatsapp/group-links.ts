@@ -1,13 +1,28 @@
 import type { Pool } from 'pg';
 
 /**
- * Um grupo de WhatsApp VINCULADO a um workspace de cliente. O vínculo é
- * independente do que MONITORA o grupo — hoje isso é um dos dois:
- *   - um NÚMERO (`whatsapp_numbers`), escopo comum a vários clientes; ou
- *   - um AGENTE legado (linhas pré-multi-número, `whatsapp_number_id` NULL —
- *     hoje só `agent='saturno'`, o número da ORGANIZAÇÃO: 51 grupos, que
- *     nunca migrou pra `whatsapp_numbers` e não tem `workspace_id` próprio).
- * `scope` expõe qual dos dois é, porque as duas leituras (mensagens,
+ * Um grupo de WhatsApp VINCULADO a um workspace de cliente.
+ *
+ * REGRA DE PRODUTO: quem alimenta o dashboard de GRUPOS e o MONITOR DE GRUPOS
+ * — `agent='saturno'` (+55 31 9595-0748), o numero da ORGANIZACAO, que nao
+ * esta em `whatsapp_numbers` e nao tem `workspace_id` proprio. Numeros de
+ * `whatsapp_numbers` servem o dashboard de ATENDIMENTO. NAO chame o escopo
+ * 'agent' de "legado": ele e o caminho oficial desta superficie.
+ *
+ * O tipo `GroupScope` admite os dois porque um numero de atendimento TAMBEM
+ * captura grupos — incidentalmente, porque o aparelho da pessoa participa
+ * deles (medido em 2026-09: o numero 1 aparecia em 140 grupos, o 18 em 147).
+ * Admitir no tipo nao e autorizar: vincular um grupo a uma linha number-scoped
+ * amarra a tela do cliente a um numero de atendimento e ela morre junto com
+ * ele. Foi o que houve em 2026-08-18 — o numero 1 caiu e congelou 7 telas
+ * (Bluma CF e Vemcurtir entre elas) por 16 dias, sem erro nenhum na interface.
+ * Auditar com `pnpm whatsapp:check-group-links`.
+ *
+ * Nao ha caminho de escrita de `linked_workspace_id` no codigo: os vinculos sao
+ * feitos a mao, por SQL. Enquanto for assim, a regra nao tem como ser imposta
+ * na escrita — o check acima e a rede.
+ *
+ * `scope` expoe qual dos dois e, porque as duas leituras (mensagens,
  * roster/avatares) usam fontes diferentes — ver `group-read-routes.ts`.
  *
  * ⚠️ GATE 2 REMOVIDO (decisão de produto, 2026-08-11): existia um segundo gate
