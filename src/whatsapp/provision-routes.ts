@@ -1,10 +1,10 @@
 import type { FastifyInstance } from 'fastify';
 import type { Pool } from 'pg';
 import { randomBytes } from 'node:crypto';
-import { getNumber, renameNumberLabel, getNumberByInstance, setNumberLifecycle } from './numbers.js';
+import { getNumber, renameNumberLabel, getNumberByInstance, setNumberLifecycle, normalizePhone } from './numbers.js';
 import { createProvisioning, getProvisioning, deleteProvisioning } from './provisioning.js';
-import { createProvisionLink, getProvisionLink, computeLinkState, incrementLinkClick, refundLinkClick, generateLinkToken } from './provision-links.js';
-import { createEvolutionInstance, ensureEvolutionInstance, getQrCode, logoutInstance, deleteInstance, type EvolutionDeps } from '../evolution/client.js';
+import { createProvisionLink, createReconnectLink, getProvisionLink, computeLinkState, incrementLinkClick, refundLinkClick, markLinkConsumed, generateLinkToken } from './provision-links.js';
+import { createEvolutionInstance, ensureEvolutionInstance, getQrCode, getConnectionState, setInstanceWebhook, logoutInstance, deleteInstance, type EvolutionDeps } from '../evolution/client.js';
 import { syncGroupSubjects } from './group-sync.js';
 import { backfillNumber } from './backfill.js';
 import { setGroupExposure } from './thread-meta.js';
@@ -13,6 +13,33 @@ import { tenantContext } from './tenant-context.js';
 const PROVISION_TTL_SECONDS = 90;
 const LINK_MAX_CLICKS = 10;
 const LINK_TTL_DAYS = 7;
+
+// O client da Evolution lança Error('Evolution GET /x → 404') — é o que dá pra
+// inspecionar sem mudar o contrato dele.
+function isEvolution404(e: unknown): boolean {
+  return String((e as Error)?.message ?? e).includes('→ 404');
+}
+
+// Rate limit best-effort por token no GET de QR (defesa em profundidade sobre um
+// token de 256 bits; polling legítimo = 24/min). Em memória, por processo — zera
+// no deploy, e é isso mesmo: é teto contra polling eterno, não contabilidade.
+const qrRate = new Map<string, { windowStart: number; count: number }>();
+const QR_RATE_LIMIT = 40;
+const QR_RATE_WINDOW_MS = 60_000;
+export function qrRateExceeded(token: string, now = Date.now()): boolean {
+  if (qrRate.size > 1000) qrRate.clear();
+  const cur = qrRate.get(token);
+  if (!cur || now - cur.windowStart >= QR_RATE_WINDOW_MS) {
+    qrRate.set(token, { windowStart: now, count: 1 });
+    return false;
+  }
+  cur.count += 1;
+  return cur.count > QR_RATE_LIMIT;
+}
+
+// Nome de instância entra interpolado em paths do client da Evolution (sem
+// encodeURIComponent — bug pré-existente). A allowlist impede esta rota de ampliá-lo.
+const INSTANCE_NAME_RE = /^[A-Za-z0-9_-]{1,64}$/;
 
 export function generateInstanceName(workspaceId: string) {
   return `ws-${workspaceId.replace(/-/g, '').slice(0, 8)}-${randomBytes(4).toString('hex')}`;
@@ -113,11 +140,16 @@ export function registerProvisionRoutes(app: FastifyInstance, deps: { pool: Pool
   // Provisiona VIA link: consome 1 clique e cria instância+staging no workspace do link.
   app.post('/admin/whatsapp/link/:token/provision', async (req: any, reply) => {
     const token = String(req.params.token);
+    const link = await getProvisionLink(deps.pool, token);
+    // Token de reconexão não entra aqui — e o guard precisa vir ANTES do clique,
+    // senão queimaria orçamento de um link que esta rota nunca vai atender.
+    if (!link || link.targetInstance) return reply.code(404).send({ error: 'not found' });
     const click = await incrementLinkClick(deps.pool, token);
     if (!click.ok) {
       const code = click.state === 'not_found' ? 404 : 409;
       return reply.code(code).send({ error: 'link_unavailable', state: click.state });
     }
+    if (!click.workspaceId) return reply.code(404).send({ error: 'not found' }); // narrowing p/ TS; inalcançável com o guard acima
     try {
       return reply.send(await startProvision(click.workspaceId, req.actingUser, token));
     } catch (e) {
@@ -131,6 +163,7 @@ export function registerProvisionRoutes(app: FastifyInstance, deps: { pool: Pool
   app.get('/admin/whatsapp/link/:token/provision/:instance', async (req: any, reply) => {
     const link = await getProvisionLink(deps.pool, String(req.params.token));
     if (!link) return reply.code(404).send({ error: 'not found' });
+    if (link.targetInstance || !link.workspaceId) return reply.code(404).send({ error: 'not found' });
     const r = await provisionStatus(String(req.params.instance), link.workspaceId);
     if ('code' in r) return reply.code(r.code).send({ error: 'not found' });
     // Link expirado por TEMPO não serve mais QR novo, mesmo que o staging (TTL 90s) siga vivo.
@@ -148,6 +181,9 @@ export function registerProvisionRoutes(app: FastifyInstance, deps: { pool: Pool
     const instance = String(req.params.instance);
     const link = await getProvisionLink(deps.pool, token);
     if (!link) return reply.code(404).send({ error: 'not found' });
+    // Esta rota DELETA instância quando o staging casa — token de reconexão
+    // (que aponta pra instância viva do cliente) jamais pode alcançá-la.
+    if (link.targetInstance || !link.workspaceId) return reply.code(404).send({ error: 'not found' });
     const prov = await getProvisioning(deps.pool, instance);
     // No-op idempotente se o staging não é deste link (não vaza existência de instances alheios).
     if (prov && prov.workspaceId === link.workspaceId && prov.provisionLinkToken === token) {
@@ -155,6 +191,77 @@ export function registerProvisionRoutes(app: FastifyInstance, deps: { pool: Pool
       await deleteProvisioning(deps.pool, instance);
     }
     return reply.send({ ok: true });
+  });
+
+  // ── Reconexão por link: serve o QR de uma instância QUE JÁ EXISTE ──────────
+  // Nunca cria (ensureEvolutionInstance criaria uma se o token apontasse pra uma
+  // morta) e nunca deleta (não há abort — a instância é a do cliente, com histórico).
+  // O consumo definitivo do link acontece no WEBHOOK (connection-events); aqui só o
+  // atalho inequívoco de instância já open, onde não há pareamento novo a validar.
+  app.post('/admin/whatsapp/link/:token/reconnect', async (req: any, reply) => {
+    const token = String(req.params.token);
+    const link = await getProvisionLink(deps.pool, token);
+    // Cross-type é 404 (não 409): não vaza que o token existe com outro tipo.
+    if (!link || !link.targetInstance) return reply.code(404).send({ error: 'not found' });
+    const state = computeLinkState(link, Date.now());
+    if (state !== 'active') return reply.code(409).send({ error: 'link_unavailable', state });
+
+    let conn: 'open' | 'connecting' | 'close';
+    try {
+      conn = await getConnectionState(deps.evolution, link.targetInstance);
+    } catch (e) {
+      if (isEvolution404(e)) return reply.code(404).send({ error: 'instance_not_found' });
+      return reply.code(502).send({ error: 'evolution_unavailable' });
+    }
+    if (conn === 'open') {
+      await markLinkConsumed(deps.pool, token, null);
+      return reply.send({ state: 'connected' });
+    }
+
+    const inc = await incrementLinkClick(deps.pool, token);
+    if (!inc.ok) {
+      const code = inc.state === 'not_found' ? 404 : 409;
+      return reply.code(code).send({ error: 'link_unavailable', state: inc.state });
+    }
+    try {
+      // Reafirma URL + secret + eventos — inclusive CONNECTION_UPDATE, que é o
+      // pré-requisito de o webhook conseguir consumir este link. (O saturno hoje
+      // só tem MESSAGES_UPSERT registrado; sem esta chamada, nada o liquidaria.)
+      await setInstanceWebhook(deps.evolution, link.targetInstance, deps.webhook);
+    } catch {
+      await refundLinkClick(deps.pool, token).catch(() => {});
+      return reply.code(502).send({ error: 'evolution_unavailable' });
+    }
+    return reply.send({ instance: link.targetInstance });
+  });
+
+  app.get('/admin/whatsapp/link/:token/reconnect/:instance', async (req: any, reply) => {
+    const token = String(req.params.token);
+    const instance = String(req.params.instance);
+    const link = await getProvisionLink(deps.pool, token);
+    // O path não endereça recurso fora do escopo do token (anti-IDOR).
+    if (!link || !link.targetInstance || link.targetInstance !== instance) {
+      return reply.code(404).send({ error: 'not found' });
+    }
+    if (qrRateExceeded(token)) return reply.code(429).send({ error: 'rate_limited' });
+
+    const state = computeLinkState(link, Date.now());
+    // consumed ⇒ a instância conectou (é o ÚNICO caminho que consome reconexão) — sucesso, não erro.
+    if (state === 'consumed') return reply.send({ state: 'connected' });
+    if (state === 'blocked' || state === 'expired') return reply.send({ state });
+    // active e exhausted seguem: o clique é gasto no POST, o GET serve a sessão
+    // em andamento (paridade deliberada com o GET do provisionamento — o 10º QR vale).
+
+    try {
+      if ((await getConnectionState(deps.evolution, instance)) === 'open') {
+        await markLinkConsumed(deps.pool, token, null);
+        return reply.send({ state: 'connected' });
+      }
+      const qr = await getQrCode(deps.evolution, instance);
+      return reply.send({ state: 'awaiting_scan', qr: qr.base64, pairingCode: qr.pairingCode });
+    } catch {
+      return reply.code(502).send({ error: 'evolution_unavailable' });
+    }
   });
 
   // Rename do label. Vazio → label = telefone (nunca null pra número conectado).
