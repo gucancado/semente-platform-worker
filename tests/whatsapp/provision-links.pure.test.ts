@@ -6,6 +6,7 @@ function row(over: Partial<ProvisionLinkRow>): ProvisionLinkRow {
   return {
     token: 't', workspaceId: 'ws', createdBy: null, maxClicks: 10, clicksUsed: 0,
     status: 'active', consumedAt: null, connectedNumberId: null,
+    targetInstance: null, targetLabel: null, expectedPhone: null,
     createdAt: '2026-07-19T00:00:00.000Z', expiresAt: '2026-07-26T00:00:00.000Z', ...over,
   };
 }
@@ -32,4 +33,14 @@ test('exhausted quando clicks atingem o max', () => {
 test('status persistido consumed/exhausted/expired prevalece', () => {
   assert.equal(computeLinkState(row({ status: 'consumed' }), NOW), 'consumed');
   assert.equal(computeLinkState(row({ status: 'exhausted' }), NOW), 'exhausted');
+});
+
+test('row de reconexão carrega alvo/telefone e estado continua puro', () => {
+  const r = row({ workspaceId: null, targetInstance: 'saturno', targetLabel: 'Saturno', expectedPhone: '+553195950748' });
+  assert.equal(computeLinkState(r, NOW), 'active');
+  assert.equal(computeLinkState(row({ ...r, expiresAt: '2026-07-19T12:00:00.000Z' }), NOW), 'expired');
+});
+
+test('status persistido blocked prevalece', () => {
+  assert.equal(computeLinkState(row({ status: 'blocked' }), NOW), 'blocked');
 });
