@@ -29,7 +29,7 @@ export function registerMeetingsReadRoutes(
         status: m.status, failure_reason: m.failure_reason, title: m.title,
         occurred_at: m.occurred_at ? m.occurred_at.toISOString() : null,
         duration_seconds: m.duration_seconds, participants: m.participants,
-        summary: m.summary,
+        summary: m.summary, speakers: m.speakers,
       })),
     });
   });

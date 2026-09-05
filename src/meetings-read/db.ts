@@ -11,6 +11,12 @@ export type MeetingListRow = {
   duration_seconds: number | null;
   participants: Array<{ name: string; email: string | null }> | null;
   summary: string | null;
+  /** Falantes REAIS do episódio, com tempo de fala. Vem daqui e não dos
+   *  `participants` porque as duas listas divergem: no Fireflies o participante
+   *  tem só email e o falante só nome, e há quem fale sem constar da lista de
+   *  convidados (medido: 1.114 participantes sem fala correspondente em 218
+   *  episódios). Quem cruza os dois é o painel, via membros do workspace. */
+  speakers: Array<{ name: string; seconds: number; turns: number }> | null;
   sort_at: Date;
 };
 
@@ -32,8 +38,26 @@ const LIST_SQL = `
     FROM episodes e
     LEFT JOIN collected_meetings cm ON cm.episode_id = e.id
     WHERE e.fonte = 'reuniao' AND e.workspace_id = $1
+  ), sp AS (
+    -- Agregado por falante. started_at_ms/ended_at_ms está populado em 100% dos
+    -- turnos das duas fontes (medido), então o tempo é confiável; ainda assim o
+    -- COALESCE protege contra turno sem marcação, que renderia negativo.
+    -- (Sem crase neste comentário: ele vive dentro de um template literal.)
+    SELECT x.episode_id,
+           jsonb_agg(jsonb_build_object('name', x.speaker_name, 'seconds', x.seconds, 'turns', x.turns)
+                     ORDER BY x.seconds DESC) AS speakers
+    FROM (
+      SELECT et.episode_id, et.speaker_name,
+             round(sum(GREATEST(COALESCE(et.ended_at_ms,0) - COALESCE(et.started_at_ms,0), 0)) / 1000.0)::int AS seconds,
+             count(*)::int AS turns
+      FROM episode_turns et
+      JOIN m ON m.episode_id = et.episode_id
+      WHERE et.speaker_name IS NOT NULL
+      GROUP BY et.episode_id, et.speaker_name
+    ) x
+    GROUP BY x.episode_id
   )
-  SELECT * FROM m
+  SELECT m.*, sp.speakers FROM m LEFT JOIN sp ON sp.episode_id = m.episode_id
   WHERE ($2::date IS NULL OR sort_at >= ($2::date)::timestamp AT TIME ZONE 'America/Sao_Paulo')
     AND ($3::date IS NULL OR sort_at <  ($3::date + 1)::timestamp AT TIME ZONE 'America/Sao_Paulo')
   ORDER BY sort_at DESC
