@@ -1,5 +1,6 @@
 import { pool } from '../db.js';
 import { insertEventTx } from '../events/outbox.js';
+import { enqueueSummaryJobTx } from '../meetings-summary/db.js';
 
 export type EpisodeTurnInput = {
   turn_index: number; speaker_name: string | null; speaker_label: string | null;
@@ -91,6 +92,18 @@ export async function insertEpisodeWithTurns(a: EpisodeInput): Promise<{ id: num
       event_type: 'episodio_pronto_v1', aggregate_type: 'episode', aggregate_id: String(id),
       payload: eventPayload({ id, revision: revision! }, a),
     });
+    // Digest por IA (resumo do card + pontos discutidos). Enfileirado AQUI, na
+    // mesma transação, porque esta função é o funil por onde passam as duas
+    // fontes de reunião (Vexa e Fireflies): cobre as duas, exatamente uma vez, e
+    // não deixa job órfão se a transação abortar. A geração em si é assíncrona —
+    // LLM lenta ou fora do ar não pode atrasar nem derrubar a importação.
+    //
+    // Duplicata SEM force retorna bem antes deste ponto, então reimportação
+    // idempotente não re-enfileira. Com force, a `revision` já foi bumpada e vai
+    // no job: é ela que impede uma execução obsoleta de gravar digest velho.
+    if (a.fonte === 'reuniao' && a.turns.length > 0) {
+      await enqueueSummaryJobTx(client, id, revision!);
+    }
     await client.query('COMMIT');
     return { id, duplicate, revision: revision! };
   } catch (err) {

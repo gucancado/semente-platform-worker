@@ -193,6 +193,12 @@ const EnvSchema = z.object({
   TRANSCRIBE_SYSTEMIC_COOLDOWN_MS: z.coerce.number().int().positive().default(600_000), // 10min
   TRANSCRIBE_SYSTEMIC_MAX_AGE_H: z.coerce.number().int().positive().default(72),
   TRANSCRIBE_MAX_DURATION_S: z.coerce.number().int().positive().default(600),
+  // ── Digest de reunião por IA (resumo do card + pontos discutidos) ──
+  // Só duas envs de propósito: com ~20 reuniões/mês, intervalo/batch/tentativas
+  // nunca seriam ajustados e cada knob a mais é drift. Eles são constantes em
+  // src/meetings-summary/{poller,db}.ts.
+  MEETING_SUMMARY_MODE: z.enum(['off', 'auto']).default('off'),
+  MEETING_SUMMARY_MODEL: z.string().default('gpt-5.4-mini'),
   R2_BUCKET_WHATSAPP_MEDIA: z.string().optional(),
   INTERNAL_WORKSPACE_ID: z.string().optional(),
   INTERNAL_DOMAINS: z.string().default('beeads.com.br').transform((s) => s.split(',').map((d) => d.trim()).filter(Boolean)),
@@ -256,6 +262,21 @@ export function assertTranscribeConfig(
   if (cfg.TRANSCRIBE_MODE === 'off') return;
   if (!cfg.OPENAI_API_KEY) throw new Error(`TRANSCRIBE_MODE=${cfg.TRANSCRIBE_MODE} exige OPENAI_API_KEY`);
   if (!r2ok) throw new Error(`TRANSCRIBE_MODE=${cfg.TRANSCRIBE_MODE} exige R2 configurado (R2_* ausentes)`);
+}
+
+/**
+ * Fail-fast de pré-requisitos do digest de reunião. Esta é a ÚNICA política:
+ * `index.ts` NÃO re-checa a chave antes de subir o poller, senão o mesmo estado
+ * (modo auto sem chave) teria dois comportamentos possíveis — derrubar o boot ou
+ * seguir em silêncio — dependendo de qual verificação rodasse primeiro.
+ */
+export function assertMeetingSummaryConfig(
+  cfg: Pick<typeof config, 'MEETING_SUMMARY_MODE' | 'OPENAI_API_KEY'>,
+): void {
+  if (cfg.MEETING_SUMMARY_MODE === 'off') return;
+  if (!cfg.OPENAI_API_KEY) {
+    throw new Error(`MEETING_SUMMARY_MODE=${cfg.MEETING_SUMMARY_MODE} exige OPENAI_API_KEY`);
+  }
 }
 
 /**

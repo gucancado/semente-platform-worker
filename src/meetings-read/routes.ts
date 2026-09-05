@@ -1,7 +1,8 @@
 import type { FastifyInstance } from 'fastify';
 import type { Pool } from 'pg';
+import type { MeetingDigestView } from './db.js';
 import { requirePanelToken } from '../whatsapp/provision-routes.js';
-import { listMeetings, getMeetingsStats, getMeetingTranscript } from './db.js';
+import { listMeetings, getMeetingsStats, getMeetingTranscript, getMeetingDigest } from './db.js';
 
 /**
  * Rotas REST `meetings_read_v1` de leitura de reuniões (listagem, stats, transcrição).
@@ -28,6 +29,7 @@ export function registerMeetingsReadRoutes(
         status: m.status, failure_reason: m.failure_reason, title: m.title,
         occurred_at: m.occurred_at ? m.occurred_at.toISOString() : null,
         duration_seconds: m.duration_seconds, participants: m.participants,
+        summary: m.summary,
       })),
     });
   });
@@ -49,8 +51,29 @@ export function registerMeetingsReadRoutes(
     if (!t) return reply.code(404).send({ error: 'not_found' });
     return reply.send({
       schema: 'meetings_read_v1',
-      episode: { ...t.episode, occurred_at: t.episode.occurred_at.toISOString() },
+      episode: serializeEpisode(t.episode),
       turns: t.turns,
     });
   });
+
+  // Cabeçalho + digest SEM turnos. O digest é visível a qualquer membro do
+  // workspace; a transcrição bruta continua restrita a admin. Por isso são duas
+  // rotas e não um campo a mais na de transcrição: o conteúdo restrito não pode
+  // sequer trafegar até o navegador de quem não pode vê-lo.
+  app.get('/meetings-read/:episodeId/digest', { preHandler: auth }, async (req: any, reply) => {
+    const workspaceId = req.query?.workspace_id as string | undefined;
+    const episodeId = Number(req.params?.episodeId);
+    if (!workspaceId || !Number.isFinite(episodeId)) return reply.code(400).send({ error: 'params_required' });
+    const d = await getMeetingDigest(deps.pool, { episodeId, workspaceId });
+    if (!d) return reply.code(404).send({ error: 'not_found' });
+    return reply.send({ schema: 'meetings_read_v1', episode: serializeEpisode(d) });
+  });
+}
+
+function serializeEpisode(e: MeetingDigestView) {
+  return {
+    ...e,
+    occurred_at: e.occurred_at.toISOString(),
+    summary_generated_at: e.summary_generated_at ? e.summary_generated_at.toISOString() : null,
+  };
 }
