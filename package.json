@@ -20,6 +20,7 @@
     "whatsapp:sync-agent-groups": "tsx src/cli/sync-agent-groups.ts",
     "whatsapp:reconnect-link": "tsx src/cli/reconnect-link.ts",
     "whatsapp:check-group-links": "tsx src/cli/check-group-links.ts",
+    "meetings:summarize": "tsx src/cli/summarize-meetings.ts",
     "transcribe:pending": "tsx src/transcription/cli.ts pending",
     "transcribe:redo": "tsx src/transcription/cli.ts redo",
     "lua:sample": "tsx eval/lua/sample.ts",

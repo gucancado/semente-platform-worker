@@ -10,6 +10,7 @@ export type MeetingListRow = {
   occurred_at: Date | null;
   duration_seconds: number | null;
   participants: Array<{ name: string; email: string | null }> | null;
+  summary: string | null;
   sort_at: Date;
 };
 
@@ -26,7 +27,7 @@ const LIST_SQL = `
   WITH m AS (
     SELECT e.id AS episode_id, cm.id AS collected_id, cm.meet_code,
            COALESCE(cm.status, 'transcribed') AS status, cm.failure_reason,
-           e.title, e.occurred_at, e.duration_seconds, e.participants,
+           e.title, e.occurred_at, e.duration_seconds, e.participants, e.summary,
            e.occurred_at AS sort_at
     FROM episodes e
     LEFT JOIN collected_meetings cm ON cm.episode_id = e.id
@@ -112,11 +113,50 @@ const HEALTH_SQL = `
     AND created_at <  ($3::date + 1)::timestamp AT TIME ZONE 'America/Sao_Paulo'
   GROUP BY status`;
 
-export type MeetingTranscript = {
-  episode: {
-    id: number; title: string | null; occurred_at: Date; duration_seconds: number | null;
-    participants: Array<{ name: string; email: string | null }>;
+/** Cabeçalho + digest, SEM os turnos. Existe porque o digest é visível a
+ *  qualquer membro do workspace mas a transcrição bruta continua admin-only:
+ *  ocultar os turnos no render não bastaria, eles não podem sequer trafegar. */
+export type MeetingDigestView = {
+  id: number; title: string | null; occurred_at: Date; duration_seconds: number | null;
+  participants: Array<{ name: string; email: string | null }>;
+  summary: string | null; summary_points: string[] | null; summary_generated_at: Date | null;
+};
+
+/** `summary_points` é jsonb: o driver devolve o que estiver gravado, e uma row
+ *  legada/mexida à mão pode não ser array. Normaliza aqui, na fronteira de
+ *  leitura, para o consumidor nunca receber algo que quebre um `.map`. */
+function coercePoints(v: unknown): string[] | null {
+  if (!Array.isArray(v)) return null;
+  const out = v.filter((x): x is string => typeof x === 'string' && x.trim().length > 0);
+  return out.length ? out : null;
+}
+
+function mapDigestView(row: any): MeetingDigestView {
+  return {
+    id: Number(row.id), title: row.title, occurred_at: row.occurred_at,
+    duration_seconds: row.duration_seconds, participants: row.participants ?? [],
+    summary: row.summary ?? null,
+    summary_points: coercePoints(row.summary_points),
+    summary_generated_at: row.summary_generated_at ?? null,
   };
+}
+
+/** Só o cabeçalho + digest, sem turnos e sem tocar em episode_turns. */
+export async function getMeetingDigest(
+  pool: Pool, a: { episodeId: number; workspaceId: string },
+): Promise<MeetingDigestView | null> {
+  const { rows } = await pool.query(
+    `SELECT id, title, occurred_at, duration_seconds, participants, workspace_id,
+            summary, summary_points, summary_generated_at
+     FROM episodes WHERE id=$1 AND fonte='reuniao'`, [a.episodeId]);
+  const row = rows[0];
+  // Mesma revalidação de tenant do transcript: episódio de outro workspace → null.
+  if (!row || row.workspace_id !== a.workspaceId) return null;
+  return mapDigestView(row);
+}
+
+export type MeetingTranscript = {
+  episode: MeetingDigestView;
   turns: Array<{
     turn_index: number; speaker_name: string | null;
     started_at_ms: number | null; ended_at_ms: number | null; text: string;
@@ -128,7 +168,8 @@ export async function getMeetingTranscript(
   a: { episodeId: number; workspaceId: string },
 ): Promise<MeetingTranscript | null> {
   const ep = await pool.query(
-    `SELECT id, title, occurred_at, duration_seconds, participants, workspace_id
+    `SELECT id, title, occurred_at, duration_seconds, participants, workspace_id,
+            summary, summary_points, summary_generated_at
      FROM episodes WHERE id=$1 AND fonte='reuniao'`, [a.episodeId]);
   const row = ep.rows[0];
   // Revalidação de tenant: episódio inexistente OU de outro workspace → null (404 na rota).
@@ -137,10 +178,7 @@ export async function getMeetingTranscript(
     `SELECT turn_index, speaker_name, started_at_ms, ended_at_ms, text
      FROM episode_turns WHERE episode_id=$1 ORDER BY turn_index ASC`, [a.episodeId]);
   return {
-    episode: {
-      id: Number(row.id), title: row.title, occurred_at: row.occurred_at,
-      duration_seconds: row.duration_seconds, participants: row.participants ?? [],
-    },
+    episode: mapDigestView(row),
     turns: turns.rows.map((r) => ({
       turn_index: r.turn_index, speaker_name: r.speaker_name,
       started_at_ms: r.started_at_ms, ended_at_ms: r.ended_at_ms, text: r.text,

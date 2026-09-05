@@ -1,5 +1,5 @@
 import Fastify from 'fastify';
-import { config, assertTranscribeConfig, assertMeetingsCollectConfig, assertMeetingsReadConfig } from './config.js';
+import { config, assertTranscribeConfig, assertMeetingsCollectConfig, assertMeetingsReadConfig, assertMeetingSummaryConfig } from './config.js';
 import { registerAdminRoutes } from './admin/routes.js';
 import { registerContactsRoutes } from './contacts/routes.js';
 import { registerWebhookRoutes } from './webhook/routes.js';
@@ -39,6 +39,8 @@ import { startGroupSyncCron } from './whatsapp/group-sync-cron.js';
 import { startConnectionAlertSweep } from './whatsapp/connection-alerts.js';
 import { startPresenceKeepalive } from './whatsapp/presence-keepalive.js';
 import { startTranscriptionPoller } from './transcription/poller.js';
+import { startSummaryPoller } from './meetings-summary/poller.js';
+import { OpenAISummaryLlm } from './meetings-summary/provider.js';
 import { r2Configured } from './integrations/r2.js';
 import { startCreationPoller } from './whatsapp/opportunity-pipeline.js';
 import { startAutoLossPoller } from './whatsapp/auto-loss.js';
@@ -205,6 +207,7 @@ async function main() {
   // Fail-fast ANTES de bindar/subir pollers: TRANSCRIBE_MODE≠off exige OPENAI + R2.
   // Se inválido, o processo sai limpo aqui (sem servidor no ar nem crons rodando).
   assertTranscribeConfig(config, r2Configured());
+  assertMeetingSummaryConfig(config);
 
   await app.listen({ host: '0.0.0.0', port: config.PORT });
   app.log.info({ port: config.PORT }, 'semente-platform-worker up');
@@ -266,6 +269,19 @@ async function main() {
     startTranscriptionPoller(app.log);
   } else {
     app.log.info({ mode: config.TRANSCRIBE_MODE }, 'transcrição: poller NÃO iniciado (modo != auto)');
+  }
+
+  // Digest de reunião por IA: resumo do card + pontos discutidos. Pré-requisitos
+  // (chave presente quando o modo é 'auto') já validados por
+  // assertMeetingSummaryConfig acima — aqui NÃO se re-checa a chave, para não
+  // criar um segundo comportamento possível para o mesmo estado.
+  if (config.MEETING_SUMMARY_MODE === 'auto') {
+    const summaryLlm = new OpenAISummaryLlm({
+      apiKey: config.OPENAI_API_KEY!, model: config.MEETING_SUMMARY_MODEL,
+    });
+    startSummaryPoller({ llm: summaryLlm }, app.log);
+  } else {
+    app.log.info({ mode: config.MEETING_SUMMARY_MODE }, 'meeting-summary: poller NÃO iniciado (modo != auto)');
   }
 
   // Poller de coleta de reuniões (Vexa): varre collected_meetings ativas, detecta
