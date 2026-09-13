@@ -4,12 +4,15 @@ import {
   type CloudSendResult,
   type CloudTemplateMessage,
 } from '../webhook-cloud/send.js';
-import { connectionDownTemplateParams } from '../webhook-cloud/templates.js';
-import { buildDownNotifyText, isRetryableSendFailure, type SendOutcome } from './down-notify.js';
+import { connectionDownTemplateParams, renderConnectionDownText } from '../webhook-cloud/templates.js';
+import { isRetryableSendFailure, type SendOutcome } from './down-notify.js';
 
 export type DownNotifyTarget = {
   phone: string;
-  label: string | null;
+  /** Destinatário, quando diferente do número exibido (envio de teste). Ausente = o próprio número. */
+  to?: string;
+  /** Nome exibido: o do workspace, ou o rótulo quando não há workspace/resolução. */
+  name: string | null;
   downSince: Date;
   token: string;
   link: string;
@@ -25,7 +28,8 @@ export type DownSender = (t: DownNotifyTarget) => Promise<DownSendResult>;
  * Template primeiro: é o único que chega fora da janela de 24h. Se falhar (ainda
  * não aprovado, por exemplo), tenta o texto livre — que só chega se a pessoa
  * escreveu para o número nas últimas 24h, mas custa uma chamada e cobre o
- * período de aprovação. Exceção de rede nunca escapa: vira `networkError`.
+ * período de aprovação, com o MESMO corpo do template (o encaminhado é igual ao
+ * aprovado). Exceção de rede nunca escapa: vira `networkError`.
  */
 export function makeCloudDownSender(opts: {
   phoneNumberId: string;
@@ -43,18 +47,18 @@ export function makeCloudDownSender(opts: {
 
     if (opts.templateName) {
       const params = connectionDownTemplateParams({
-        label: t.label, phone: t.phone, downSince: t.downSince, token: t.token,
+        name: t.name, phone: t.phone, downSince: t.downSince, token: t.token,
       });
       const name = opts.templateName;
       const r = await attempt(() =>
-        sendTemplate(opts.phoneNumberId, t.phone, { name, language: opts.templateLang, ...params }),
+        sendTemplate(opts.phoneNumberId, t.to ?? t.phone, { name, language: opts.templateLang, ...params }),
       );
       if (r.ok) return { ...r, via: 'template' };
       templateFailure = r;
     }
 
-    const text = buildDownNotifyText({ label: t.label, phone: t.phone, downSince: t.downSince, link: t.link });
-    const r = await attempt(() => sendText(opts.phoneNumberId, t.phone, text));
+    const text = renderConnectionDownText({ name: t.name, phone: t.phone, downSince: t.downSince, token: t.token });
+    const r = await attempt(() => sendText(opts.phoneNumberId, t.to ?? t.phone, text));
     if (r.ok) return { ...r, via: 'text' };
 
     // Uma falha transitória no template não pode ser mascarada pelo 4xx do

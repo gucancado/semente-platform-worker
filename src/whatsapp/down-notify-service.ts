@@ -44,6 +44,8 @@ export type DownNotifyDeps = {
   cadence: { debounceMs: number; renotifyMs: number; maxNotifies: number };
   link: { maxClicks: number; ttlDays: number };
   log: DownNotifyLog;
+  /** Nome do workspace (Bloquim). Ausente, null ou falhando = usa o rótulo do número. */
+  resolveWorkspaceName?: (workspaceId: string) => Promise<string | null>;
 };
 
 export type NotifyAttempt = {
@@ -81,12 +83,20 @@ async function notifyOne(
   // Claim ANTES do envio: dois ticks concorrentes não podem mandar o mesmo aviso.
   if (!(await claim())) return { key: t.key, phone: t.phone, outcome: 'claim_lost' };
 
+  // Nome do workspace no lugar do rótulo do número (que costuma ser genérico:
+  // "atendimento"). Sem workspace ou sem resposta, fica o rótulo — nunca bloqueia.
+  const workspaceName =
+    t.workspaceId && deps.resolveWorkspaceName
+      ? await deps.resolveWorkspaceName(t.workspaceId).catch(() => null)
+      : null;
+  const name = workspaceName ?? t.label;
+
   let link: Awaited<ReturnType<typeof ensureReconnectLink>>;
   try {
     link = await ensureReconnectLink(deps.pool, {
       instance: t.instance,
       expectedPhone: t.phone,
-      label: t.label,
+      label: name,
       workspaceId: t.workspaceId,
       createdBy: 'down-notify',
       maxClicks: deps.link.maxClicks,
@@ -101,7 +111,7 @@ async function notifyOne(
   const url = reconnectUrl(deps.panelBaseUrl, link.row.token);
   let result: DownSendResult;
   try {
-    result = await deps.send({ phone: t.phone, label: t.label, downSince: t.downSince, token: link.row.token, link: url });
+    result = await deps.send({ phone: t.phone, name, downSince: t.downSince, token: link.row.token, link: url });
   } catch (err) {
     // O remetente real nunca lança; um que lance é tratado como rede, para o claim não ficar preso.
     result = { ok: false, networkError: true, detail: (err as Error).message, via: null };

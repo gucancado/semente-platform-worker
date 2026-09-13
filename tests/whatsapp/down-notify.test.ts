@@ -1,7 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  buildDownNotifyText,
   decideSystemHealth,
   fmtBrtShort,
   isRetryableSendFailure,
@@ -19,25 +18,6 @@ test('fmtBrtShort formata em São Paulo, não no fuso do runtime', () => {
 test('fmtBrtShort respeita a virada de dia UTC×BRT', () => {
   // 02:30Z do dia 10 ainda é 23:30 do dia 09 em São Paulo
   assert.equal(fmtBrtShort(new Date('2026-09-10T02:30:00.000Z')), '09/09 às 23:30');
-});
-
-test('texto traz rótulo, telefone, desde quando e o link', () => {
-  const t = buildDownNotifyText({
-    label: 'Monitor de grupos',
-    phone: '+553195950748',
-    downSince: new Date('2026-09-09T21:10:00.000Z'),
-    link: 'https://painel.beeads.com.br/reconectar-whatsapp/abc',
-  });
-  assert.match(t, /Monitor de grupos/);
-  assert.match(t, /\+553195950748/);
-  assert.match(t, /09\/09 às 18:10/);
-  assert.match(t, /https:\/\/painel\.beeads\.com\.br\/reconectar-whatsapp\/abc/);
-});
-
-test('sem rótulo o texto usa só o telefone e não vaza null', () => {
-  const t = buildDownNotifyText({ label: null, phone: '+5531999', downSince: NOW, link: 'https://x/y' });
-  assert.match(t, /\+5531999/);
-  assert.doesNotMatch(t, /null|undefined/);
 });
 
 const base = {
