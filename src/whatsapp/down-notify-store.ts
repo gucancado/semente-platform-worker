@@ -85,16 +85,21 @@ export type SystemHealthRow = NotifyVersion & {
 
 /**
  * Grava o veredito do tick e devolve o estado do episódio:
- *   saudável → fora : abre (down_since = NOW())
+ *   saudável → fora : abre no início observado (ou NOW(), sem estimativa)
  *   fora → fora     : preserva o início — o episódio continua
  *   fora → saudável : encerra e zera o aviso (a próxima queda é episódio novo)
  */
-export async function recordSystemHealth(pool: Pool, t: SystemTarget, v: SystemVerdict): Promise<SystemHealthRow> {
+export async function recordSystemHealth(
+  pool: Pool,
+  t: SystemTarget,
+  v: SystemVerdict,
+  observedDownSince: Date | null = null,
+): Promise<SystemHealthRow> {
   const { rows } = await pool.query(
     `INSERT INTO system_instance_health
        (instance, expected_phone, label, last_state, last_reason, own_store_ts, peer_store_ts,
         checked_at, down_since, updated_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), CASE WHEN $8::boolean THEN NOW() END, NOW())
+     VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), CASE WHEN $8::boolean THEN COALESCE($9::timestamptz, NOW()) END, NOW())
      ON CONFLICT (instance) DO UPDATE SET
        expected_phone    = EXCLUDED.expected_phone,
        label             = EXCLUDED.label,
@@ -104,11 +109,11 @@ export async function recordSystemHealth(pool: Pool, t: SystemTarget, v: SystemV
        peer_store_ts     = EXCLUDED.peer_store_ts,
        checked_at        = NOW(),
        updated_at        = NOW(),
-       down_since        = CASE WHEN $8::boolean THEN COALESCE(system_instance_health.down_since, NOW()) END,
+       down_since        = CASE WHEN $8::boolean THEN COALESCE(system_instance_health.down_since, $9::timestamptz, NOW()) END,
        down_notified_at  = CASE WHEN $8::boolean THEN system_instance_health.down_notified_at END,
        down_notify_count = CASE WHEN $8::boolean THEN system_instance_health.down_notify_count ELSE 0 END
      RETURNING instance, expected_phone, label, down_since, down_notified_at, down_notify_count`,
-    [t.instance, t.expectedPhone, t.label, v.state, v.reason, v.ownStoreTs, v.peerStoreTs, v.down],
+    [t.instance, t.expectedPhone, t.label, v.state, v.reason, v.ownStoreTs, v.peerStoreTs, v.down, observedDownSince],
   );
   const r = rows[0];
   return {

@@ -8,14 +8,16 @@
  * Alvo: instância de SYSTEM_INSTANCE_WATCH_JSON, ou número de whatsapp_numbers
  * pela instância. NÃO consome a cadência do episódio (não mexe em
  * down_notify_count): um envio manual não pode adiar o aviso automático.
- * `--dry-run` mostra o texto e o remetente sem emitir link nem enviar.
+ * `--dry-run` avalia a saúde (grava o episódio, como o vigia faria) e mostra o
+ * texto, sem emitir link nem enviar.
  */
 import { pool } from '../db.js';
 import { config } from '../config.js';
 import { getNumberByInstance } from '../whatsapp/numbers.js';
 import { ensureReconnectLink } from '../whatsapp/provision-links.js';
 import { buildDownNotifyText, reconnectUrl } from '../whatsapp/down-notify.js';
-import { buildDownNotifyDeps } from '../whatsapp/down-notify-start.js';
+import { buildDownNotifyDeps, buildSystemProbe } from '../whatsapp/down-notify-start.js';
+import { assessSystemTargets } from '../whatsapp/down-notify-service.js';
 
 function arg(name: string): string | null {
   const hit = process.argv.find((a) => a.startsWith(`--${name}=`));
@@ -31,8 +33,13 @@ const log = {
 async function resolveTarget(instance: string) {
   const sys = config.SYSTEM_INSTANCE_WATCH_JSON.find((t) => t.instance === instance);
   if (sys) {
-    const { rows } = await pool.query(`SELECT down_since FROM system_instance_health WHERE instance = $1`, [instance]);
-    return { phone: sys.expectedPhone, label: sys.label, workspaceId: null, downSince: (rows[0]?.down_since as Date | undefined) ?? new Date() };
+    // Mesma avaliação do vigia: grava o episódio com o início observado, sem avisar.
+    const [a] = await assessSystemTargets(
+      { pool, log, staleMs: config.SYSTEM_INSTANCE_STORE_STALE_MS, probe: buildSystemProbe(pool) },
+      [sys],
+    );
+    if (a) console.log(`estado    : ${a.state} (${a.verdict.down ? `fora — ${a.verdict.reason}` : 'saudável'})`);
+    return { phone: sys.expectedPhone, label: sys.label, workspaceId: null, downSince: a?.row.downSince ?? new Date() };
   }
   const n = await getNumberByInstance(pool, instance);
   if (!n?.phone) return null;

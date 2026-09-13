@@ -1,5 +1,12 @@
 import type { Pool } from 'pg';
-import { decideSystemHealth, isRetryableSendFailure, reconnectUrl, shouldNotify } from './down-notify.js';
+import {
+  decideSystemHealth,
+  isRetryableSendFailure,
+  observedDownSince,
+  reconnectUrl,
+  shouldNotify,
+  type SystemHealth,
+} from './down-notify.js';
 import { ensureReconnectLink } from './provision-links.js';
 import {
   claimNumberNotification,
@@ -9,6 +16,7 @@ import {
   releaseNumberNotification,
   releaseSystemNotification,
   type NotifyVersion,
+  type SystemHealthRow,
   type SystemTarget,
 } from './down-notify-store.js';
 import type { DownSendResult, DownSender } from './down-notify-sender.js';
@@ -152,17 +160,27 @@ export type SystemProbe = {
   listPeerInstances: () => Promise<string[]>;
 };
 
-/**
- * Vigia 2: instância de SISTEMA (saturno), que não existe em whatsapp_numbers e
- * por isso nunca é vista pelo vigia 1. Sonda falhando NÃO mexe no episódio — um
- * soluço da Evolution não pode abrir nem fechar queda.
- */
-export async function runSystemInstanceWatch(
-  deps: DownNotifyDeps & { probe: SystemProbe; staleMs: number },
-  targets: SystemTarget[],
-): Promise<NotifyAttempt[]> {
-  const attempts: NotifyAttempt[] = [];
+export type SystemAssessment = {
+  target: SystemTarget;
+  state: 'open' | 'connecting' | 'close';
+  verdict: SystemHealth;
+  ownStoreTs: Date | null;
+  peerStoreTs: Date | null;
+  row: SystemHealthRow;
+};
 
+/**
+ * Sonda, decide e GRAVA o episódio de cada instância de sistema — sem avisar.
+ * Separado do aviso para o CLI de smoke avaliar exatamente como o vigia.
+ *
+ * Sonda falhando NÃO mexe no episódio (a instância fica fora do resultado): um
+ * soluço da Evolution não pode abrir nem fechar queda. Episódio novo começa no
+ * início observado (`observedDownSince`), não no instante da detecção.
+ */
+export async function assessSystemTargets(
+  deps: { pool: Pool; log: DownNotifyLog; probe: SystemProbe; staleMs: number },
+  targets: SystemTarget[],
+): Promise<SystemAssessment[]> {
   let peers: string[] = [];
   try {
     peers = await deps.probe.listPeerInstances();
@@ -182,6 +200,7 @@ export async function runSystemInstanceWatch(
     }
   }
 
+  const out: SystemAssessment[] = [];
   for (const t of targets) {
     let state: 'open' | 'connecting' | 'close';
     try {
@@ -207,29 +226,44 @@ export async function runSystemInstanceWatch(
     }
 
     const verdict = decideSystemHealth({ state, ownStoreTs, peerStoreTs, staleMs: deps.staleMs });
-    const row = await recordSystemHealth(deps.pool, t, { ...verdict, state, ownStoreTs, peerStoreTs });
+    const since = verdict.down ? observedDownSince({ ownStoreTs, peerStoreTs }) : null;
+    const row = await recordSystemHealth(deps.pool, t, { ...verdict, state, ownStoreTs, peerStoreTs }, since);
     if (verdict.down) {
       deps.log.info(
         { instance: t.instance, reason: verdict.reason, state, ownStoreTs, peerStoreTs, downSince: row.downSince },
         'down-notify: instância de sistema fora do ar',
       );
     }
-    if (!row.downSince) continue;
+    out.push({ target: t, state, verdict, ownStoreTs, peerStoreTs, row });
+  }
+  return out;
+}
 
-    const version = { lastNotifiedAt: row.lastNotifiedAt, notifyCount: row.notifyCount };
+/**
+ * Vigia 2: instância de SISTEMA (saturno), que não existe em whatsapp_numbers e
+ * por isso nunca é vista pelo vigia 1.
+ */
+export async function runSystemInstanceWatch(
+  deps: DownNotifyDeps & { probe: SystemProbe; staleMs: number },
+  targets: SystemTarget[],
+): Promise<NotifyAttempt[]> {
+  const attempts: NotifyAttempt[] = [];
+  for (const a of await assessSystemTargets(deps, targets)) {
+    if (!a.row.downSince) continue;
+    const version = { lastNotifiedAt: a.row.lastNotifiedAt, notifyCount: a.row.notifyCount };
     const r = await notifyOne(
       deps,
       {
-        key: `system:${t.instance}`,
-        instance: t.instance,
-        phone: t.expectedPhone,
-        label: t.label,
+        key: `system:${a.target.instance}`,
+        instance: a.target.instance,
+        phone: a.target.expectedPhone,
+        label: a.target.label,
         workspaceId: null,
-        downSince: row.downSince,
+        downSince: a.row.downSince,
         version,
       },
-      () => claimSystemNotification(deps.pool, t.instance, version),
-      () => releaseSystemNotification(deps.pool, t.instance, version),
+      () => claimSystemNotification(deps.pool, a.target.instance, version),
+      () => releaseSystemNotification(deps.pool, a.target.instance, version),
     );
     if (r) attempts.push(r);
   }

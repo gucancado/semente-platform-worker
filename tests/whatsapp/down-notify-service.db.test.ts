@@ -199,3 +199,18 @@ test('sonda com erro não mexe no episódio nem avisa', async () => {
   assert.equal(later.getTime(), before.getTime());
   assert.equal(sent.length, 0);
 });
+
+test('instância que já estava fora começa na última mensagem, não na detecção', async () => {
+  const { deps } = harness();
+  const lastMsg = new Date(Date.now() - 80 * H);
+  await runSystemInstanceWatch(
+    {
+      ...deps,
+      probe: probe({ state: async () => 'connecting', store: { saturno: lastMsg, 'ws-peer': new Date() }, peers: ['ws-peer'] }),
+      staleMs: 6 * H,
+    },
+    [saturno],
+  );
+  const h = (await pool.query(`SELECT down_since FROM system_instance_health`)).rows[0];
+  assert.equal((h.down_since as Date).getTime(), lastMsg.getTime());
+});

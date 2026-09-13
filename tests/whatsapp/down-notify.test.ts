@@ -5,6 +5,7 @@ import {
   decideSystemHealth,
   fmtBrtShort,
   isRetryableSendFailure,
+  observedDownSince,
   shouldNotify,
 } from '../../src/whatsapp/down-notify.js';
 
@@ -143,4 +144,15 @@ test('retentável só falha de rede, 429 e 5xx; 4xx e erro de config esperam o r
   assert.equal(isRetryableSendFailure({ ok: false, status: 400 }), false);
   assert.equal(isRetryableSendFailure({ ok: false, detail: 'no access token' }), false);
   assert.equal(isRetryableSendFailure({ ok: true, sendId: 'x' }), false);
+});
+
+test('observedDownSince usa a última mensagem quando o par seguiu recebendo depois', () => {
+  const own = S('2026-09-09T21:10:00Z');
+  assert.equal(observedDownSince({ ownStoreTs: own, peerStoreTs: S('2026-09-12T13:08:00Z') }), own);
+});
+
+test('observedDownSince sem par à frente não inventa início', () => {
+  assert.equal(observedDownSince({ ownStoreTs: S('2026-09-12T20:00:00Z'), peerStoreTs: S('2026-09-12T19:00:00Z') }), null);
+  assert.equal(observedDownSince({ ownStoreTs: null, peerStoreTs: S('2026-09-12T19:00:00Z') }), null);
+  assert.equal(observedDownSince({ ownStoreTs: S('2026-09-12T19:00:00Z'), peerStoreTs: null }), null);
 });

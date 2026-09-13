@@ -9,6 +9,7 @@ import {
   sweepDownNumbers,
   type DownNotifyDeps,
   type DownNotifyLog,
+  type SystemProbe,
 } from './down-notify-service.js';
 
 const LINK_MAX_CLICKS = 10;
@@ -50,6 +51,16 @@ export function buildDownNotifyDeps(
   };
 }
 
+/** Sondas reais da vigia de sistema — compartilhadas pelo daemon e pelo CLI. */
+export function buildSystemProbe(pool: Pool): SystemProbe {
+  const evolution = { baseUrl: config.EVOLUTION_API_URL, apiKey: config.EVOLUTION_API_KEY };
+  return {
+    connectionState: (i: string) => getConnectionState(evolution, i),
+    latestStoreTs: (i: string) => fetchLatestMessageTs(evolution, i),
+    listPeerInstances: () => listConnectedInstances(pool),
+  };
+}
+
 /**
  * Liga os vigias conforme o config. Configuração incompleta NÃO derruba o
  * worker: loga em erro e não inicia — o resto do processo segue.
@@ -67,17 +78,12 @@ export function startDownNotify(pool: Pool, log: DownNotifyLog): void {
     return;
   }
   const { deps } = built;
-  const evolution = { baseUrl: config.EVOLUTION_API_URL, apiKey: config.EVOLUTION_API_KEY };
 
   if (numbersOn) {
     loop('numbers', config.CONNECTION_ALERT_SWEEP_INTERVAL_MS, () => sweepDownNumbers(deps), log);
   }
   if (targets.length > 0) {
-    const probe = {
-      connectionState: (i: string) => getConnectionState(evolution, i),
-      latestStoreTs: (i: string) => fetchLatestMessageTs(evolution, i),
-      listPeerInstances: () => listConnectedInstances(pool),
-    };
+    const probe = buildSystemProbe(pool);
     loop(
       'system',
       config.SYSTEM_INSTANCE_WATCH_INTERVAL_MS,

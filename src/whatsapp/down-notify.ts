@@ -113,3 +113,19 @@ export function isRetryableSendFailure(o: SendOutcome): boolean {
   const s = o.status ?? 0;
   return s === 429 || s >= 500;
 }
+
+/**
+ * Melhor estimativa de QUANDO a instância parou, para o "desde" do aviso.
+ *
+ * O instante da detecção mente para quem já estava fora quando o vigia começou
+ * a olhar, e o `disconnectionAt` da Evolution também — medido em 2026-09-13: o
+ * do saturno marcava 03/09, de uma queda anterior que a reconexão nunca
+ * atualizou, enquanto ele capturou mensagens até 09/09. A última mensagem do
+ * store é verdadeira desde que um PAR tenha seguido recebendo depois dela: aí
+ * ela marca o ponto em que só esta instância parou. Sem par à frente não há
+ * como separar queda de silêncio — devolve null e o chamador usa a detecção.
+ */
+export function observedDownSince(i: { ownStoreTs: Date | null; peerStoreTs: Date | null }): Date | null {
+  if (!i.ownStoreTs || !i.peerStoreTs) return null;
+  return i.peerStoreTs.getTime() > i.ownStoreTs.getTime() ? i.ownStoreTs : null;
+}
