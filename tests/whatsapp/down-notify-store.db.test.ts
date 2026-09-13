@@ -125,3 +125,11 @@ test('sistema: claim não reivindica instância saudável', async () => {
   await recordSystemHealth(pool, saturno, verdict(false));
   assert.equal(await claimSystemNotification(pool, 'saturno', fresh), false);
 });
+
+test('sistema: abre o episódio no início observado; episódio aberto não é reescrito', async () => {
+  const observed = new Date('2026-09-09T21:10:00.000Z');
+  const a = await recordSystemHealth(pool, saturno, verdict(true), observed);
+  assert.equal(a.downSince!.getTime(), observed.getTime());
+  const b = await recordSystemHealth(pool, saturno, verdict(true), new Date('2026-09-11T00:00:00.000Z'));
+  assert.equal(b.downSince!.getTime(), observed.getTime());
+});
