@@ -2,6 +2,7 @@ import type { Pool } from 'pg';
 import { config } from '../config.js';
 import { fetchLatestMessageTs, getConnectionState } from '../evolution/client.js';
 import { cloudPhoneNumberIdForAgent } from '../webhook-cloud/send.js';
+import { resolveWorkspaceNames } from '../bloquim/workspace-names.js';
 import { listConnectedInstances } from './numbers.js';
 import { makeCloudDownSender } from './down-notify-sender.js';
 import {
@@ -47,6 +48,7 @@ export function buildDownNotifyDeps(
       },
       link: { maxClicks: LINK_MAX_CLICKS, ttlDays: LINK_TTL_DAYS },
       log,
+      resolveWorkspaceName: async (id: string) => (await resolveWorkspaceNames([id])).get(id) ?? null,
     },
   };
 }

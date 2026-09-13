@@ -30,19 +30,6 @@ export function reconnectUrl(base: string, token: string): string {
   return `${base.replace(/\/+$/, '')}/reconectar-whatsapp/${token}`;
 }
 
-/** Texto livre — só é entregue pelo Cloud API dentro da janela de 24h. */
-export function buildDownNotifyText(p: { label: string | null; phone: string; downSince: Date; link: string }): string {
-  const who = p.label ? `${p.label} (${p.phone})` : p.phone;
-  return [
-    '⚠️ WhatsApp desconectado',
-    '',
-    `O WhatsApp ${who} está desconectado da BeeAds desde ${fmtBrtShort(p.downSince)}.`,
-    '',
-    'Para reconectar, abra o link abaixo e escaneie o QR code com este celular:',
-    p.link,
-  ].join('\n');
-}
-
 export type NotifyCadence = {
   /** Início do episódio de queda; null = saudável. */
   downSince: Date | null;

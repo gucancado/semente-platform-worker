@@ -2,10 +2,11 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { makeCloudDownSender } from '../../src/whatsapp/down-notify-sender.js';
 import type { CloudSendResult, CloudTemplateMessage } from '../../src/webhook-cloud/send.js';
+import { renderConnectionDownText } from '../../src/webhook-cloud/templates.js';
 
 const target = {
   phone: '+553195950748',
-  label: 'Monitor de grupos',
+  name: 'Monitor de grupos',
   downSince: new Date('2026-09-09T21:10:00.000Z'),
   token: 'tok123',
   link: 'https://painel.beeads.com.br/reconectar-whatsapp/tok123',
@@ -45,7 +46,7 @@ test('template configurado e aceito: só o template sai', async () => {
   assert.deepEqual(calls.map((c) => c.kind), ['template']);
 });
 
-test('template com a forma aprovada: nome, idioma, corpo e sufixo do botão', async () => {
+test('template com a forma aprovada: nome, idioma e corpo com o token, sem botão', async () => {
   const { send, calls } = wire({ template: OK('w1') }, 'conexao_whatsapp_caiu');
   await send(target);
   assert.equal(calls[0].pnid, '222');
@@ -53,8 +54,7 @@ test('template com a forma aprovada: nome, idioma, corpo e sufixo do botão', as
   assert.deepEqual(calls[0].arg, {
     name: 'conexao_whatsapp_caiu',
     language: 'pt_BR',
-    bodyParams: ['Monitor de grupos (+553195950748)', '09/09 às 18:10'],
-    urlButtonParam: 'tok123',
+    bodyParams: ['Monitor de grupos (+553195950748)', '09/09 às 18:10', 'tok123'],
   });
 });
 
@@ -64,6 +64,8 @@ test('template recusado cai no texto livre, que leva o link', async () => {
   assert.deepEqual(r, { ok: true, sendId: 'w2', via: 'text' });
   assert.deepEqual(calls.map((c) => c.kind), ['template', 'text']);
   assert.match(String(calls[1].arg), /reconectar-whatsapp\/tok123/);
+  // O texto livre é o corpo aprovado renderizado — encaminhar um ou outro dá no mesmo.
+  assert.equal(calls[1].arg, renderConnectionDownText(target));
 });
 
 test('sem template configurado vai direto no texto', async () => {
@@ -94,4 +96,16 @@ test('erro de rede no texto vira networkError, nunca exceção', async () => {
   const r = await send(target);
   assert.equal(r.ok, false);
   assert.equal((r as { networkError?: boolean }).networkError, true);
+});
+
+test('destinatário de teste recebe o conteúdo do alvo, sem trocar o número exibido', async () => {
+  const { send, calls } = wire({ template: HTTP(400), text: OK('w9') }, 'conexao_whatsapp_caiu_v2');
+  await send({ ...target, to: '+5531999594121' });
+  assert.deepEqual(calls.map((c) => c.to), ['+5531999594121', '+5531999594121']);
+  assert.deepEqual((calls[0].arg as { bodyParams: string[] }).bodyParams, [
+    'Monitor de grupos (+553195950748)',
+    '09/09 às 18:10',
+    'tok123',
+  ]);
+  assert.match(String(calls[1].arg), /Monitor de grupos \(\+553195950748\)/);
 });

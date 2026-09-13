@@ -67,7 +67,7 @@ test('número fora do ar recebe o aviso no PRÓPRIO telefone, com link travado n
   assert.deepEqual(attempts.map((a) => a.outcome), ['sent']);
   assert.equal(sent.length, 1);
   assert.equal(sent[0].phone, '+5524999422282');
-  assert.equal(sent[0].label, 'Atendimento Pousada');
+  assert.equal(sent[0].name, 'Atendimento Pousada');
   assert.match(sent[0].link, /^https:\/\/painel\.beeads\.com\.br\/reconectar-whatsapp\/[A-Za-z0-9_-]{43}$/);
   assert.ok(sent[0].link.endsWith(sent[0].token));
 
@@ -213,4 +213,57 @@ test('instância que já estava fora começa na última mensagem, não na detec�
   );
   const h = (await pool.query(`SELECT down_since FROM system_instance_health`)).rows[0];
   assert.equal((h.down_since as Date).getTime(), lastMsg.getTime());
+});
+
+test('com resolvedor, o aviso e o link levam o NOME DO WORKSPACE no lugar do rótulo', async () => {
+  await downNumber(30);
+  const { deps, sent } = harness();
+  const asked: string[] = [];
+  await sweepDownNumbers({
+    ...deps,
+    resolveWorkspaceName: async (id) => {
+      asked.push(id);
+      return 'Pousada Recanto de Moriá';
+    },
+  });
+  assert.deepEqual(asked, ['ws-1']);
+  assert.equal(sent[0].name, 'Pousada Recanto de Moriá');
+  const { rows } = await pool.query(`SELECT target_label FROM whatsapp_provision_links WHERE token = $1`, [sent[0].token]);
+  assert.equal(rows[0].target_label, 'Pousada Recanto de Moriá');
+});
+
+test('resolvedor falhando cai no rótulo e o aviso sai mesmo assim', async () => {
+  await downNumber(30);
+  const { deps, sent } = harness();
+  const r = await sweepDownNumbers({
+    ...deps,
+    resolveWorkspaceName: async () => {
+      throw new Error('bloquim fora');
+    },
+  });
+  assert.deepEqual(r.map((a) => a.outcome), ['sent']);
+  assert.equal(sent[0].name, 'Atendimento Pousada');
+});
+
+test('instância de sistema não consulta workspace: usa o rótulo configurado', async () => {
+  const { deps, sent } = harness();
+  let called = false;
+  await runSystemInstanceWatch(
+    {
+      ...deps,
+      resolveWorkspaceName: async () => {
+        called = true;
+        return 'X';
+      },
+      probe: probe({
+        state: async () => 'close',
+        store: { saturno: new Date(Date.now() - 80 * H), 'ws-peer': new Date() },
+        peers: ['ws-peer'],
+      }),
+      staleMs: 6 * H,
+    },
+    [saturno],
+  );
+  assert.equal(called, false);
+  assert.equal(sent[0].name, 'Monitor de grupos');
 });

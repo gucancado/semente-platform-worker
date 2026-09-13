@@ -7,18 +7,29 @@ import { DEFAULT_PANEL_PUBLIC_URL, fmtBrtShort, reconnectUrl } from '../whatsapp
  * conversa com o número Cloud do saturno, então a janela está sempre fechada
  * quando um número cai.
  *
- * ⚠️ Esta constante é o que foi SUBMETIDO à aprovação da Meta. Mudar texto,
- * variáveis ou a base do botão exige submeter um template NOVO (nome novo):
- * editar só aqui faz o envio divergir do aprovado e ser recusado.
+ * O link vai NO CORPO, sem botão: botão de URL não sobrevive ao encaminhamento,
+ * e a pessoa precisa abrir o link em OUTRA tela para escanear o QR com o mesmo
+ * celular que recebeu o aviso.
+ *
+ * ⚠️ Esta constante é o que foi SUBMETIDO à aprovação da Meta. Mudar texto ou
+ * variáveis exige submeter um template NOVO (nome novo): editar só aqui faz o
+ * envio divergir do aprovado e ser recusado. A v1 (`conexao_whatsapp_caiu`, com
+ * botão) segue aprovada na WABA, mas não é mais enviada.
  */
-export const CONNECTION_DOWN_TEMPLATE_NAME = 'conexao_whatsapp_caiu';
+export const CONNECTION_DOWN_TEMPLATE_NAME = 'conexao_whatsapp_caiu_v2';
 
-/** Base do botão de URL, congelada na aprovação. O token é o sufixo dinâmico. */
+/** Base do link, congelada no texto aprovado. O token é a variável {{3}}. */
 export const RECONNECT_URL_BASE = reconnectUrl(DEFAULT_PANEL_PUBLIC_URL, '');
 
-type TemplateComponent =
-  | { type: 'BODY'; text: string; example: { body_text: string[][] } }
-  | { type: 'BUTTONS'; buttons: Array<{ type: 'URL'; text: string; url: string; example: string[] }> };
+type TemplateComponent = { type: 'BODY'; text: string; example: { body_text: string[][] } };
+
+// A Meta recusa corpo que termina em variável — por isso a linha fixa depois do link.
+const BODY_TEXT =
+  'O WhatsApp {{1}} está desconectado da BeeAds desde {{2}}.\n\n' +
+  'Para reconectar, abra o link abaixo em outra tela e escaneie o QR com este celular em ' +
+  '*Configurações > Dispositivos conectados*\n\n' +
+  `${RECONNECT_URL_BASE}{{3}}\n\n` +
+  'Mensagem automática da BeeAds.';
 
 export const CONNECTION_DOWN_TEMPLATE: {
   name: string;
@@ -32,21 +43,8 @@ export const CONNECTION_DOWN_TEMPLATE: {
   components: [
     {
       type: 'BODY',
-      text:
-        'O WhatsApp {{1}} está desconectado da BeeAds desde {{2}}. ' +
-        'Para reconectar, toque no botão abaixo e escaneie o QR code com este celular.',
-      example: { body_text: [['Monitor de grupos (+553195950748)', '09/09 às 18:10']] },
-    },
-    {
-      type: 'BUTTONS',
-      buttons: [
-        {
-          type: 'URL',
-          text: 'Reconectar',
-          url: `${RECONNECT_URL_BASE}{{1}}`,
-          example: [`${RECONNECT_URL_BASE}exemploToken123`],
-        },
-      ],
+      text: BODY_TEXT,
+      example: { body_text: [['Pousada Recanto de Moriá (+5524999422282)', '09/09 às 15:32', 'exemploToken123']] },
     },
   ],
 };
@@ -56,12 +54,19 @@ function oneLine(s: string): string {
   return s.replace(/\s+/g, ' ').trim();
 }
 
-export function connectionDownTemplateParams(p: {
-  label: string | null;
-  phone: string;
-  downSince: Date;
-  token: string;
-}): { bodyParams: string[]; urlButtonParam: string } {
-  const who = p.label ? `${oneLine(p.label)} (${p.phone})` : p.phone;
-  return { bodyParams: [who, fmtBrtShort(p.downSince)], urlButtonParam: p.token };
+/** `name`: nome do workspace — ou, sem workspace, o rótulo da instância. */
+type DownMessageInput = { name: string | null; phone: string; downSince: Date; token: string };
+
+export function connectionDownTemplateParams(p: DownMessageInput): { bodyParams: string[] } {
+  const who = p.name ? `${oneLine(p.name)} (${p.phone})` : p.phone;
+  return { bodyParams: [who, fmtBrtShort(p.downSince), p.token] };
+}
+
+/**
+ * O mesmo corpo com as variáveis preenchidas: é o texto livre de fallback e o
+ * que o CLI mostra no dry-run. Uma fonte só — o que se encaminha é o aprovado.
+ */
+export function renderConnectionDownText(p: DownMessageInput): string {
+  const { bodyParams } = connectionDownTemplateParams(p);
+  return BODY_TEXT.replace(/\{\{(\d+)\}\}/g, (_, n: string) => bodyParams[Number(n) - 1] ?? '');
 }
