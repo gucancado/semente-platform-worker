@@ -37,6 +37,7 @@ import { startFirefliesImportCron } from './integrations/fireflies/import-cron.j
 import { startProvisioningReaperCron } from './whatsapp/provisioning-reaper.js';
 import { startGroupSyncCron } from './whatsapp/group-sync-cron.js';
 import { startConnectionAlertSweep } from './whatsapp/connection-alerts.js';
+import { startDownNotify } from './whatsapp/down-notify-start.js';
 import { startPresenceKeepalive } from './whatsapp/presence-keepalive.js';
 import { startTranscriptionPoller } from './transcription/poller.js';
 import { startSummaryPoller } from './meetings-summary/poller.js';
@@ -258,6 +259,12 @@ async function main() {
   // Sweep de queda de conexão WhatsApp: alerta (painel + WhatsApp Saturno) quando um
   // número cai de 'connected' e fica fora do ar além do debounce. Idempotente por episódio.
   startConnectionAlertSweep(pool, app.log);
+
+  // Aviso de queda ao PRÓPRIO número que caiu, pela Cloud API, com link de
+  // reconexão travado no telefone. Números de workspace só com
+  // CONNECTION_NOTIFY_NUMBERS=on; instância de sistema (saturno) pela vigia de
+  // SYSTEM_INSTANCE_WATCH_JSON, que olha o store da Evolution — `state` sozinho mente.
+  startDownNotify(pool, app.log);
 
   // Keep-alive de presença: reafirma `unavailable` nas instâncias conectadas. Sem isso
   // o estado decai no servidor do WhatsApp e o CELULAR DO CLIENTE para de receber push

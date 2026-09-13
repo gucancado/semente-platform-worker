@@ -232,3 +232,59 @@ export async function settleReconnectLinks(
     client.release();
   }
 }
+
+/** Link de reconexão ATIVO (no prazo e com cliques) da instância — o mais recente. */
+export async function getActiveReconnectLink(pool: Pool, instance: string): Promise<ProvisionLinkRow | null> {
+  const { rows } = await pool.query(
+    `SELECT * FROM whatsapp_provision_links
+      WHERE target_instance = $1 AND status = 'active'
+        AND expires_at > NOW() AND clicks_used < max_clicks
+      ORDER BY created_at DESC
+      LIMIT 1`,
+    [instance],
+  );
+  return rows[0] ? map(rows[0]) : null;
+}
+
+/**
+ * Reusa o link ativo da instância ou emite um novo.
+ *
+ * Reusar é o que permite RE-AVISAR sem sabotar quem já abriu o link: emitir
+ * sempre expiraria o anterior no mesmo commit (createReconnectLink), e o aviso
+ * de ontem levaria a uma página morta. Não reusa link com pouco prazo restante
+ * (a pessoa receberia um link à beira de vencer) nem travado em outro telefone.
+ */
+export async function ensureReconnectLink(
+  pool: Pool,
+  p: {
+    instance: string;
+    expectedPhone: string;
+    label: string | null;
+    workspaceId: string | null;
+    createdBy: string;
+    maxClicks: number;
+    ttlDays: number;
+    minRemainingMs?: number;
+  },
+): Promise<{ row: ProvisionLinkRow; reused: boolean }> {
+  const minRemainingMs = p.minRemainingMs ?? 24 * 3_600_000;
+  const active = await getActiveReconnectLink(pool, p.instance);
+  if (
+    active &&
+    active.expectedPhone === p.expectedPhone &&
+    new Date(active.expiresAt).getTime() - Date.now() >= minRemainingMs
+  ) {
+    return { row: active, reused: true };
+  }
+  const row = await createReconnectLink(pool, {
+    token: generateLinkToken(),
+    targetInstance: p.instance,
+    targetLabel: p.label,
+    expectedPhone: p.expectedPhone,
+    workspaceId: p.workspaceId,
+    createdBy: p.createdBy,
+    maxClicks: p.maxClicks,
+    ttlDays: p.ttlDays,
+  });
+  return { row, reused: false };
+}

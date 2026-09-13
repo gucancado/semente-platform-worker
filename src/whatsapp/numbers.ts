@@ -98,7 +98,10 @@ export async function updateNumberStatus(
          WHEN $2 = 'connected' THEN NULL
          WHEN prev.old_status = 'connected' THEN NOW()
          ELSE wn.disconnected_since END,
-       alerted_at = CASE WHEN $2 = 'connected' THEN NULL ELSE wn.alerted_at END
+       alerted_at = CASE WHEN $2 = 'connected' THEN NULL ELSE wn.alerted_at END,
+       -- Fim do episódio de queda também encerra o aviso ao próprio número (mig 064).
+       down_notified_at  = CASE WHEN $2 = 'connected' THEN NULL ELSE wn.down_notified_at END,
+       down_notify_count = CASE WHEN $2 = 'connected' THEN 0 ELSE wn.down_notify_count END
      FROM prev
      WHERE wn.id = prev.id
      RETURNING wn.id AS number_id, wn.workspace_id, wn.phone, wn.label,

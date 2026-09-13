@@ -1,0 +1,201 @@
+import { test, beforeEach, after } from 'node:test';
+import assert from 'node:assert/strict';
+import { pool } from '../../src/db.js';
+import { upsertConnectedNumber } from '../../src/whatsapp/numbers.js';
+import {
+  runSystemInstanceWatch,
+  sweepDownNumbers,
+  type DownNotifyDeps,
+  type SystemProbe,
+} from '../../src/whatsapp/down-notify-service.js';
+import type { DownNotifyTarget, DownSendResult } from '../../src/whatsapp/down-notify-sender.js';
+
+const H = 3_600_000;
+
+beforeEach(async () => {
+  await pool.query('TRUNCATE whatsapp_numbers RESTART IDENTITY CASCADE');
+  await pool.query('TRUNCATE whatsapp_provision_links');
+  await pool.query('TRUNCATE system_instance_health');
+});
+after(() => pool.end());
+
+function harness(results: DownSendResult[] = []) {
+  const sent: DownNotifyTarget[] = [];
+  let i = 0;
+  const deps: DownNotifyDeps = {
+    pool,
+    send: async (t) => {
+      sent.push(t);
+      return results[i++] ?? { ok: true, sendId: 'wamid', via: 'template' };
+    },
+    now: () => new Date(),
+    panelBaseUrl: 'https://painel.beeads.com.br',
+    cadence: { debounceMs: 5 * 60_000, renotifyMs: 12 * H, maxNotifies: 6 },
+    link: { maxClicks: 10, ttlDays: 7 },
+    log: { info() {}, warn() {}, error() {} },
+  };
+  return { deps, sent };
+}
+
+async function downNumber(minutes: number) {
+  const n = await upsertConnectedNumber(pool, {
+    workspaceId: 'ws-1',
+    evolutionInstance: 'ws-inst-1',
+    phone: '+5524999422282',
+    createdBy: null,
+  });
+  await pool.query(
+    `UPDATE whatsapp_numbers
+        SET status = 'connecting', label = 'Atendimento Pousada',
+            disconnected_since = NOW() - ($2 || ' minutes')::interval
+      WHERE id = $1`,
+    [n.id, String(minutes)],
+  );
+  return n;
+}
+
+async function count(): Promise<number> {
+  const { rows } = await pool.query(`SELECT down_notify_count FROM whatsapp_numbers`);
+  return Number(rows[0].down_notify_count);
+}
+
+test('número fora do ar recebe o aviso no PRÓPRIO telefone, com link travado nele', async () => {
+  await downNumber(30);
+  const { deps, sent } = harness();
+  const attempts = await sweepDownNumbers(deps);
+
+  assert.deepEqual(attempts.map((a) => a.outcome), ['sent']);
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].phone, '+5524999422282');
+  assert.equal(sent[0].label, 'Atendimento Pousada');
+  assert.match(sent[0].link, /^https:\/\/painel\.beeads\.com\.br\/reconectar-whatsapp\/[A-Za-z0-9_-]{43}$/);
+  assert.ok(sent[0].link.endsWith(sent[0].token));
+
+  const { rows } = await pool.query(
+    `SELECT target_instance, expected_phone, workspace_id FROM whatsapp_provision_links WHERE token = $1`,
+    [sent[0].token],
+  );
+  assert.deepEqual(rows[0], { target_instance: 'ws-inst-1', expected_phone: '+5524999422282', workspace_id: 'ws-1' });
+  assert.equal(await count(), 1);
+});
+
+test('segunda passada no mesmo intervalo não reenvia', async () => {
+  await downNumber(30);
+  const { deps, sent } = harness();
+  await sweepDownNumbers(deps);
+  assert.deepEqual(await sweepDownNumbers(deps), []);
+  assert.equal(sent.length, 1);
+});
+
+test('dentro do debounce não avisa', async () => {
+  await downNumber(2);
+  const { deps, sent } = harness();
+  assert.deepEqual(await sweepDownNumbers(deps), []);
+  assert.equal(sent.length, 0);
+});
+
+test('re-aviso depois do intervalo reusa o MESMO link', async () => {
+  await downNumber(30 * 60);
+  const { deps, sent } = harness();
+  await sweepDownNumbers(deps);
+  await pool.query(`UPDATE whatsapp_numbers SET down_notified_at = NOW() - INTERVAL '13 hours'`);
+  const again = await sweepDownNumbers(deps);
+  assert.equal(sent.length, 2);
+  assert.equal(sent[1].token, sent[0].token);
+  assert.equal(again[0].reusedLink, true);
+  assert.equal(await count(), 2);
+});
+
+test('falha transitória devolve o claim e o próximo tick tenta de novo', async () => {
+  await downNumber(30);
+  const { deps, sent } = harness([{ ok: false, networkError: true, via: null }]);
+  assert.deepEqual((await sweepDownNumbers(deps)).map((a) => a.outcome), ['released']);
+  assert.equal(await count(), 0);
+  assert.deepEqual((await sweepDownNumbers(deps)).map((a) => a.outcome), ['sent']);
+  assert.equal(sent.length, 2);
+  assert.equal(await count(), 1);
+});
+
+test('recusa 4xx mantém o claim e espera o re-aviso', async () => {
+  await downNumber(30);
+  const { deps, sent } = harness([{ ok: false, status: 400, via: null }]);
+  assert.deepEqual((await sweepDownNumbers(deps)).map((a) => a.outcome), ['failed']);
+  assert.equal(await count(), 1);
+  assert.deepEqual(await sweepDownNumbers(deps), []);
+  assert.equal(sent.length, 1);
+});
+
+const saturno = { instance: 'saturno', expectedPhone: '+553195950748', label: 'Monitor de grupos' };
+
+function probe(p: {
+  state?: SystemProbe['connectionState'];
+  store?: Record<string, Date | null>;
+  peers?: string[];
+}): SystemProbe {
+  return {
+    connectionState: p.state ?? (async () => 'open'),
+    latestStoreTs: async (i) => (p.store ?? {})[i] ?? null,
+    listPeerInstances: async () => p.peers ?? [],
+  };
+}
+
+test('instância de sistema fechada abre o episódio e, passado o debounce, avisa o telefone travado', async () => {
+  const { deps, sent } = harness();
+  const watch = { ...deps, probe: probe({ state: async () => 'close' }), staleMs: 6 * H };
+
+  assert.deepEqual(await runSystemInstanceWatch(watch, [saturno]), []);
+  assert.equal(sent.length, 0);
+
+  await pool.query(`UPDATE system_instance_health SET down_since = NOW() - INTERVAL '10 minutes'`);
+  const r = await runSystemInstanceWatch(watch, [saturno]);
+  assert.deepEqual(r.map((a) => a.outcome), ['sent']);
+  assert.equal(sent[0].phone, '+553195950748');
+
+  const { rows } = await pool.query(
+    `SELECT target_instance, expected_phone, workspace_id FROM whatsapp_provision_links WHERE token = $1`,
+    [sent[0].token],
+  );
+  assert.deepEqual(rows[0], { target_instance: 'saturno', expected_phone: '+553195950748', workspace_id: null });
+});
+
+test('open com store atrás do par é queda por store_stale; par emparelhado devolve a saúde', async () => {
+  const { deps } = harness();
+  const stale = new Date(Date.now() - 96 * H);
+
+  await runSystemInstanceWatch(
+    { ...deps, probe: probe({ store: { saturno: stale, 'ws-peer': new Date() }, peers: ['ws-peer'] }), staleMs: 6 * H },
+    [saturno],
+  );
+  let h = (await pool.query(`SELECT last_reason, down_since FROM system_instance_health`)).rows[0];
+  assert.equal(h.last_reason, 'store_stale');
+  assert.notEqual(h.down_since, null);
+
+  await runSystemInstanceWatch(
+    {
+      ...deps,
+      probe: probe({ store: { saturno: stale, 'ws-peer': new Date(stale.getTime() + H) }, peers: ['ws-peer'] }),
+      staleMs: 6 * H,
+    },
+    [saturno],
+  );
+  h = (await pool.query(`SELECT last_reason, down_since FROM system_instance_health`)).rows[0];
+  assert.equal(h.last_reason, null);
+  assert.equal(h.down_since, null);
+});
+
+test('sonda com erro não mexe no episódio nem avisa', async () => {
+  const { deps, sent } = harness();
+  await runSystemInstanceWatch({ ...deps, probe: probe({ state: async () => 'close' }), staleMs: 6 * H }, [saturno]);
+  const before = (await pool.query(`SELECT down_since FROM system_instance_health`)).rows[0].down_since as Date;
+
+  const broken = probe({
+    state: async () => {
+      throw new Error('evolution fora');
+    },
+  });
+  assert.deepEqual(await runSystemInstanceWatch({ ...deps, probe: broken, staleMs: 6 * H }, [saturno]), []);
+
+  const later = (await pool.query(`SELECT down_since FROM system_instance_health`)).rows[0].down_since as Date;
+  assert.equal(later.getTime(), before.getTime());
+  assert.equal(sent.length, 0);
+});

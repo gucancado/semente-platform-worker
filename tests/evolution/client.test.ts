@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createEvolutionInstance, getConnectionState, sendText, ensureEvolutionInstance, setPresenceUnavailable, fetchGroupParticipants } from '../../src/evolution/client.js';
+import { createEvolutionInstance, getConnectionState, sendText, ensureEvolutionInstance, setPresenceUnavailable, fetchGroupParticipants, fetchLatestMessageTs } from '../../src/evolution/client.js';
 
 function mockFetch(handler: (url: string, init: any) => { status: number; body: any }) {
   return async (url: string, init: any) => {
@@ -124,4 +124,28 @@ test('ensureEvolutionInstance: webhook falha após create → rollback (deleteIn
   }) as any };
   await assert.rejects(() => ensureEvolutionInstance(deps, 'inst-4', { url: 'http://wk', secret: 's' }));
   assert.ok(calls.some((c) => /DELETE .*\/instance\/delete\/inst-4$/.test(c)));
+});
+
+test('fetchLatestMessageTs pede 1 registro e converte segundos em Date', async () => {
+  let seen: any = null;
+  const deps = { baseUrl: 'https://evo', apiKey: 'k', fetch: mockFetch((url, init) => {
+    seen = { url, body: JSON.parse(init.body) };
+    return { status: 200, body: { messages: { records: [{ messageTimestamp: 1789218267 }], total: 9, pages: 9 } } };
+  }) };
+  const ts = await fetchLatestMessageTs(deps, 'saturno');
+  assert.equal(ts!.toISOString(), new Date(1789218267 * 1000).toISOString());
+  assert.match(seen.url, /\/chat\/findMessages\/saturno$/);
+  assert.deepEqual(seen.body, { where: {}, page: 1, offset: 1 });
+});
+
+test('fetchLatestMessageTs aceita timestamp em string', async () => {
+  const deps = { baseUrl: 'https://evo', apiKey: 'k', fetch: mockFetch(() => ({ status: 200, body: { messages: { records: [{ messageTimestamp: '1789218267' }] } } })) };
+  assert.equal((await fetchLatestMessageTs(deps, 'i'))!.getTime(), 1789218267 * 1000);
+});
+
+test('fetchLatestMessageTs com store vazio ou timestamp ilegível devolve null', async () => {
+  const empty = { baseUrl: 'https://evo', apiKey: 'k', fetch: mockFetch(() => ({ status: 200, body: { messages: { records: [] } } })) };
+  assert.equal(await fetchLatestMessageTs(empty, 'i'), null);
+  const junk = { baseUrl: 'https://evo', apiKey: 'k', fetch: mockFetch(() => ({ status: 200, body: { messages: { records: [{ messageTimestamp: { low: 1, high: 0 } }] } } })) };
+  assert.equal(await fetchLatestMessageTs(junk, 'i'), null);
 });
