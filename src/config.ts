@@ -29,6 +29,16 @@ const CloudNumberMapSchema = z.record(
   })
 );
 
+// Instância vigiada pelo aviso de queda. O nome é interpolado em paths da
+// Evolution sem encode — mesma allowlist do CLI de reconexão.
+const SystemWatchSchema = z.array(
+  z.object({
+    instance: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/),
+    expected_phone: z.string().regex(/^\+\d{10,15}$/),
+    label: z.string().min(1).optional(),
+  })
+);
+
 const EnvSchema = z.object({
   PORT: z.coerce.number().default(3000),
   LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
@@ -107,6 +117,43 @@ const EnvSchema = z.object({
   CONNECTION_ALERT_SENDER_INSTANCE: z.string().optional(),
   // Destino do aviso: telefone E.164 (com ou sem +) ou JID de grupo (...@g.us). Vazio → só painel.
   CONNECTION_ALERT_TARGET: z.string().optional(),
+
+  // ── Aviso de queda ao PRÓPRIO número que caiu (via Cloud API) ──
+  // Sai por um número Cloud API — sem sessão Baileys para cair — e leva um link
+  // de reconexão travado no telefone. Números de workspace só com 'on'; a vigia
+  // de instância de sistema é ligada por SYSTEM_INSTANCE_WATCH_JSON.
+  CONNECTION_NOTIFY_NUMBERS: z.enum(['off', 'on']).default('off'),
+  // Agente cujo phone_number_id Cloud (WHATSAPP_CLOUD_NUMBERS_JSON) envia o aviso.
+  CONNECTION_NOTIFY_CLOUD_AGENT: z.string().min(1).default('saturno'),
+  // Template aprovado pela Meta — fora da janela de 24h só template chega. Vazio → só texto livre.
+  CONNECTION_NOTIFY_TEMPLATE_NAME: z.string().optional(),
+  CONNECTION_NOTIFY_TEMPLATE_LANG: z.string().default('pt_BR'),
+  CONNECTION_NOTIFY_RENOTIFY_MS: z.coerce.number().int().positive().default(12 * 3_600_000),
+  CONNECTION_NOTIFY_MAX: z.coerce.number().int().positive().default(6),
+  // Base pública do painel — monta a URL do link de reconexão.
+  PANEL_PUBLIC_URL: z.string().url().default('https://painel.beeads.com.br'),
+
+  // ── Vigia de instância de SISTEMA (ex.: saturno, fora de whatsapp_numbers por contrato) ──
+  // JSON: [{"instance":"saturno","expected_phone":"+553195950748","label":"Monitor de grupos"}]
+  SYSTEM_INSTANCE_WATCH_JSON: z
+    .string()
+    .optional()
+    .transform((s, ctx) => {
+      if (!s) return [] as Array<{ instance: string; expectedPhone: string; label: string | null }>;
+      try {
+        return SystemWatchSchema.parse(JSON.parse(s)).map((w) => ({
+          instance: w.instance,
+          expectedPhone: w.expected_phone,
+          label: w.label ?? null,
+        }));
+      } catch (e) {
+        ctx.addIssue({ code: 'custom', message: `SYSTEM_INSTANCE_WATCH_JSON inválido: ${(e as Error).message}` });
+        return z.NEVER;
+      }
+    }),
+  SYSTEM_INSTANCE_WATCH_INTERVAL_MS: z.coerce.number().int().positive().default(300_000),
+  // Store da instância atrás do de um par por mais que isto = sessão morta por dentro.
+  SYSTEM_INSTANCE_STORE_STALE_MS: z.coerce.number().int().positive().default(6 * 3_600_000),
 
   // Burst smoothing / debounce: tempo de espera após cada msg recebida antes
   // de disparar trigger pro mercurio. Nova msg na janela reseta o timer.

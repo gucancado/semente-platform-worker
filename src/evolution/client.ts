@@ -113,6 +113,21 @@ export async function fetchMessages(
 }
 
 /**
+ * Instante da mensagem mais recente no store da Evolution desta instância.
+ *
+ * É o sinal de vida que `connectionState` não dá: medido em 2026-09-12, uma
+ * instância reportava `open` enquanto o store não recebia nada havia 4 dias.
+ * `findMessages` pagina em ordem decrescente de `messageTimestamp`, então o
+ * primeiro registro da primeira página é o mais novo.
+ */
+export async function fetchLatestMessageTs(deps: EvolutionDeps, instance: string): Promise<Date | null> {
+  const { records } = await fetchMessages(deps, instance, 1, 1);
+  const raw = records[0]?.messageTimestamp;
+  const secs = typeof raw === 'number' ? raw : typeof raw === 'string' && /^\d+$/.test(raw) ? Number(raw) : NaN;
+  return Number.isFinite(secs) && secs > 0 ? new Date(secs * 1000) : null;
+}
+
+/**
  * Baixa + descriptografa a mídia de uma mensagem sob demanda (webhook usa
  * base64:false → bytes não vêm no payload). `rawMessage` = objeto `data` do
  * webhook (tem `key`+`message`). Pode responder base64 vazio se a mídia ainda
