@@ -209,3 +209,67 @@ export function verifyHmacSignature(rawBody: Buffer | string, signatureHeader: s
   if (expectedHex.length !== computedHex.length) return false;
   return timingSafeEqual(Buffer.from(expectedHex, 'hex'), Buffer.from(computedHex, 'hex'));
 }
+
+export type CloudPayloadSummary = {
+  object: string | null;
+  changes: Array<{
+    field: string | null;
+    phoneNumberId: string | null;
+    statuses: Array<{
+      id: string | null;
+      status: string | null;
+      /** Só os 4 últimos dígitos — o resumo vai para log. */
+      recipientTail: string | null;
+      errors: Array<{ code: number | null; title: string | null }>;
+    }>;
+    /** Sem texto: só tipo e NOMES dos campos (detecta mudança de formato, ex. id por empresa no lugar de `from`). */
+    messages: Array<{ type: string | null; hasFrom: boolean; keys: string[] }>;
+    contactKeys: string[];
+  }>;
+};
+
+const str = (v: unknown): string | null => (typeof v === 'string' ? v : null);
+
+/**
+ * Resumo de um payload do webhook Cloud que NÃO virou mensagem (status de
+ * entrega, atualização de conta, formato que o parser não reconhece). Existe
+ * porque esses eventos eram descartados sem rastro — e é por eles que a Meta
+ * informa falha de entrega depois de aceitar o envio (ex.: 131047, texto fora
+ * da janela de 24h). Nunca inclui texto de mensagem nem telefone completo.
+ */
+export function summarizeCloudPayload(raw: unknown): CloudPayloadSummary {
+  const body = (raw && typeof raw === 'object' ? raw : {}) as any;
+  const entries: any[] = Array.isArray(body.entry) ? body.entry : [];
+  const changes: CloudPayloadSummary['changes'] = [];
+  for (const entry of entries) {
+    for (const change of Array.isArray(entry?.changes) ? entry.changes : []) {
+      const value = change?.value ?? {};
+      changes.push({
+        field: str(change?.field),
+        phoneNumberId: str(value?.metadata?.phone_number_id),
+        statuses: (Array.isArray(value.statuses) ? value.statuses : []).map((s: any) => ({
+          id: str(s?.id),
+          status: str(s?.status),
+          recipientTail: typeof s?.recipient_id === 'string' ? s.recipient_id.slice(-4) : null,
+          errors: (Array.isArray(s?.errors) ? s.errors : []).map((e: any) => ({
+            code: typeof e?.code === 'number' ? e.code : null,
+            title: str(e?.title),
+          })),
+        })),
+        messages: (Array.isArray(value.messages) ? value.messages : []).map((m: any) => ({
+          type: str(m?.type),
+          hasFrom: typeof m?.from === 'string' && m.from.length > 0,
+          keys: m && typeof m === 'object' ? Object.keys(m).sort() : [],
+        })),
+        contactKeys: [
+          ...new Set<string>(
+            (Array.isArray(value.contacts) ? value.contacts : []).flatMap((c: any) =>
+              c && typeof c === 'object' ? Object.keys(c) : [],
+            ),
+          ),
+        ].sort(),
+      });
+    }
+  }
+  return { object: str(body.object), changes };
+}

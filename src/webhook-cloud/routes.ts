@@ -7,7 +7,7 @@ import {
   logWebhook,
 } from '../db.js';
 import { computeScheduledAt } from '../triggers/quiet-hours.js';
-import { parseCloudPayload, verifyHmacSignature } from './parser.js';
+import { parseCloudPayload, verifyHmacSignature, summarizeCloudPayload } from './parser.js';
 import { parseCommand, dispatchCommand } from '../commands/registry.js';
 import { resolveByWhatsapp } from '../commands/identity.js';
 import { sendCloudText } from './send.js';
@@ -90,7 +90,10 @@ export async function registerWebhookCloudRoutes(app: FastifyInstance) {
     const parsed = parseCloudPayload(req.body, numberMap);
 
     if (parsed.length === 0) {
-      // Pode ser status update, ack, ou número desconhecido.
+      // Pode ser status de entrega, ack, atualização de conta ou formato que o
+      // parser não reconhece. Loga um RESUMO (sem texto, telefone truncado):
+      // é por aqui que a Meta avisa falha de entrega depois de aceitar o envio.
+      req.log.info({ cloud: summarizeCloudPayload(req.body) }, 'cloud webhook: evento sem mensagem parseada');
       // Cloud API espera 200 sempre (senão re-envia repetidamente).
       return reply.code(200).send({ ok: true, ignored: true });
     }
