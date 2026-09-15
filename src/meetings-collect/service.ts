@@ -48,7 +48,9 @@ export async function promoteQueuedMeetings(deps: MeetingsCollectDeps): Promise<
       // pra próxima da fila (não conta como erro fatal da rotina).
       try {
         const meeting = await deps.vexa.sendBot(row.meet_code, deps.botName, 'pt');
-        await updateCollectedMeeting(deps.pool, row.id, { status: 'collecting', vexaMeetingId: meeting.id });
+        // started_at é a âncora do timeout de admissão (processCollectedMeeting). Relógio
+        // do worker, o mesmo que o poller usa pra medir — não NOW() do banco.
+        await updateCollectedMeeting(deps.pool, row.id, { status: 'collecting', vexaMeetingId: meeting.id, startedAt: deps.now() });
         promoted++;
       } catch (err) {
         await updateCollectedMeeting(deps.pool, row.id, { status: 'failed', failureReason: 'vexa_send_failed' });
@@ -143,7 +145,12 @@ export async function processCollectedMeeting(deps: MeetingsCollectDeps, row: Co
   // aparecia em sala vazia, sala muda e STT quebrado indistintamente, mandando
   // o diagnóstico pro lado errado. Rows antigas com `not_admitted` seguem no
   // banco (a causa real delas é ambígua); os mapas de rótulo traduzem as duas.
-  const waitedMs = now - new Date(row.created_at).getTime();
+  //
+  // Âncora = quando o bot foi ENVIADO (`started_at`, gravado na promoção), não quando
+  // a coleta foi PEDIDA (`created_at`): desde a fila (mig 048), uma coleta que esperou
+  // vaga morria aqui no mesmo tick em que ganhou o slot. Rows anteriores à mig 065
+  // não têm `started_at` — pra elas `created_at` era a âncora certa.
+  const waitedMs = now - new Date(row.started_at ?? row.created_at).getTime();
   if (waitedMs > deps.admissionTimeoutMin * 60_000) {
     await deps.vexa.stopBot(row.meet_code).catch(() => {});
     await updateCollectedMeeting(deps.pool, row.id, { status: 'failed', failureReason: 'silent_room', vexaMeetingId: meeting.id });

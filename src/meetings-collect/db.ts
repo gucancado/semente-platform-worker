@@ -14,13 +14,15 @@ export type CollectedMeetingRow = {
   episode_id: number | null;
   title: string | null;
   queue_expires_at: Date | null;
+  /** Quando a promoção enviou o bot (mig 065). Nulo antes disso e em rows antigas. */
+  started_at: Date | null;
   created_at: Date;
   updated_at: Date;
 };
 
 const COLS = `id, meet_code, vexa_meeting_id, workspace_id, status, failure_reason,
               requested_by, last_segment_at, episode_id, title, queue_expires_at,
-              created_at, updated_at`;
+              started_at, created_at, updated_at`;
 
 /** episode_id é BIGINT e o driver pg entrega int8 como string (sem setTypeParser,
  *  que é global e mudaria o worker inteiro). Normaliza aqui, no ponto de leitura,
@@ -84,7 +86,7 @@ export async function listQueuedMeetings(pool: Pool): Promise<CollectedMeetingRo
 export async function updateCollectedMeeting(
   pool: Pool,
   id: string,
-  patch: { status?: string; failureReason?: string | null; episodeId?: number | null; vexaMeetingId?: number | null; lastSegmentAt?: Date | null },
+  patch: { status?: string; failureReason?: string | null; episodeId?: number | null; vexaMeetingId?: number | null; lastSegmentAt?: Date | null; startedAt?: Date | null },
 ): Promise<void> {
   const sets: string[] = ['updated_at = NOW()'];
   const vals: unknown[] = [];
@@ -94,6 +96,7 @@ export async function updateCollectedMeeting(
   if (patch.episodeId !== undefined) add('episode_id', patch.episodeId);
   if (patch.vexaMeetingId !== undefined) add('vexa_meeting_id', patch.vexaMeetingId);
   if (patch.lastSegmentAt !== undefined) add('last_segment_at', patch.lastSegmentAt);
+  if (patch.startedAt !== undefined) add('started_at', patch.startedAt);
   await pool.query(`UPDATE collected_meetings SET ${sets.join(', ')} WHERE id = $1`, [id, ...vals]);
 }
 

@@ -101,9 +101,22 @@ test('inatividade > limite → stopBot + import', async () => {
   assert.equal(r!.status, 'imported');
 });
 
-test('zero segments + admissão estourada → failed/silent_room', async () => {
+test('coleta que esperou na fila e é promovida neste tick NÃO vira silent_room', async () => {
   const row = await createCollectedMeeting(pool, { meetCode: 'abc-defg-hij', workspaceId: null, requestedBy: 'u' });
-  // created_at ~agora; força now 20 min à frente
+  // Pedida agora; o tick roda 20 min depois (> admissão de 10) e só então ganha vaga.
+  const now = new Date(Date.now() + 20 * 60_000);
+  const meeting = { id: 507, native_meeting_id: 'abc-defg-hij', status: 'awaiting_admission', start_time: null, end_time: null, segments: [] };
+  await runMeetingsCollectBatch(baseDeps({ 'abc-defg-hij': meeting }, now));
+  const r = await getCollectedMeeting(pool, row.id);
+  assert.equal(r!.status, 'collecting');
+  assert.equal(r!.failure_reason, null);
+  assert.equal(r!.started_at!.getTime(), now.getTime());
+});
+
+test('zero segments + admissão estourada (desde started_at) → failed/silent_room', async () => {
+  const row = await createCollectedMeeting(pool, { meetCode: 'abc-defg-hij', workspaceId: null, requestedBy: 'u' });
+  // Já coletando: bot enviado agora; o tick roda 20 min depois.
+  await updateCollectedMeeting(pool, row.id, { status: 'collecting', startedAt: new Date() });
   const now = new Date(Date.now() + 20 * 60_000);
   const meeting = { id: 503, native_meeting_id: 'abc-defg-hij', status: 'awaiting_admission', start_time: null, end_time: null, segments: [] };
   await runMeetingsCollectBatch(baseDeps({ 'abc-defg-hij': meeting }, now));

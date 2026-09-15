@@ -74,6 +74,7 @@ export function registerMeetingsCollectRoutes(
     return reply.send({
       schema: 'meetings_v1', id: row.id, status: row.status, meet_code: row.meet_code,
       vexa_meeting_id: row.vexa_meeting_id, episode_id: row.episode_id, failure_reason: row.failure_reason,
+      started_at: row.started_at ? new Date(row.started_at).toISOString() : null,
       segment_count, speakers, participants, occurred_at, duration_seconds,
     });
   });
