@@ -33,7 +33,12 @@ const MSG_ROW = {
   transcription_status: null, media_duration_s: null, media_key: null, author_name: 'Fulano',
 };
 
-/** Pool roteado por substring — participants ANTES de groups (o SELECT do roster contém as duas). */
+/**
+ * Pool roteado por substring — participants ANTES de groups (o SELECT do
+ * roster contém as duas). `rosterView` (Task 2) acrescentou uma 3ª consulta
+ * ao roster (`lastMessageByAuthor`, `FROM messages`) — este mock não exercita
+ * `lastMessageAt`, só devolve vazio pra ela.
+ */
 function makePool(h: { search?: any[]; anchor?: any[]; window?: any[]; participants?: any[]; link?: any[] }) {
   return {
     query: async (sql: string) => {
@@ -42,6 +47,7 @@ function makePool(h: { search?: any[]; anchor?: any[]; window?: any[]; participa
       if (/m\.id\s*=\s*\$\d+::bigint/.test(sql)) return { rows: h.anchor ?? [] };
       if (sql.includes('(m.created_at, m.id)')) return { rows: h.window ?? [] };
       if (sql.includes('LIMIT $4')) return { rows: [] };
+      if (sql.includes('FROM messages')) return { rows: [] };
       if (sql.includes('whatsapp_groups')) return { rows: h.link ?? [] };
       throw new Error(`DB call inesperada: ${sql}`);
     },

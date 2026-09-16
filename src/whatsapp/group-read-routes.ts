@@ -11,6 +11,7 @@ import { defaultRouteAuthz, gateAdmin, type RouteAuthz } from './route-authz.js'
 import { logAccess as defaultLogAccess, type LogAccessFn } from './access-log.js';
 import { emptyToUndefined } from './query-coerce.js';
 import { searchGroupMessages, resolveAnchor, listMessagesAround } from './group-search.js';
+import { lastMessageByAuthor, attachLastMessage } from './group-activity.js';
 
 /**
  * Contrato `group_v1` — leitura READ-ONLY da conversa de um grupo de WhatsApp
@@ -59,14 +60,20 @@ function groupContext(g: LinkedGroup) {
   };
 }
 
-type ParticipantView = Awaited<ReturnType<typeof withAvatarUrls>>[number];
+type ParticipantView = Awaited<ReturnType<typeof rosterView>>[number];
 
 /**
  * Roster com `avatarKey` (interno) trocado por `avatarUrl` presigned (público).
  * Presign curto (120s) — o mesmo TTL da rota de áudio. Falha de R2 não derruba
  * o roster: o avatar cai pras iniciais no lugar de quebrar a resposta inteira.
+ *
+ * Genérica em `P` (não fixa em `GroupParticipant`) pra preservar campos extra
+ * do chamador no tipo de retorno — hoje só `attachLastMessage` acrescenta
+ * `lastMessageAt`, mas fixar o parâmetro em `GroupParticipant[]` apagaria
+ * silenciosamente qualquer campo assim do tipo estático (o dado continuaria
+ * chegando no JSON via `...rest`, só o `ParticipantView` mentiria sobre ele).
  */
-async function withAvatarUrls(raw: GroupParticipant[]) {
+async function withAvatarUrls<P extends GroupParticipant>(raw: P[]) {
   return Promise.all(raw.map(async (p) => {
     let avatarUrl: string | null = null;
     if (p.avatarKey) {
@@ -75,6 +82,18 @@ async function withAvatarUrls(raw: GroupParticipant[]) {
     const { avatarKey: _omit, ...rest } = p;
     return { ...rest, avatarUrl };
   }));
+}
+
+/**
+ * Roster pronto pro painel: avatar presigned + `lastMessageAt`. Uma agregação
+ * por request (ver `lastMessageByAuthor`); roda em paralelo com o presign.
+ */
+async function rosterView(pool: Pool, g: LinkedGroup) {
+  const [raw, lastByAuthor] = await Promise.all([
+    listParticipants(pool, g.id),
+    lastMessageByAuthor(pool, { scope: g.scope, identifier: g.jid }),
+  ]);
+  return withAvatarUrls(attachLastMessage(raw, lastByAuthor));
 }
 
 export function registerGroupReadRoutes(
@@ -219,7 +238,7 @@ export function registerGroupReadRoutes(
     // sincronizado por `syncAgentGroupParticipants` (agent-group-sync.ts),
     // não pelo `syncGroupSubjects` do escopo 'number' — mas grava na MESMA
     // tabela.
-    const participants: ParticipantView[] = await withAvatarUrls(await listParticipants(deps.pool, g.id));
+    const participants: ParticipantView[] = await rosterView(deps.pool, g);
     logAccess(deps.pool, {
       actor: req.actingUser, action: 'group_participants',
       workspaceId: g.linkedWorkspaceId, numberId: g.scope.kind === 'number' ? g.scope.numberId : null, identifier: g.jid,
@@ -270,9 +289,9 @@ export function registerGroupReadRoutes(
     if (around) {
       const anchor = await resolveAnchor(deps.pool, { scope: g.scope, identifier: g.jid, id: around });
       if (!anchor) return reply.code(404).send({ error: 'message_not_in_group' });
-      const [m, rawParticipants] = await Promise.all([
+      const [m, participants] = await Promise.all([
         listMessagesAround(deps.pool, { scope: g.scope, identifier: g.jid, anchor }),
-        listParticipants(deps.pool, g.id),
+        rosterView(deps.pool, g),
       ]);
       logAccess(deps.pool, {
         actor: req.actingUser, action: 'group_messages',
@@ -281,7 +300,7 @@ export function registerGroupReadRoutes(
       return reply.send({
         schema: 'group_v1', context: groupContext(g),
         group: { jid: g.jid, subject: g.subject },
-        ...m, participants: await withAvatarUrls(rawParticipants),
+        ...m, participants,
         anchorId: Number(around),
       });
     }
@@ -289,22 +308,22 @@ export function registerGroupReadRoutes(
     const cursor = emptyToUndefined(req.query.cursor);
     let msgs: { messages: unknown[]; nextCursor: string | null };
     let participants: ParticipantView[];
-    // Roster vem de `listParticipants(g.id)` nos DOIS escopos (ver comentário
-    // na rota /participants acima) — só as MENSAGENS divergem por escopo.
+    // Roster vem de `rosterView(g)` nos DOIS escopos (ver comentário na rota
+    // /participants acima) — só as MENSAGENS divergem por escopo.
     if (g.scope.kind === 'number') {
-      const [m, rawParticipants] = await Promise.all([
+      const [m, p] = await Promise.all([
         listThreadMessages(deps.pool, { workspaceId: g.scope.numberWorkspaceId, numberId: g.scope.numberId, identifier: g.jid, limit, cursor }),
-        listParticipants(deps.pool, g.id),
+        rosterView(deps.pool, g),
       ]);
       msgs = m;
-      participants = await withAvatarUrls(rawParticipants);
+      participants = p;
     } else {
-      const [m, rawParticipants] = await Promise.all([
+      const [m, p] = await Promise.all([
         listGroupMessagesByAgent(deps.pool, { agent: g.scope.agent, identifier: g.jid, limit, cursor }),
-        listParticipants(deps.pool, g.id),
+        rosterView(deps.pool, g),
       ]);
       msgs = m;
-      participants = await withAvatarUrls(rawParticipants);
+      participants = p;
     }
     logAccess(deps.pool, {
       actor: req.actingUser, action: 'group_messages',

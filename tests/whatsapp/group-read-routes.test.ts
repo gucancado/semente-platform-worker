@@ -46,19 +46,23 @@ function makeLinkPool(rows: any[]) {
 }
 
 /**
- * Pool que resolve o vínculo E o roster (`listParticipants`) — usado pelas
- * rotas /participants e /view, que hoje chamam `listParticipants(g.id)` nos
- * DOIS escopos (número e agent). A checagem de `whatsapp_group_participants`
- * TEM que vir antes da de `whatsapp_groups`: o SELECT de `listParticipants`
- * faz `... FROM whatsapp_group_participants p JOIN whatsapp_groups g ...`,
- * então contém as DUAS substrings — testar `whatsapp_groups` primeiro
- * devolveria a linha de vínculo (`linkRows`) como se fosse participante.
+ * Pool que resolve o vínculo E o roster (`rosterView` = `listParticipants` +
+ * `lastMessageByAuthor`) — usado pelas rotas /participants e /view, que hoje
+ * chamam `rosterView(g)` nos DOIS escopos (número e agent). A checagem de
+ * `whatsapp_group_participants` TEM que vir antes da de `whatsapp_groups`: o
+ * SELECT de `listParticipants` faz `... FROM whatsapp_group_participants p
+ * JOIN whatsapp_groups g ...`, então contém as DUAS substrings — testar
+ * `whatsapp_groups` primeiro devolveria a linha de vínculo (`linkRows`) como
+ * se fosse participante. A query de `lastMessageByAuthor` (`FROM messages`)
+ * não casa com nenhuma das duas substrings acima e cai no fallback vazio —
+ * este mock não exercita `lastMessageAt`, só o roster em si.
  */
 function makeLinkAndParticipantsPool(linkRows: any[], participantRows: any[]) {
   return {
     query: async (sql: string) => {
       if (sql.includes('whatsapp_group_participants')) return { rows: participantRows };
       if (sql.includes('whatsapp_groups')) return { rows: linkRows };
+      if (sql.includes('FROM messages')) return { rows: [] };
       throw new Error(`DB call inesperada: ${sql}`);
     },
   } as any;
