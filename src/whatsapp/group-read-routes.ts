@@ -1,6 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import type { Pool } from 'pg';
-import { listLinkedGroups, resolveLinkedGroup, type LinkedGroup } from './group-links.js';
+import { listLinkedGroups, resolveLinkedGroup, type LinkedGroup, type GroupScope } from './group-links.js';
 import { listThreadMessages } from './read-queries.js';
 import { listGroupMessagesByAgent } from './group-agent-messages.js';
 import { exportConversation } from './export.js';
@@ -12,6 +12,7 @@ import { logAccess as defaultLogAccess, type LogAccessFn } from './access-log.js
 import { emptyToUndefined } from './query-coerce.js';
 import { searchGroupMessages, resolveAnchor, listMessagesAround } from './group-search.js';
 import { lastMessageByAuthor, attachLastMessage } from './group-activity.js';
+import { listOutagesByInstance, OUTAGE_PAGE_CAP } from './instance-outages.js';
 
 /**
  * Contrato `group_v1` — leitura READ-ONLY da conversa de um grupo de WhatsApp
@@ -94,6 +95,24 @@ async function rosterView(pool: Pool, g: LinkedGroup) {
     lastMessageByAuthor(pool, { scope: g.scope, identifier: g.jid }),
   ]);
   return withAvatarUrls(attachLastMessage(raw, lastByAuthor));
+}
+
+/**
+ * Instância Evolution que observa este grupo.
+ *
+ * ⚠️ PREMISSA LOAD-BEARING: no escopo 'agent', o nome da instância Evolution é
+ * igual ao nome do agente. É verdade hoje (a instância do monitor chama-se
+ * literalmente `saturno`, e o sweep de avatares já usa `instance = agent`), mas
+ * NENHUMA constraint garante. Se um dia divergir, esta função devolve a
+ * instância errada e a rota responde lista vazia EM SILÊNCIO — o marco some da
+ * conversa e ninguém percebe.
+ */
+export async function instanceForScope(pool: Pool, scope: GroupScope): Promise<string | null> {
+  if (scope.kind === 'agent') return scope.agent;
+  const { rows } = await pool.query(
+    `SELECT evolution_instance FROM whatsapp_numbers WHERE id = $1`, [scope.numberId],
+  );
+  return rows[0]?.evolution_instance ?? null;
 }
 
 export function registerGroupReadRoutes(
@@ -244,6 +263,31 @@ export function registerGroupReadRoutes(
       workspaceId: g.linkedWorkspaceId, numberId: g.scope.kind === 'number' ? g.scope.numberId : null, identifier: g.jid,
     });
     return reply.send({ schema: 'group_v1', context: groupContext(g), participants });
+  });
+
+  // ── GET /whatsapp/groups/:jid/outages ────────────────────────────────────────
+  // Janelas em que o OBSERVADOR deste grupo esteve fora — o que explica buraco
+  // na conversa. Sem `since` e sem cursor de propósito: a conversa pagina pra
+  // trás indefinidamente, e um `since` fixo na janela inicial faria o scroll
+  // trazer mensagens antigas SEM os episódios daquele período.
+  app.get('/whatsapp/groups/:jid/outages', { preHandler: auth }, async (req: any, reply) => {
+    const g = await gateAndResolve(req, reply);
+    if (!g) return;
+    const instance = await instanceForScope(deps.pool, g.scope);
+    const outages = instance ? await listOutagesByInstance(deps.pool, instance) : [];
+    const truncated = outages.length >= OUTAGE_PAGE_CAP;
+    if (truncated) {
+      // Outage é raro. Bater no teto significa episódio órfão reabrindo em loop,
+      // não uso normal — tem que aparecer no log, não só na resposta.
+      req.log?.warn({ instance, cap: OUTAGE_PAGE_CAP }, 'instance_outages: teto atingido');
+    }
+    logAccess(deps.pool, {
+      actor: req.actingUser, action: 'group_outages',
+      workspaceId: g.linkedWorkspaceId,
+      numberId: g.scope.kind === 'number' ? g.scope.numberId : null,
+      identifier: g.jid,
+    });
+    return reply.send({ schema: 'group_v1', context: groupContext(g), outages, truncated });
   });
 
   // ── GET /whatsapp/groups/:jid/search ─────────────────────────────────────────
