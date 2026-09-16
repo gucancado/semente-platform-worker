@@ -1,5 +1,5 @@
 import type { Pool } from 'pg';
-import type { Msg } from './read-queries.js';
+import { toMsg, type Msg } from './read-queries.js';
 
 /**
  * Mensagens de um grupo no escopo AGENTE — a linha legada de `whatsapp_groups`
@@ -42,6 +42,7 @@ export async function listGroupMessagesByAgent(pool: Pool, p: {
   const { rows } = await pool.query(
     `SELECT m.id, m.direction, m.text, m.agent, m.created_at, m.author,
             m.kind, m.transcription_status, m.media_duration_s, m.media_key,
+            m.media_mime, m.media_size_bytes, m.media_filename, m.media_status,
             w.push_name AS author_name
        FROM messages m
        LEFT JOIN webhook_logs w
@@ -54,19 +55,7 @@ export async function listGroupMessagesByAgent(pool: Pool, p: {
         AND ($6::timestamptz IS NULL OR m.created_at <= $6)
       ORDER BY m.created_at ${dir} LIMIT $4`,
     [p.agent, p.identifier, before, p.limit, p.since ?? null, p.until ?? null]);
-  const messages: Msg[] = rows.map((r: any) => ({
-    id: Number(r.id),
-    direction: r.direction,
-    text: r.text,
-    agent: r.agent,
-    createdAt: r.created_at.toISOString(),
-    author: r.author,
-    authorName: r.author_name,
-    kind: r.kind,
-    transcriptionStatus: r.transcription_status,
-    mediaDurationS: r.media_duration_s,
-    hasMedia: r.media_key != null,
-  }));
+  const messages: Msg[] = rows.map(toMsg);
   const lastMsg = messages.at(-1);
   const nextCursor = messages.length === p.limit && lastMsg ? Buffer.from(lastMsg.createdAt).toString('base64') : null;
   return { messages, nextCursor };

@@ -1,5 +1,5 @@
 import Fastify from 'fastify';
-import { config, assertTranscribeConfig, assertMeetingsCollectConfig, assertMeetingsReadConfig, assertMeetingSummaryConfig } from './config.js';
+import { config, assertTranscribeConfig, assertMeetingsCollectConfig, assertMeetingsReadConfig, assertMeetingSummaryConfig, assertWhatsappMediaConfig } from './config.js';
 import { registerAdminRoutes } from './admin/routes.js';
 import { registerContactsRoutes } from './contacts/routes.js';
 import { registerWebhookRoutes } from './webhook/routes.js';
@@ -48,6 +48,8 @@ import { startAutoLossPoller } from './whatsapp/auto-loss.js';
 import { startJudgmentRunner } from './whatsapp/ai-judgment-runner.js';
 import { startPatternPoller } from './whatsapp/ai-pattern-runner.js';
 import { OpenAIJudgmentLlm } from './whatsapp/ai-llm.js';
+import { startWhatsappMediaPoller, startMediaRetentionPoller } from './whatsapp/media-poller.js';
+import { retentionEnabled } from './whatsapp/media-policy.js';
 
 async function main() {
   const app = Fastify({
@@ -208,6 +210,7 @@ async function main() {
   // Fail-fast ANTES de bindar/subir pollers: TRANSCRIBE_MODE≠off exige OPENAI + R2.
   // Se inválido, o processo sai limpo aqui (sem servidor no ar nem crons rodando).
   assertTranscribeConfig(config, r2Configured());
+  assertWhatsappMediaConfig(config, r2Configured());
   assertMeetingSummaryConfig(config);
 
   await app.listen({ host: '0.0.0.0', port: config.PORT });
@@ -276,6 +279,22 @@ async function main() {
     startTranscriptionPoller(app.log);
   } else {
     app.log.info({ mode: config.TRANSCRIBE_MODE }, 'transcrição: poller NÃO iniciado (modo != auto)');
+  }
+
+  // Mídia do WhatsApp além de áudio (imagem, vídeo, documento). Pré-requisitos
+  // validados por assertWhatsappMediaConfig acima.
+  if (config.WHATSAPP_MEDIA_MODE === 'on') {
+    startWhatsappMediaPoller(app.log);
+  } else {
+    app.log.info({ mode: config.WHATSAPP_MEDIA_MODE }, 'whatsapp-media: poller NÃO iniciado (modo != on)');
+  }
+  // Expiração por idade dos arquivos de WhatsApp: DESLIGADA por decisão do owner
+  // (2026-09-16) até o uso passar de 70% do orçamento e ele aprovar. Medir com
+  // `node dist/cli/whatsapp-media-usage.js`.
+  if (retentionEnabled(config.WHATSAPP_MEDIA_RETENTION_DAYS)) {
+    startMediaRetentionPoller(app.log);
+  } else {
+    app.log.info({ days: config.WHATSAPP_MEDIA_RETENTION_DAYS }, 'whatsapp-media: expiração DESLIGADA');
   }
 
   // Digest de reunião por IA: resumo do card + pontos discutidos. Pré-requisitos

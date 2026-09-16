@@ -15,6 +15,7 @@ import { logAccess as defaultLogAccess, type LogAccessFn } from './access-log.js
 import { emptyToUndefined } from './query-coerce.js';
 import { tenantContext } from './tenant-context.js';
 import { presignGet, whatsappMediaBucket } from '../integrations/r2.js';
+import { contentDisposition } from './media-policy.js';
 
 /** Teto de pontos da série de /whatsapp/stats/timeseries (guarda pré-DB). */
 const MAX_BUCKETS = 200;
@@ -239,21 +240,25 @@ export function registerReadRoutes(
     return reply.send({ schema: 'whatsapp_v1', context: tenantContext(num), ...result });
   });
 
-  // ── GET /whatsapp/media/:messageId ── presign do .ogg (workspace-scoped) ──
-  // NO workspace_id in query; the message row carries whatsapp_number_id →
-  // derive workspace from there (same pattern as /threads/:identifier/messages).
+  // ── GET /whatsapp/media/:messageId ── presign do arquivo (workspace-scoped) ──
+  // Áudio, imagem, vídeo e documento. NO workspace_id in query; the message row
+  // carries whatsapp_number_id → derive workspace from there (same pattern as
+  // /threads/:identifier/messages).
   app.get('/whatsapp/media/:messageId', { preHandler: auth }, async (req: any, reply) => {
     if (!req.actingUser) return reply.code(400).send({ error: 'x-acting-user required' });
     const messageId = Number(req.params.messageId);
     if (Number.isNaN(messageId)) return reply.code(400).send({ error: 'messageId must be numeric' });
-    const { rows } = await deps.pool.query(`SELECT whatsapp_number_id, media_key FROM messages WHERE id=$1`, [messageId]);
+    const { rows } = await deps.pool.query(`SELECT whatsapp_number_id, media_key, kind, media_filename FROM messages WHERE id=$1`, [messageId]);
     const m = rows[0];
     if (!m || !m.whatsapp_number_id) return reply.code(404).send({ error: 'message not found' });
     const num = await getNumber(deps.pool, Number(m.whatsapp_number_id));
     if (!num) return reply.code(404).send({ error: 'number not found' });
     if (!await gateMember(req, reply, num.workspaceId, authz)) return;
     if (!m.media_key) return reply.code(404).send({ error: 'no media' });
-    const url = await presignGet(m.media_key, 120, whatsappMediaBucket()!);
+    // Documento baixa com o nome original; imagem, vídeo e áudio seguem inline.
+    const url = await presignGet(m.media_key, 120, whatsappMediaBucket()!, {
+      contentDisposition: contentDisposition(m.kind, m.media_filename),
+    });
     logAccess(deps.pool, { actor: req.actingUser, action: 'media_presign', workspaceId: num.workspaceId, numberId: num.id });
     return reply.send({ schema: 'whatsapp_v1', context: tenantContext(num), url });
   });

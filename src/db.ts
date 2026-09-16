@@ -283,6 +283,9 @@ export async function insertMessage(args: {
   media_mime?: string | null;
   media_duration_s?: number | null;
   transcription_status?: string | null;
+  media_size_bytes?: number | null;
+  media_filename?: string | null;
+  media_status?: string | null;
 }): Promise<{ id: number; duplicate: boolean }> {
   // ingest_source: todas as linhas inseridas aqui recebem 'live' via DEFAULT da coluna (migration 034).
   // Number-path (monitored/agent_operated): dedup por (whatsapp_number_id, evolution_event_id).
@@ -292,14 +295,16 @@ export async function insertMessage(args: {
     const insert = await pool.query<{ id: number }>(
       `INSERT INTO messages
          (agent, project, channel, identifier, author, direction, text, evolution_event_id, whatsapp_number_id, workspace_id,
-          kind, media_mime, media_duration_s, transcription_status)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+          kind, media_mime, media_duration_s, transcription_status,
+          media_size_bytes, media_filename, media_status)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
        ON CONFLICT (whatsapp_number_id, evolution_event_id)
          WHERE whatsapp_number_id IS NOT NULL AND evolution_event_id IS NOT NULL
          DO NOTHING
        RETURNING id`,
       [args.agent, args.project ?? null, args.channel, args.identifier, args.author ?? null, args.direction, args.text, args.evolution_event_id, args.whatsapp_number_id, args.workspace_id ?? null,
-       args.kind ?? 'text', args.media_mime ?? null, args.media_duration_s ?? null, args.transcription_status ?? null]
+       args.kind ?? 'text', args.media_mime ?? null, args.media_duration_s ?? null, args.transcription_status ?? null,
+       args.media_size_bytes ?? null, args.media_filename ?? null, args.media_status ?? null]
     );
     if (insert.rows[0]) return { id: insert.rows[0].id, duplicate: false };
     const existing = await pool.query<{ id: number }>(

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { extractMedia, parseEvolutionPayload, shouldIngest } from '../../src/webhook/evolution.js';
+import { extractMedia, fileLengthToNumber, parseEvolutionPayload, shouldIngest } from '../../src/webhook/evolution.js';
 
 const baseEv = {
   event: 'messages.upsert',
@@ -143,11 +143,47 @@ test('número real (@s.whatsapp.net) não é alterado', () => {
 // ── Áudio (audioMessage / pttMessage) ────────────────────────────────────────
 test('extractMedia detecta audioMessage com mime e duração', () => {
   const m = extractMedia({ audioMessage: { mimetype: 'audio/ogg; codecs=opus', seconds: 7 } });
-  assert.deepEqual(m, { kind: 'audio', mime: 'audio/ogg; codecs=opus', durationS: 7 });
+  assert.deepEqual(m, { kind: 'audio', mime: 'audio/ogg; codecs=opus', durationS: 7, sizeBytes: null, filename: null });
 });
 test('extractMedia detecta pttMessage', () => {
   const m = extractMedia({ pttMessage: { mimetype: 'audio/ogg', seconds: 3 } });
-  assert.deepEqual(m, { kind: 'audio', mime: 'audio/ogg', durationS: 3 });
+  assert.deepEqual(m, { kind: 'audio', mime: 'audio/ogg', durationS: 3, sizeBytes: null, filename: null });
+});
+
+// ── Imagem, vídeo, documento, figurinha ──────────────────────────────────────
+// fileLength no formato REAL medido na Evolution em 2026-09-15: Long serializado.
+const long = (low: number, high = 0) => ({ low, high, unsigned: true });
+
+test('extractMedia detecta imageMessage com tamanho do Long', () => {
+  const m = extractMedia({ imageMessage: { mimetype: 'image/jpeg', fileLength: long(100198), caption: 'oi' } });
+  assert.deepEqual(m, { kind: 'image', mime: 'image/jpeg', durationS: null, sizeBytes: 100198, filename: null });
+});
+test('extractMedia detecta documentMessage com nome do arquivo', () => {
+  const m = extractMedia({ documentMessage: { mimetype: 'application/pdf', fileLength: long(77346), fileName: 'orçamento.pdf' } });
+  assert.deepEqual(m, { kind: 'document', mime: 'application/pdf', durationS: null, sizeBytes: 77346, filename: 'orçamento.pdf' });
+});
+test('extractMedia desempacota documentWithCaptionMessage', () => {
+  const m = extractMedia({ documentWithCaptionMessage: { message: { documentMessage: { fileName: 'a.pdf', caption: 'segue' } } } });
+  assert.equal(m?.kind, 'document');
+  assert.equal(m?.filename, 'a.pdf');
+});
+test('extractMedia detecta vídeo com duração e figurinha', () => {
+  assert.deepEqual(
+    extractMedia({ videoMessage: { mimetype: 'video/mp4', seconds: 12, fileLength: long(2911057) } }),
+    { kind: 'video', mime: 'video/mp4', durationS: 12, sizeBytes: 2911057, filename: null },
+  );
+  assert.equal(extractMedia({ stickerMessage: { mimetype: 'image/webp' } })?.kind, 'sticker');
+});
+test('fileLengthToNumber: Long, Long >= 2 GB, string, número e lixo', () => {
+  assert.equal(fileLengthToNumber(long(100198)), 100198);
+  // low é int32 COM sinal no Long.js: 3 GB chega com low negativo.
+  assert.equal(fileLengthToNumber({ low: -1294967296, high: 0, unsigned: true }), 3_000_000_000);
+  assert.equal(fileLengthToNumber({ low: 0, high: 1 }), 4294967296);
+  assert.equal(fileLengthToNumber('2048'), 2048);
+  assert.equal(fileLengthToNumber(512), 512);
+  assert.equal(fileLengthToNumber(undefined), null);
+  assert.equal(fileLengthToNumber('abc'), null);
+  assert.equal(fileLengthToNumber({ low: 0, high: 0 }), null);
 });
 test('extractMedia desempacota ephemeral/viewOnce', () => {
   assert.equal(extractMedia({ ephemeralMessage: { message: { audioMessage: { mimetype: 'audio/ogg', seconds: 2 } } } })?.kind, 'audio');
@@ -162,5 +198,5 @@ test('parseEvolutionPayload popula media em áudio e messageText null', () => {
     data: { key: { remoteJid: '5531999998888@s.whatsapp.net', fromMe: false, id: 'E1' }, message: { audioMessage: { mimetype: 'audio/ogg', seconds: 5 } } },
   });
   assert.equal(p?.messageText, null);
-  assert.deepEqual(p?.media, { kind: 'audio', mime: 'audio/ogg', durationS: 5 });
+  assert.deepEqual(p?.media, { kind: 'audio', mime: 'audio/ogg', durationS: 5, sizeBytes: null, filename: null });
 });

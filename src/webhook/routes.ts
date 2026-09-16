@@ -17,6 +17,8 @@ import { createTask } from '../bloquim/client.js';
 import { computeScheduledAt } from '../triggers/quiet-hours.js';
 import { agentsToTrigger, quarantineUnknownInstance } from '../whatsapp/reaction.js';
 import { detectAndTagSource } from '../whatsapp/source-signals.js';
+import { mediaIngestPlan, mediaMessageText } from '../whatsapp/media-policy.js';
+import { insertWhatsappMediaJob } from '../whatsapp/media-jobs.js';
 
 /**
  * Gate puro de ingestão de áudio (number-path, só DM). `off` ou grupo ou sem
@@ -55,7 +57,20 @@ export async function registerWebhookRoutes(app: FastifyInstance) {
 
     // Áudio (number-path, só DM): decide se captura (placeholder + job) e se
     // suprime o trigger reativo na chegada (auto → poller dispara pós-transcrição).
-    const plan = audioIngestPlan(config.TRANSCRIBE_MODE, msg.isGroup, !!msg.media);
+    // `kind === 'audio'` e não `!!msg.media`: extractMedia passou a devolver imagem,
+    // vídeo, documento e figurinha, que não podem cair no trilho de transcrição.
+    const plan = audioIngestPlan(config.TRANSCRIBE_MODE, msg.isGroup, msg.media?.kind === 'audio');
+
+    // Imagem/vídeo/documento/figurinha (number-path, só DM). Com o modo 'off' devolve
+    // record=false e o ingest segue idêntico ao de antes desta feature.
+    const mediaPlan = mediaIngestPlan({
+      mode: config.WHATSAPP_MEDIA_MODE,
+      isGroup: msg.isGroup,
+      media: msg.media,
+      maxBytes: config.WHATSAPP_MEDIA_MAX_BYTES,
+      kinds: config.WHATSAPP_MEDIA_KINDS,
+    });
+    const mediaText = mediaPlan.record && msg.media ? mediaMessageText(msg.media, msg.messageText) : null;
 
     // Diagnóstico: quando texto vier null (e não for áudio capturado), loga o
     // keyset da envelope pra entender que tipo de mensagem foi enviada. Sem
@@ -106,7 +121,7 @@ export async function registerWebhookRoutes(app: FastifyInstance) {
         message_text: msg.messageText,
         workspace_id: resolved.workspaceId,
         evolution_event_id: msg.rawEventId,
-        payload_summary: plan.capture ? '[áudio]' : ((msg.messageText ?? '').slice(0, 80) || '(sem texto)'),
+        payload_summary: plan.capture ? '[áudio]' : ((mediaText ?? msg.messageText ?? '').slice(0, 80) || '(sem texto)'),
         bloquim_task_id: null,
         fallback_used: false,
         whatsapp_number_id: resolved.numberId,
@@ -126,6 +141,41 @@ export async function registerWebhookRoutes(app: FastifyInstance) {
           });
         } catch (err) {
           req.log.warn({ err: (err as Error).message }, 'enfileirar áudio falhou — webhook segue');
+        }
+      } else if (mediaPlan.record && msg.media && mediaText && msg.identifier) {
+        // Mídia não-áudio em DM. A mensagem entra SEMPRE (com marcador), mesmo quando
+        // o arquivo não vai ser guardado — a conversa não pode perder a bolha.
+        try {
+          const mediaMsg = await insertMessage({
+            agent, channel: msg.channel, identifier: msg.identifier, author: msg.author,
+            direction: msg.fromMe ? 'outbound' : 'inbound', text: mediaText,
+            evolution_event_id: msg.rawEventId, whatsapp_number_id: resolved.numberId, workspace_id: resolved.workspaceId,
+            kind: msg.media.kind, media_mime: msg.media.mime, media_duration_s: msg.media.durationS,
+            media_size_bytes: msg.media.sizeBytes, media_filename: msg.media.filename, media_status: mediaPlan.status,
+          });
+          // Sem checar `duplicate`, igual ao áudio: se a 1ª entrega gravou a mensagem e
+          // caiu antes do job, a reentrega precisa criar o job. O ON CONFLICT dedupe.
+          if (mediaPlan.status === 'pending') {
+            await insertWhatsappMediaJob(pool, {
+              message_id: mediaMsg.id, whatsapp_number_id: resolved.numberId!, workspace_id: resolved.workspaceId ?? null,
+              instance: msg.instance, evolution_event_id: msg.rawEventId, kind: msg.media.kind,
+              raw_envelope: (req.body as any)?.data ?? {},
+            });
+          }
+          // Legenda de foto passava pela detecção de origem quando era gravada como
+          // texto puro; continua passando agora que mora numa mensagem de mídia.
+          if (!mediaMsg.duplicate && !msg.fromMe && msg.messageText && resolved.workspaceId && resolved.numberId != null) {
+            try {
+              await detectAndTagSource(pool, {
+                workspaceId: resolved.workspaceId, numberId: resolved.numberId,
+                identifier: msg.identifier, text: msg.messageText,
+              });
+            } catch (err) {
+              req.log.warn({ err: (err as Error).message }, 'detectAndTagSource(mídia) falhou — webhook segue');
+            }
+          }
+        } catch (err) {
+          req.log.warn({ err: (err as Error).message }, 'gravar mídia falhou — webhook segue');
         }
       } else if (msg.messageText && msg.identifier) {
         try {

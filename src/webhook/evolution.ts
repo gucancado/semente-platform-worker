@@ -25,7 +25,19 @@ export const EvolutionMessageSchema = z.object({
 });
 export type EvolutionMessage = z.infer<typeof EvolutionMessageSchema>;
 
-export type ParsedMedia = { kind: 'audio'; mime: string | null; durationS: number | null };
+export type MediaKind = 'audio' | 'image' | 'video' | 'document' | 'sticker';
+
+/**
+ * Metadados da mídia vindos do envelope do Baileys. O ARQUIVO não vem no webhook
+ * (base64:false) — é baixado depois, pela fila. `sizeBytes` e `filename` podem faltar.
+ */
+export type ParsedMedia = {
+  kind: MediaKind;
+  mime: string | null;
+  durationS: number | null;
+  sizeBytes: number | null;
+  filename: string | null;
+};
 
 export type ParsedMessage = {
   agent: string;             // nome técnico do agente (mercurio)
@@ -138,9 +150,36 @@ export function extractMessageText(msg: unknown): string | null {
 }
 
 /**
- * Extrai metadados de áudio da mensagem (audioMessage, pttMessage). Desempacota
- * containers (ephemeral, viewOnce, etc.) assim como extractMessageText, retornando
- * o tipo de mídia, MIME e duração quando presentes.
+ * `fileLength` do Baileys chega como Long serializado — `{low, high, unsigned}` —
+ * e não como número: `Number(fileLength)` dá NaN, e um teto por tamanho escrito
+ * assim deixaria passar todo arquivo, calado. `low` é int32 COM sinal no Long.js,
+ * então arquivos a partir de 2 GB viriam negativos sem o `>>> 0`.
+ */
+export function fileLengthToNumber(fl: unknown): number | null {
+  if (typeof fl === 'number') return Number.isFinite(fl) && fl > 0 ? fl : null;
+  if (typeof fl === 'string') return /^\d+$/.test(fl) && Number(fl) > 0 ? Number(fl) : null;
+  if (fl && typeof fl === 'object') {
+    const o = fl as { low?: unknown; high?: unknown };
+    const low = Number(o.low ?? 0) >>> 0;
+    const high = Number(o.high ?? 0) >>> 0;
+    const n = high * 4294967296 + low;
+    return Number.isFinite(n) && n > 0 ? n : null;
+  }
+  return null;
+}
+
+const MEDIA_NODES: ReadonlyArray<[Exclude<MediaKind, 'audio'>, string]> = [
+  ['image', 'imageMessage'],
+  ['video', 'videoMessage'],
+  ['document', 'documentMessage'],
+  ['sticker', 'stickerMessage'],
+];
+
+/**
+ * Extrai metadados de mídia (áudio, imagem, vídeo, documento, figurinha).
+ * Desempacota containers (ephemeral, viewOnce, documentWithCaption...) assim como
+ * extractMessageText. Extrair não decide nada: quem decide gravar ou baixar é
+ * `audioIngestPlan` (áudio) e `mediaIngestPlan` (o resto).
  */
 export function extractMedia(msg: unknown): ParsedMedia | null {
   if (!msg || typeof msg !== 'object') return null;
@@ -150,12 +189,26 @@ export function extractMedia(msg: unknown): ParsedMedia | null {
     ?? m.viewOnceMessageV2?.message ?? m.viewOnceMessageV2Extension?.message
     ?? m.editedMessage?.message ?? m.documentWithCaptionMessage?.message;
   if (inner) return extractMedia(inner);
+  const str = (v: unknown) => (typeof v === 'string' && v.length ? v : null);
   const audio = m.audioMessage ?? m.pttMessage;
   if (audio && typeof audio === 'object') {
     return {
       kind: 'audio',
-      mime: typeof audio.mimetype === 'string' ? audio.mimetype : null,
+      mime: str(audio.mimetype),
       durationS: typeof audio.seconds === 'number' ? audio.seconds : null,
+      sizeBytes: fileLengthToNumber(audio.fileLength),
+      filename: null,
+    };
+  }
+  for (const [kind, field] of MEDIA_NODES) {
+    const node = m[field];
+    if (!node || typeof node !== 'object') continue;
+    return {
+      kind,
+      mime: str(node.mimetype),
+      durationS: kind === 'video' && typeof node.seconds === 'number' ? node.seconds : null,
+      sizeBytes: fileLengthToNumber(node.fileLength),
+      filename: kind === 'document' ? (str(node.fileName) ?? str(node.title)) : null,
     };
   }
   return null;

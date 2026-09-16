@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { DOWNLOADABLE_KINDS, MIN_RETENTION_DAYS, type DownloadableKind } from './whatsapp/media-policy.js';
 
 const AgentTokensSchema = z.record(
   z.string(),
@@ -247,6 +248,34 @@ const EnvSchema = z.object({
   MEETING_SUMMARY_MODE: z.enum(['off', 'auto']).default('off'),
   MEETING_SUMMARY_MODEL: z.string().default('gpt-5.4-mini'),
   R2_BUCKET_WHATSAPP_MEDIA: z.string().optional(),
+  // ── Mídia do WhatsApp além de áudio (imagem, vídeo, documento, figurinha) ──
+  // Nasce 'off': com 'off' o ingest é byte-idêntico ao de antes (foto sem legenda
+  // não vira mensagem; foto com legenda vira texto puro). 'on' grava a mensagem com
+  // marcador e baixa o arquivo pro R2. Números e porquês em src/whatsapp/media-policy.ts.
+  WHATSAPP_MEDIA_MODE: z.enum(['off', 'on']).default('off'),
+  // Tipos BAIXADOS. Figurinha nunca é baixada (vira só marcador); áudio tem trilho próprio.
+  WHATSAPP_MEDIA_KINDS: z.string().default('image,video,document')
+    .transform((s) => s.split(',').map((k) => k.trim()).filter(Boolean))
+    .refine((ks) => ks.every((k) => (DOWNLOADABLE_KINDS as readonly string[]).includes(k)), {
+      message: 'WHATSAPP_MEDIA_KINDS aceita só image, video e document',
+    })
+    .transform((ks) => ks as DownloadableKind[]),
+  // Teto por arquivo (bytes). Acima dele a mensagem existe e o arquivo não é guardado.
+  WHATSAPP_MEDIA_MAX_BYTES: z.coerce.number().int().positive().default(16 * 1024 * 1024),
+  WHATSAPP_MEDIA_POLLER_INTERVAL_MS: z.coerce.number().int().positive().default(5_000),
+  WHATSAPP_MEDIA_POLLER_BATCH_SIZE: z.coerce.number().int().positive().default(5),
+  WHATSAPP_MEDIA_MAX_ATTEMPTS: z.coerce.number().int().positive().default(4),
+  // Expiração por idade dos arquivos de WhatsApp (mídia E áudio). 0 = DESLIGADA.
+  // Decisão do owner (2026-09-16): liga em 180 só com aprovação dele, quando o uso
+  // passar de 70% de WHATSAPP_MEDIA_BUDGET_GB. De 1 a 29 é recusado no boot — um
+  // typo no lugar de 180 apagaria quase tudo numa varredura.
+  WHATSAPP_MEDIA_RETENTION_DAYS: z.coerce.number().int().min(0).default(0)
+    .refine((d) => d === 0 || d >= MIN_RETENTION_DAYS, {
+      message: `WHATSAPP_MEDIA_RETENTION_DAYS deve ser 0 (desligada) ou >= ${MIN_RETENTION_DAYS}`,
+    }),
+  WHATSAPP_MEDIA_RETENTION_BUDGET_PER_RUN: z.coerce.number().int().positive().default(500),
+  // Orçamento de armazenamento da mídia do WhatsApp — base do % do CLI whatsapp-media-usage.
+  WHATSAPP_MEDIA_BUDGET_GB: z.coerce.number().positive().default(20),
   INTERNAL_WORKSPACE_ID: z.string().optional(),
   INTERNAL_DOMAINS: z.string().default('beeads.com.br').transform((s) => s.split(',').map((d) => d.trim()).filter(Boolean)),
   FREEMAIL_DOMAINS_EXTRA: z.string().optional().transform((s) => (s ? s.split(',').map((d) => d.trim()).filter(Boolean) : [])),
@@ -309,6 +338,20 @@ export function assertTranscribeConfig(
   if (cfg.TRANSCRIBE_MODE === 'off') return;
   if (!cfg.OPENAI_API_KEY) throw new Error(`TRANSCRIBE_MODE=${cfg.TRANSCRIBE_MODE} exige OPENAI_API_KEY`);
   if (!r2ok) throw new Error(`TRANSCRIBE_MODE=${cfg.TRANSCRIBE_MODE} exige R2 configurado (R2_* ausentes)`);
+}
+
+/**
+ * Fail-fast da mídia do WhatsApp. Download ligado sem R2 queimaria as tentativas de
+ * todo job e marcaria `failed` permanente por erro de env; expiração ligada sem R2
+ * não teria como apagar os objetos.
+ */
+export function assertWhatsappMediaConfig(
+  cfg: Pick<typeof config, 'WHATSAPP_MEDIA_MODE' | 'WHATSAPP_MEDIA_RETENTION_DAYS'>,
+  r2ok: boolean,
+): void {
+  if (r2ok) return;
+  if (cfg.WHATSAPP_MEDIA_MODE === 'on') throw new Error('WHATSAPP_MEDIA_MODE=on exige R2 configurado (R2_* ausentes)');
+  if (cfg.WHATSAPP_MEDIA_RETENTION_DAYS > 0) throw new Error('WHATSAPP_MEDIA_RETENTION_DAYS>0 exige R2 configurado (R2_* ausentes)');
 }
 
 /**

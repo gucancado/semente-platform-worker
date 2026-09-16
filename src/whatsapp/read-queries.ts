@@ -355,7 +355,32 @@ export async function listThreads(pool: Pool, p: {
   return { threads, nextCursor };
 }
 
-export type Msg = { id: number; direction: string; text: string | null; agent: string | null; createdAt: string; author: string | null; authorName: string | null; kind: string; transcriptionStatus: string | null; mediaDurationS: number | null; hasMedia: boolean };
+export type Msg = {
+  id: number; direction: string; text: string | null; agent: string | null; createdAt: string;
+  author: string | null; authorName: string | null; kind: string; transcriptionStatus: string | null;
+  mediaDurationS: number | null; hasMedia: boolean;
+  /** Mídia não-áudio (mig 067). `mediaStatus` NULL = linha sem arquivo ou anterior à feature. */
+  mediaMime: string | null; mediaSizeBytes: number | null; mediaFilename: string | null; mediaStatus: string | null;
+};
+
+/**
+ * Linha de `messages` (+ `author_name` do join) → `Msg`. ÚNICO mapeamento para os
+ * três leitores (conversa por número, conversa de grupo de agente, busca em grupo):
+ * eles tinham cópias próprias, e um campo novo em uma só fazia os outros devolverem
+ * um shape menor sem acusar nada.
+ */
+export function toMsg(r: any): Msg {
+  return {
+    id: Number(r.id), direction: r.direction, text: r.text, agent: r.agent, createdAt: r.created_at.toISOString(),
+    author: r.author, authorName: r.author_name, kind: r.kind, transcriptionStatus: r.transcription_status,
+    mediaDurationS: r.media_duration_s, hasMedia: r.media_key != null,
+    mediaMime: r.media_mime ?? null,
+    // BIGINT chega do pg como string.
+    mediaSizeBytes: r.media_size_bytes == null ? null : Number(r.media_size_bytes),
+    mediaFilename: r.media_filename ?? null,
+    mediaStatus: r.media_status ?? null,
+  };
+}
 export async function listThreadMessages(pool: Pool, p: { workspaceId: string; numberId: number; identifier: string; limit: number; cursor?: string; since?: string; until?: string; order?: 'asc' | 'desc' }) {
   const before = p.cursor ? Buffer.from(p.cursor, 'base64').toString() : null;
   // order 'desc' (default) = mais novas primeiro (compat). 'asc' = mais antigas primeiro (paginação p/ frente).
@@ -365,6 +390,7 @@ export async function listThreadMessages(pool: Pool, p: { workspaceId: string; n
   const { rows } = await pool.query(
     `SELECT m.id, m.direction, m.text, m.agent, m.created_at, m.author,
             m.kind, m.transcription_status, m.media_duration_s, m.media_key,
+            m.media_mime, m.media_size_bytes, m.media_filename, m.media_status,
             w.push_name AS author_name
        FROM messages m
        LEFT JOIN webhook_logs w
@@ -377,7 +403,7 @@ export async function listThreadMessages(pool: Pool, p: { workspaceId: string; n
         AND ($6::timestamptz IS NULL OR m.created_at <= $6)
       ORDER BY m.created_at ${dir} LIMIT $4`,
     [p.numberId, p.identifier, before, p.limit, p.since ?? null, p.until ?? null, p.workspaceId]);
-  const messages: Msg[] = rows.map(r => ({ id: Number(r.id), direction: r.direction, text: r.text, agent: r.agent, createdAt: r.created_at.toISOString(), author: r.author, authorName: r.author_name, kind: r.kind, transcriptionStatus: r.transcription_status, mediaDurationS: r.media_duration_s, hasMedia: r.media_key != null }));
+  const messages: Msg[] = rows.map(toMsg);
   const lastMsg = messages.at(-1);
   const nextCursor = messages.length === p.limit && lastMsg ? Buffer.from(lastMsg.createdAt).toString('base64') : null;
   return { messages, nextCursor };

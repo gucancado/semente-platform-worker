@@ -1,6 +1,6 @@
 import type { Pool } from 'pg';
 import type { GroupScope } from './group-links.js';
-import type { Msg } from './read-queries.js';
+import { toMsg, type Msg } from './read-queries.js';
 
 /**
  * Busca group-scoped + janela ancorada do contrato `group_v1`.
@@ -89,6 +89,7 @@ export async function searchGroupMessages(pool: Pool, p: {
 /** SELECT compartilhado da janela — mesmo shape `Msg` dos leitores. */
 const MSG_SELECT = `SELECT m.id, m.direction, m.text, m.agent, m.created_at, m.author,
         m.kind, m.transcription_status, m.media_duration_s, m.media_key,
+        m.media_mime, m.media_size_bytes, m.media_filename, m.media_status,
         w.push_name AS author_name
    FROM messages m
    LEFT JOIN webhook_logs w
@@ -97,19 +98,7 @@ const MSG_SELECT = `SELECT m.id, m.direction, m.text, m.agent, m.created_at, m.a
     AND m.direction = 'inbound'`;
 
 function mapMsg(r: any): Msg {
-  return {
-    id: Number(r.id),
-    direction: r.direction,
-    text: r.text,
-    agent: r.agent,
-    createdAt: r.created_at.toISOString(),
-    author: r.author,
-    authorName: r.author_name,
-    kind: r.kind,
-    transcriptionStatus: r.transcription_status,
-    mediaDurationS: r.media_duration_s,
-    hasMedia: r.media_key != null,
-  };
+  return toMsg(r);
 }
 
 /**

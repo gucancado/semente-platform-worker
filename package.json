@@ -22,6 +22,7 @@
     "whatsapp:check-group-links": "tsx src/cli/check-group-links.ts",
     "whatsapp:notify-down": "tsx src/cli/notify-down.ts",
     "whatsapp:cloud-template": "tsx src/cli/cloud-template.ts",
+    "whatsapp:media-usage": "tsx src/cli/whatsapp-media-usage.ts",
     "meetings:summarize": "tsx src/cli/summarize-meetings.ts",
     "transcribe:pending": "tsx src/transcription/cli.ts pending",
     "transcribe:redo": "tsx src/transcription/cli.ts redo",

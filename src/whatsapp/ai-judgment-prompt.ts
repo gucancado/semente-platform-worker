@@ -55,6 +55,12 @@ Regras invioláveis:
   recusa de informar. Trate como INFORMAÇÃO AUSENTE: qualify=null e oportunidade
   aberta. NUNCA use esse marcador como base para qualify=false, "perdido" ou
   not_lead: o que falta é do nosso lado, não do cliente.
+- Marcadores de arquivo — "(imagem)", "(vídeo)", "(documento: nome.pdf)", "(figurinha)",
+  que também podem aparecer entre colchetes — dizem que um arquivo FOI enviado, mas você
+  não vê o conteúdo dele; o texto depois do marcador é a legenda. Use o FATO do envio
+  (ex.: o atendente mandou fotos ou um orçamento em PDF; o cliente mandou um comprovante)
+  sem presumir o que o arquivo mostra. Não ver o conteúdo NUNCA é base para
+  qualify=false, "perdido" ou not_lead.
 
 Formato exato da resposta (use null onde não se aplicar):
 {"triage":"lead"|"not_lead"|null,"not_lead_reason":"motivo"|null,"open_opp":{"qualify":true|false|null,"status":"ganho"|"perdido"|null,"loss_reason":"codigo"|null}|null,"closed_action":"nada"|"reabrir"|"criar_nova"|null,"tags":[ids],"rationale":"justificativa curta"}
