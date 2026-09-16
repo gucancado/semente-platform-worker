@@ -74,6 +74,10 @@ export async function upsertConnectedNumber(
      RETURNING *`,
     [p.workspaceId, p.evolutionInstance, p.phone ?? null, p.createdBy],
   );
+  // Reprovisionamento grava status='connected' SEM passar por updateNumberStatus.
+  // Sem fechar aqui, a linha fica aberta pra sempre e, a partir daí, toda queda
+  // futura desta instância é engolida em silêncio pelo ON CONFLICT DO NOTHING.
+  await closeOpenOutage(pool, p.evolutionInstance);
   return map(rows[0]);
 }
 export async function renameNumberLabel(pool: Pool, id: number, label: string | null): Promise<void> {
@@ -86,27 +90,46 @@ export async function updateNumberStatus(
     `WITH prev AS (
        SELECT id, status AS old_status, alerted_at AS old_alerted_at
          FROM whatsapp_numbers WHERE evolution_instance = $1 FOR UPDATE
+     ),
+     upd AS (
+       UPDATE whatsapp_numbers wn SET
+         status = $2,
+         phone = COALESCE($3, wn.phone),
+         updated_at = NOW(),
+         -- Reconectar um número REMOVIDO o traz de volta (invariante: connected ⟹ not removed).
+         -- Só 'removido pelo botão' (removed_at) some da nav; desconectar (removed_at NULL) permanece.
+         removed_at = CASE WHEN $2 = 'connected' THEN NULL ELSE wn.removed_at END,
+         disconnected_since = CASE
+           WHEN $2 = 'connected' THEN NULL
+           WHEN prev.old_status = 'connected' THEN NOW()
+           ELSE wn.disconnected_since END,
+         alerted_at = CASE WHEN $2 = 'connected' THEN NULL ELSE wn.alerted_at END,
+         -- Fim do episódio de queda também encerra o aviso ao próprio número (mig 064).
+         down_notified_at  = CASE WHEN $2 = 'connected' THEN NULL ELSE wn.down_notified_at END,
+         down_notify_count = CASE WHEN $2 = 'connected' THEN 0 ELSE wn.down_notify_count END
+       FROM prev
+       WHERE wn.id = prev.id
+       RETURNING wn.id AS number_id, wn.workspace_id, wn.phone, wn.label,
+                 prev.old_status, wn.status AS new_status,
+                 (prev.old_alerted_at IS NOT NULL) AS was_alerted
+     ),
+     -- Abrir e fechar consomem o RETURNING de upd, NUNCA releem whatsapp_numbers:
+     -- CTEs compartilham o snapshot do início do statement e não enxergam a escrita
+     -- irmã. Consumindo o RETURNING, as duas são mutuamente exclusivas por
+     -- construção (dependem do mesmo par old/new) e nunca disparam juntas.
+     opened AS (
+       INSERT INTO instance_outages (instance, kind, number_id, started_at, started_at_source, reason, detected_by)
+       SELECT $1, 'number', upd.number_id, NOW(), 'webhook', 'connection_update', 'webhook'
+         FROM upd
+        WHERE upd.old_status = 'connected' AND upd.new_status <> 'connected'
+       ON CONFLICT (instance) WHERE ended_at IS NULL DO NOTHING
+     ),
+     closed AS (
+       UPDATE instance_outages o SET ended_at = NOW(), updated_at = NOW()
+        WHERE o.instance = $1 AND o.ended_at IS NULL
+          AND EXISTS (SELECT 1 FROM upd WHERE upd.new_status = 'connected' AND upd.old_status <> 'connected')
      )
-     UPDATE whatsapp_numbers wn SET
-       status = $2,
-       phone = COALESCE($3, wn.phone),
-       updated_at = NOW(),
-       -- Reconectar um número REMOVIDO o traz de volta (invariante: connected ⟹ not removed).
-       -- Só 'removido pelo botão' (removed_at) some da nav; desconectar (removed_at NULL) permanece.
-       removed_at = CASE WHEN $2 = 'connected' THEN NULL ELSE wn.removed_at END,
-       disconnected_since = CASE
-         WHEN $2 = 'connected' THEN NULL
-         WHEN prev.old_status = 'connected' THEN NOW()
-         ELSE wn.disconnected_since END,
-       alerted_at = CASE WHEN $2 = 'connected' THEN NULL ELSE wn.alerted_at END,
-       -- Fim do episódio de queda também encerra o aviso ao próprio número (mig 064).
-       down_notified_at  = CASE WHEN $2 = 'connected' THEN NULL ELSE wn.down_notified_at END,
-       down_notify_count = CASE WHEN $2 = 'connected' THEN 0 ELSE wn.down_notify_count END
-     FROM prev
-     WHERE wn.id = prev.id
-     RETURNING wn.id AS number_id, wn.workspace_id, wn.phone, wn.label,
-               prev.old_status, wn.status AS new_status,
-               (prev.old_alerted_at IS NOT NULL) AS was_alerted`,
+     SELECT * FROM upd`,
     [instance, p.status, p.phone ?? null]);
   const r = rows[0];
   if (!r) return null;
@@ -123,12 +146,25 @@ export function normalizePhone(raw: string | null | undefined): string | undefin
 }
 
 export async function setNumberLifecycle(pool: Pool, id: number, p: { status: WhatsappNumber['status']; removed: boolean }) {
-  await pool.query(
+  const { rows } = await pool.query(
     `UPDATE whatsapp_numbers
         SET status = $2, removed_at = CASE WHEN $3 THEN NOW() ELSE NULL END, updated_at = NOW()
-      WHERE id = $1`,
+      WHERE id = $1
+      RETURNING evolution_instance`,
     [id, p.status, p.removed],
   );
+  // `removed` é o discriminador, não `status` (as duas chamadas reais usam
+  // status='disconnected'):
+  // - provision-routes.ts:347 (REMOVER) chama deleteInstance antes — a
+  //   instância deixa de existir. Fechar é certo: não há mais o que
+  //   monitorar, e um episódio aberto pra sempre bloquearia toda queda futura
+  //   caso o nome de instância seja reusado (o DO NOTHING engoliria em silêncio).
+  // - provision-routes.ts:358 (DESCONECTAR) só faz logoutInstance e MANTÉM a
+  //   instância pra reconectar sem perder histórico: o observador para de
+  //   capturar com a instância viva — é o INÍCIO de uma janela de
+  //   indisponibilidade, não o fim. Fechar aqui afirmaria "monitoramento
+  //   retomado" no instante exato em que ele parou.
+  if (rows[0] && p.removed) await closeOpenOutage(pool, rows[0].evolution_instance);
 }
 
 export type ClaimResult =
@@ -181,6 +217,10 @@ export async function claimNumberByPhone(
                   expose_groups_in_mcp, created_by, created_at, updated_at, removed_at`,
       [p.newWorkspaceId, p.evolutionInstance, p.phone, id],
     );
+    // A instância ANTIGA fica para trás na troca — a nova nunca teve episódio.
+    // Fechado na MESMA transação: se o commit não acontecer, o fechamento
+    // também não deve valer.
+    await closeOpenOutage(client, row.evolution_instance);
     await client.query('COMMIT');
     return { kind: 'moved', number: map(upd.rows[0]), oldInstance: row.evolution_instance };
   } catch (e) {
@@ -189,4 +229,17 @@ export async function claimNumberByPhone(
   } finally {
     client.release();
   }
+}
+
+/**
+ * Fecha o episódio aberto desta instância, se houver. Idempotente.
+ * Aceita `Pool` ou `PoolClient` (`Pick<Pool, 'query'>`) — dentro de
+ * `claimNumberByPhone` precisa rodar na MESMA transação do `client`.
+ */
+export async function closeOpenOutage(pool: Pick<Pool, 'query'>, instance: string): Promise<void> {
+  await pool.query(
+    `UPDATE instance_outages SET ended_at = NOW(), updated_at = NOW()
+      WHERE instance = $1 AND ended_at IS NULL`,
+    [instance],
+  );
 }
