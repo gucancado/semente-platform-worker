@@ -3,10 +3,15 @@ import assert from 'node:assert/strict';
 import {
   decideSystemHealth,
   fmtBrtShort,
+  isOwnDownNotice,
   isRetryableSendFailure,
   observedDownSince,
+  planEpisode,
   shouldNotify,
 } from '../../src/whatsapp/down-notify.js';
+import { businessMsBetween } from '../../src/whatsapp/business-hours.js';
+import { latestTrafficTs } from '../../src/evolution/client.js';
+import { renderConnectionDownText } from '../../src/webhook-cloud/templates.js';
 
 const H = 3_600_000;
 const NOW = new Date('2026-09-13T15:00:00.000Z'); // 12:00 em São Paulo
@@ -135,4 +140,176 @@ test('observedDownSince sem par à frente não inventa início', () => {
   assert.equal(observedDownSince({ ownStoreTs: S('2026-09-12T20:00:00Z'), peerStoreTs: S('2026-09-12T19:00:00Z') }), null);
   assert.equal(observedDownSince({ ownStoreTs: null, peerStoreTs: S('2026-09-12T19:00:00Z') }), null);
   assert.equal(observedDownSince({ ownStoreTs: S('2026-09-12T19:00:00Z'), peerStoreTs: null }), null);
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Falsos positivos medidos em prod entre 15/09 e 21/09/2026 (instância `saturno`,
+// só-de-grupos-de-equipe, que NÃO caiu: 11 avisos e 8 episódios falsos).
+// Os horários abaixo são os reais, em São Paulo.
+// ─────────────────────────────────────────────────────────────────────────────
+const brt = (s: string) => new Date(`${s}-03:00`);
+
+test('[defeito 1] aviso falso de 21/09 06:24: alvo mudo desde domingo à noite NÃO é queda', () => {
+  // store próprio parado desde 20/09 20:06 (domingo); par de ATENDIMENTO recebeu lead às 06:20 de segunda
+  const input = {
+    state: 'open' as const,
+    ownStoreTs: brt('2026-09-20T20:06:00'),
+    peerStoreTs: brt('2026-09-21T06:20:00'),
+    staleMs: 6 * H,
+  };
+  // pelo relógio de parede são 10h14 de atraso — foi o que disparou o aviso
+  assert.deepEqual(decideSystemHealth(input), { down: true, reason: 'store_stale' });
+  // medido em expediente, o atraso é zero: ninguém fala em grupo de equipe de madrugada
+  assert.deepEqual(decideSystemHealth({ ...input, elapsedMs: businessMsBetween }), { down: false, reason: null });
+});
+
+test('[defeito 1] fim de semana inteiro mudo com par ativo NÃO é queda (episódios 77 e 78)', () => {
+  assert.deepEqual(
+    decideSystemHealth({
+      state: 'open',
+      ownStoreTs: brt('2026-09-18T18:40:00'), // sexta, fim do expediente
+      peerStoreTs: brt('2026-09-20T10:54:00'), // domingo
+      staleMs: 6 * H,
+      elapsedMs: businessMsBetween,
+    }),
+    { down: false, reason: null },
+  );
+});
+
+test('[defeito 1] sessão zumbi em dia útil AINDA é pega, no mesmo prazo de 6h', () => {
+  const zombie = {
+    state: 'open' as const,
+    ownStoreTs: brt('2026-09-22T10:00:00'), // terça: parou de receber às 10h
+    staleMs: 6 * H,
+    elapsedMs: businessMsBetween,
+  };
+  assert.deepEqual(decideSystemHealth({ ...zombie, peerStoreTs: brt('2026-09-22T15:00:00') }), { down: false, reason: null });
+  assert.deepEqual(decideSystemHealth({ ...zombie, peerStoreTs: brt('2026-09-22T16:00:00') }), { down: true, reason: 'store_stale' });
+});
+
+test('[defeito 1] zumbi de sexta à tarde é pego na segunda, não no sábado', () => {
+  const zombie = { state: 'open' as const, ownStoreTs: brt('2026-09-25T17:00:00'), staleMs: 6 * H, elapsedMs: businessMsBetween };
+  assert.equal(decideSystemHealth({ ...zombie, peerStoreTs: brt('2026-09-26T12:00:00') }).down, false);
+  assert.equal(decideSystemHealth({ ...zombie, peerStoreTs: brt('2026-09-28T13:59:00') }).down, false);
+  assert.equal(decideSystemHealth({ ...zombie, peerStoreTs: brt('2026-09-28T14:00:00') }).down, true);
+});
+
+test('[defeito 1] estado fechado é queda a qualquer hora — o expediente só vale para o store', () => {
+  assert.deepEqual(
+    decideSystemHealth({
+      state: 'close',
+      ownStoreTs: brt('2026-09-20T20:06:00'),
+      peerStoreTs: brt('2026-09-21T03:00:00'),
+      staleMs: 6 * H,
+      elapsedMs: businessMsBetween,
+    }),
+    { down: true, reason: 'state' },
+  );
+});
+
+// O aviso como a Evolution o guarda no store do PRÓPRIO alvo (DM recebida do número Cloud).
+const NOTICE_TEXT = renderConnectionDownText({
+  name: 'Monitor de grupos',
+  phone: '+553195950748',
+  downSince: brt('2026-09-19T12:03:00'),
+  token: 'o4MEzz_exemploDeToken',
+});
+const secs = (d: Date) => Math.floor(d.getTime() / 1000);
+const notice = (at: Date, message: unknown = { conversation: NOTICE_TEXT }, remoteJid = '553190858510@s.whatsapp.net') => ({
+  key: { remoteJid, fromMe: false, id: `wamid-${secs(at)}` },
+  message,
+  messageTimestamp: secs(at),
+});
+const groupMsg = (at: Date, text = 'bom dia, pessoal') => ({
+  key: { remoteJid: '120363424016852722@g.us', fromMe: false, id: `g-${secs(at)}`, participant: '5531999990000@s.whatsapp.net' },
+  message: { conversation: text },
+  messageTimestamp: secs(at),
+});
+
+test('[defeito 2] o texto que o vigia ENVIA é reconhecido como aviso próprio (trava o acoplamento com o template)', () => {
+  assert.equal(isOwnDownNotice(notice(brt('2026-09-19T17:09:39'))), true);
+});
+
+test('[defeito 2] reconhece o aviso em qualquer formato que o Baileys entregue', () => {
+  const at = brt('2026-09-19T17:09:39');
+  assert.equal(
+    isOwnDownNotice(notice(at, { extendedTextMessage: { text: NOTICE_TEXT, matchedText: 'https://painel.beeads.com.br/reconectar-whatsapp/x' } })),
+    true,
+  );
+  assert.equal(isOwnDownNotice(notice(at, { templateMessage: { hydratedTemplate: { hydratedContentText: NOTICE_TEXT } } })), true);
+  // v1 do template: corpo sem link, URL só no botão
+  assert.equal(
+    isOwnDownNotice(
+      notice(at, {
+        templateMessage: {
+          hydratedTemplate: {
+            hydratedContentText: 'x',
+            hydratedButtons: [{ urlButton: { url: 'https://painel.beeads.com.br/reconectar-whatsapp/tok' } }],
+          },
+        },
+      }),
+    ),
+    true,
+  );
+  // remetente chega como LID de privacidade — por isso o critério é o CONTEÚDO, não o jid
+  assert.equal(isOwnDownNotice(notice(at, undefined, '93557490733105@lid')), true);
+});
+
+test('[defeito 2] tráfego de verdade nunca é confundido com o aviso', () => {
+  const at = brt('2026-09-21T09:12:00');
+  assert.equal(isOwnDownNotice(groupMsg(at)), false);
+  // o aviso ENCAMINHADO a um grupo é tráfego de grupo: a sessão o recebeu
+  assert.equal(isOwnDownNotice(groupMsg(at, NOTICE_TEXT)), false);
+  // enviado pelo próprio aparelho (fromMe) também prova sessão viva
+  assert.equal(
+    isOwnDownNotice({ ...notice(at), key: { remoteJid: '5531988887777@s.whatsapp.net', fromMe: true, id: 'a' } }),
+    false,
+  );
+  assert.equal(
+    isOwnDownNotice({
+      key: { remoteJid: '5531988887777@s.whatsapp.net', fromMe: false, id: 'b' },
+      message: { conversation: 'oi' },
+      messageTimestamp: secs(at),
+    }),
+    false,
+  );
+  assert.equal(isOwnDownNotice(null), false);
+  assert.equal(isOwnDownNotice({}), false);
+});
+
+test('[defeito 2] o aviso de 19/09 17:09:39 não vira a "última mensagem" do alvo — nem cura, nem data o episódio seguinte', () => {
+  const lastReal = brt('2026-09-18T18:40:00');
+  const store = [notice(brt('2026-09-19T17:09:39')), groupMsg(lastReal)];
+  // sem filtro (o bug): o store parece fresco às 17:09:39…
+  assert.equal(latestTrafficTs(store)!.getTime(), brt('2026-09-19T17:09:39').getTime());
+  // …com filtro, a última mensagem é a de verdade
+  const own = latestTrafficTs(store, isOwnDownNotice)!;
+  assert.equal(own.getTime(), lastReal.getTime());
+  // e é ela — não o horário do aviso — que dataria um "desde" (o episódio 77 começava em 17:09:39)
+  assert.equal(
+    observedDownSince({ ownStoreTs: own, peerStoreTs: brt('2026-09-20T10:00:00') })!.getTime(),
+    lastReal.getTime(),
+  );
+});
+
+test('[defeito 2] store só com avisos não tem tráfego nenhum', () => {
+  assert.equal(
+    latestTrafficTs([notice(brt('2026-09-20T10:54:41')), notice(brt('2026-09-19T17:09:39'))], isOwnDownNotice),
+    null,
+  );
+});
+
+test('[defeito 3] flap connecting→open de 1s (17/09 18:39:35) NÃO abre episódio: um tick só é suspeita', () => {
+  // tick das 18:39 vê `connecting`
+  assert.equal(planEpisode({ downSince: null, sawDown: false }, true), 'suspect');
+  // o tick seguinte já vê `open`: a suspeita some sem nunca ter virado episódio
+  assert.equal(planEpisode({ downSince: null, sawDown: true }, false), 'healthy');
+});
+
+test('[defeito 3] dois ticks consecutivos fora abrem o episódio; depois ele é mantido e fechado', () => {
+  assert.equal(planEpisode({ downSince: null, sawDown: true }, true), 'open');
+  const since = brt('2026-09-09T15:10:00');
+  assert.equal(planEpisode({ downSince: since, sawDown: true }, true), 'keep');
+  assert.equal(planEpisode({ downSince: since, sawDown: true }, false), 'close');
+  assert.equal(planEpisode({ downSince: null, sawDown: false }, false), 'healthy');
 });

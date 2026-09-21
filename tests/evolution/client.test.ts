@@ -138,6 +138,28 @@ test('fetchLatestMessageTs pede 1 registro e converte segundos em Date', async (
   assert.deepEqual(seen.body, { where: {}, page: 1, offset: 1 });
 });
 
+test('fetchLatestMessageTs com `skip` varre uma página e devolve o primeiro registro que NÃO é pulado', async () => {
+  let seen: any = null;
+  const records = [
+    { key: { id: 'aviso-2' }, messageTimestamp: 1789900481 },
+    { key: { id: 'aviso-1' }, messageTimestamp: 1789836579 },
+    { key: { id: 'real' }, messageTimestamp: 1789755600 },
+  ];
+  const deps = { baseUrl: 'https://evo', apiKey: 'k', fetch: mockFetch((url, init) => {
+    seen = JSON.parse(init.body);
+    return { status: 200, body: { messages: { records } } };
+  }) };
+  const ts = await fetchLatestMessageTs(deps, 'saturno', { skip: (r: any) => String(r?.key?.id).startsWith('aviso') });
+  assert.equal(ts!.getTime(), 1789755600 * 1000);
+  // uma chamada só, com página larga o bastante para passar por cima dos avisos de um episódio
+  assert.deepEqual(seen, { where: {}, page: 1, offset: 20 });
+});
+
+test('fetchLatestMessageTs com `skip`: página inteira pulada é store sem tráfego', async () => {
+  const deps = { baseUrl: 'https://evo', apiKey: 'k', fetch: mockFetch(() => ({ status: 200, body: { messages: { records: [{ messageTimestamp: 1789900481 }] } } })) };
+  assert.equal(await fetchLatestMessageTs(deps, 'i', { skip: () => true }), null);
+});
+
 test('fetchLatestMessageTs aceita timestamp em string', async () => {
   const deps = { baseUrl: 'https://evo', apiKey: 'k', fetch: mockFetch(() => ({ status: 200, body: { messages: { records: [{ messageTimestamp: '1789218267' }] } } })) };
   assert.equal((await fetchLatestMessageTs(deps, 'i'))!.getTime(), 1789218267 * 1000);

@@ -42,7 +42,13 @@ async function resolveTarget(instance: string) {
       { pool, log, staleMs: config.SYSTEM_INSTANCE_STORE_STALE_MS, probe: buildSystemProbe(pool) },
       [sys],
     );
-    if (a) console.log(`estado    : ${a.state} (${a.verdict.down ? `fora — ${a.verdict.reason}` : 'saudável'})`);
+    // Fora sem `downSince` = SUSPEITA: o episódio só abre no segundo tick consecutivo fora.
+    const verdict = !a?.verdict.down
+      ? 'saudável'
+      : a.row.downSince
+        ? `fora — ${a.verdict.reason}`
+        : `suspeita — ${a.verdict.reason} (episódio só abre se o próximo tick confirmar)`;
+    if (a) console.log(`estado    : ${a.state} (${verdict})`);
     return { phone: sys.expectedPhone, name: sys.label, workspaceId: null, downSince: a?.row.downSince ?? new Date() };
   }
   const n = await getNumberByInstance(pool, instance);

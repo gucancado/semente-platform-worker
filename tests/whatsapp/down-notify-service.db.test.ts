@@ -125,7 +125,11 @@ test('recusa 4xx mantém o claim e espera o re-aviso', async () => {
   assert.equal(sent.length, 1);
 });
 
-const saturno = { instance: 'saturno', expectedPhone: '+553195950748', label: 'Monitor de grupos' };
+// `traffic: 'always'` = atraso do store pelo relógio de parede. Estes testes usam instantes
+// relativos a Date.now(); com o relógio de expediente (o padrão) o resultado dependeria do
+// dia e da hora em que a suíte roda. O expediente é coberto com datas fixas em
+// down-notify-falso-positivo.db.test.ts e down-notify.test.ts.
+const saturno = { instance: 'saturno', expectedPhone: '+553195950748', label: 'Monitor de grupos', traffic: 'always' as const };
 
 function probe(p: {
   state?: SystemProbe['connectionState'];
@@ -139,11 +143,16 @@ function probe(p: {
   };
 }
 
-test('instância de sistema fechada abre o episódio e, passado o debounce, avisa o telefone travado', async () => {
+test('instância de sistema fechada: 1º tick é suspeita, o 2º abre o episódio e, passado o debounce, avisa o telefone travado', async () => {
   const { deps, sent } = harness();
   const watch = { ...deps, probe: probe({ state: async () => 'close' }), staleMs: 6 * H };
 
+  // 1º tick: suspeita — nada aberto
   assert.deepEqual(await runSystemInstanceWatch(watch, [saturno]), []);
+  assert.equal((await pool.query(`SELECT down_since FROM system_instance_health`)).rows[0].down_since, null);
+  // 2º tick: abre agora (sem par não há início estimado) — ainda dentro do debounce
+  assert.deepEqual(await runSystemInstanceWatch(watch, [saturno]), []);
+  assert.notEqual((await pool.query(`SELECT down_since FROM system_instance_health`)).rows[0].down_since, null);
   assert.equal(sent.length, 0);
 
   await pool.query(`UPDATE system_instance_health SET down_since = NOW() - INTERVAL '10 minutes'`);
@@ -162,10 +171,13 @@ test('open com store atrás do par é queda por store_stale; par emparelhado dev
   const { deps } = harness();
   const stale = new Date(Date.now() - 96 * H);
 
-  await runSystemInstanceWatch(
-    { ...deps, probe: probe({ store: { saturno: stale, 'ws-peer': new Date() }, peers: ['ws-peer'] }), staleMs: 6 * H },
-    [saturno],
-  );
+  const staleWatch = {
+    ...deps,
+    probe: probe({ store: { saturno: stale, 'ws-peer': new Date() }, peers: ['ws-peer'] }),
+    staleMs: 6 * H,
+  };
+  await runSystemInstanceWatch(staleWatch, [saturno]);
+  await runSystemInstanceWatch(staleWatch, [saturno]);
   let h = (await pool.query(`SELECT last_reason, down_since FROM system_instance_health`)).rows[0];
   assert.equal(h.last_reason, 'store_stale');
   assert.notEqual(h.down_since, null);
@@ -185,7 +197,9 @@ test('open com store atrás do par é queda por store_stale; par emparelhado dev
 
 test('sonda com erro não mexe no episódio nem avisa', async () => {
   const { deps, sent } = harness();
-  await runSystemInstanceWatch({ ...deps, probe: probe({ state: async () => 'close' }), staleMs: 6 * H }, [saturno]);
+  const closed = { ...deps, probe: probe({ state: async () => 'close' }), staleMs: 6 * H };
+  await runSystemInstanceWatch(closed, [saturno]);
+  await runSystemInstanceWatch(closed, [saturno]);
   const before = (await pool.query(`SELECT down_since FROM system_instance_health`)).rows[0].down_since as Date;
 
   const broken = probe({
@@ -203,14 +217,13 @@ test('sonda com erro não mexe no episódio nem avisa', async () => {
 test('instância que já estava fora começa na última mensagem, não na detecção', async () => {
   const { deps } = harness();
   const lastMsg = new Date(Date.now() - 80 * H);
-  await runSystemInstanceWatch(
-    {
-      ...deps,
-      probe: probe({ state: async () => 'connecting', store: { saturno: lastMsg, 'ws-peer': new Date() }, peers: ['ws-peer'] }),
-      staleMs: 6 * H,
-    },
-    [saturno],
-  );
+  const watch = {
+    ...deps,
+    probe: probe({ state: async () => 'connecting', store: { saturno: lastMsg, 'ws-peer': new Date() }, peers: ['ws-peer'] }),
+    staleMs: 6 * H,
+  };
+  await runSystemInstanceWatch(watch, [saturno]);
+  await runSystemInstanceWatch(watch, [saturno]);
   const h = (await pool.query(`SELECT down_since FROM system_instance_health`)).rows[0];
   assert.equal((h.down_since as Date).getTime(), lastMsg.getTime());
 });
@@ -248,22 +261,21 @@ test('resolvedor falhando cai no rótulo e o aviso sai mesmo assim', async () =>
 test('instância de sistema não consulta workspace: usa o rótulo configurado', async () => {
   const { deps, sent } = harness();
   let called = false;
-  await runSystemInstanceWatch(
-    {
-      ...deps,
-      resolveWorkspaceName: async () => {
-        called = true;
-        return 'X';
-      },
-      probe: probe({
-        state: async () => 'close',
-        store: { saturno: new Date(Date.now() - 80 * H), 'ws-peer': new Date() },
-        peers: ['ws-peer'],
-      }),
-      staleMs: 6 * H,
+  const watch = {
+    ...deps,
+    resolveWorkspaceName: async () => {
+      called = true;
+      return 'X';
     },
-    [saturno],
-  );
+    probe: probe({
+      state: async () => 'close' as const,
+      store: { saturno: new Date(Date.now() - 80 * H), 'ws-peer': new Date() },
+      peers: ['ws-peer'],
+    }),
+    staleMs: 6 * H,
+  };
+  await runSystemInstanceWatch(watch, [saturno]);
+  await runSystemInstanceWatch(watch, [saturno]);
   assert.equal(called, false);
   assert.equal(sent[0].name, 'Monitor de grupos');
 });

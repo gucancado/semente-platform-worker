@@ -1,4 +1,5 @@
 import type { Pool } from 'pg';
+import { planEpisode } from './down-notify.js';
 
 /**
  * Estado do aviso de queda ao próprio número — camada de banco (mig 064).
@@ -66,7 +67,15 @@ export async function releaseNumberNotification(pool: Pool, id: number, prev: No
   );
 }
 
-export type SystemTarget = { instance: string; expectedPhone: string; label: string | null };
+/**
+ * Perfil de tráfego do alvo — decide como o atraso do store é medido.
+ *  - 'business_hours' (padrão): só fala em horário comercial (grupos de equipe,
+ *    caso do saturno). O silêncio da noite e do fim de semana não conta.
+ *  - 'always': recebe a qualquer hora; o atraso é medido pelo relógio de parede.
+ */
+export type SystemTraffic = 'business_hours' | 'always';
+
+export type SystemTarget = { instance: string; expectedPhone: string; label: string | null; traffic?: SystemTraffic };
 
 export type SystemVerdict = {
   down: boolean;
@@ -84,10 +93,17 @@ export type SystemHealthRow = NotifyVersion & {
 };
 
 /**
- * Grava o veredito do tick e devolve o estado do episódio:
- *   saudável → fora : abre no início observado (ou NOW(), sem estimativa)
- *   fora → fora     : preserva o início — o episódio continua
- *   fora → saudável : encerra e zera o aviso (a próxima queda é episódio novo)
+ * Grava o veredito do tick e devolve o estado do episódio. A transição é decidida
+ * por `planEpisode` (pura, testada sem banco):
+ *   saudável → fora        : SUSPEITA — anota o veredito, não abre episódio
+ *   suspeita → fora        : abre no início observado (ou NOW(), sem estimativa)
+ *   suspeita → saudável    : some sem rastro (era um soluço)
+ *   episódio → fora        : preserva o início — o episódio continua
+ *   episódio → saudável    : encerra e zera o aviso (a próxima queda é episódio novo)
+ *
+ * "O tick anterior viu fora" é `last_reason IS NOT NULL` da própria linha — o
+ * veredito do tick anterior já mora ali, então a confirmação em dois ticks não
+ * pede coluna nova. `down_since` nulo com `last_reason` preenchido = suspeita.
  */
 export async function recordSystemHealth(
   pool: Pool,
@@ -100,54 +116,65 @@ export async function recordSystemHealth(
     await client.query('BEGIN');
     // Serialização por INSTÂNCIA. Não dá pra depender de `FOR UPDATE` na linha
     // de system_instance_health: no primeiro tick ela não existe, e travar
-    // ausência não impede duas primeiras observações concorrentes.
+    // ausência não impede duas primeiras observações concorrentes. É este lock
+    // que torna seguro ler o estado anterior e gravar o novo em statements
+    // separados — ninguém mais escreve esta instância enquanto ele vale.
     await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [t.instance]);
+    const prev = (
+      await client.query(`SELECT down_since, last_reason FROM system_instance_health WHERE instance = $1`, [t.instance])
+    ).rows[0] as { down_since: Date | null; last_reason: string | null } | undefined;
+    const plan = planEpisode({ downSince: prev?.down_since ?? null, sawDown: prev?.last_reason != null }, v.down);
+
+    // LEAST(.., NOW()): início estimado no FUTURO (relógio da Evolution adiantado)
+    // violaria `ended_at >= started_at` no fechamento, e o episódio nunca fecharia.
     const { rows } = await client.query(
-      `WITH prev AS (
-         SELECT down_since FROM system_instance_health WHERE instance = $1
-       ),
-       ins AS (
-         INSERT INTO system_instance_health
-           (instance, expected_phone, label, last_state, last_reason, own_store_ts, peer_store_ts,
-            checked_at, down_since, updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(),
-                 CASE WHEN $8::boolean THEN COALESCE($9::timestamptz, NOW()) END, NOW())
-         ON CONFLICT (instance) DO UPDATE SET
-           expected_phone    = EXCLUDED.expected_phone,
-           label             = EXCLUDED.label,
-           last_state        = EXCLUDED.last_state,
-           last_reason       = EXCLUDED.last_reason,
-           own_store_ts      = EXCLUDED.own_store_ts,
-           peer_store_ts     = EXCLUDED.peer_store_ts,
-           checked_at        = NOW(),
-           updated_at        = NOW(),
-           down_since        = CASE WHEN $8::boolean THEN COALESCE(system_instance_health.down_since, $9::timestamptz, NOW()) END,
-           down_notified_at  = CASE WHEN $8::boolean THEN system_instance_health.down_notified_at END,
-           down_notify_count = CASE WHEN $8::boolean THEN system_instance_health.down_notify_count ELSE 0 END
-         RETURNING instance, expected_phone, label, down_since, down_notified_at, down_notify_count
-       ),
-       -- 'prev' lê o snapshot do INÍCIO do statement, então enxerga o down_since
-       -- ANTERIOR mesmo com o INSERT acima já o sobrescrevendo. O INSERT segue
-       -- com VALUES (não SELECT ... FROM prev): com prev vazia — primeiro tick de
-       -- instância nova — o INSERT inteiro desapareceria e a observação se perderia.
-       opened AS (
-         INSERT INTO instance_outages (instance, kind, number_id, started_at, started_at_source, reason, detected_by)
-         SELECT $1, 'system', NULL, COALESCE($9::timestamptz, NOW()),
-                CASE WHEN $9::timestamptz IS NULL THEN 'detected_now' ELSE 'observed_store' END,
-                $5, 'watch'
-          WHERE $8::boolean AND (SELECT down_since FROM prev) IS NULL
-         ON CONFLICT (instance) WHERE ended_at IS NULL DO NOTHING
-       ),
-       closed AS (
-         UPDATE instance_outages o SET ended_at = NOW(), updated_at = NOW()
-          WHERE o.instance = $1 AND o.ended_at IS NULL
-            AND NOT $8::boolean AND (SELECT down_since FROM prev) IS NOT NULL
-       )
-       SELECT * FROM ins`,
-      [t.instance, t.expectedPhone, t.label, v.state, v.reason, v.ownStoreTs, v.peerStoreTs, v.down, observedDownSince],
+      `INSERT INTO system_instance_health
+         (instance, expected_phone, label, last_state, last_reason, own_store_ts, peer_store_ts,
+          checked_at, down_since, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(),
+               CASE WHEN $8 = 'open' THEN LEAST(COALESCE($9::timestamptz, NOW()), NOW()) END, NOW())
+       ON CONFLICT (instance) DO UPDATE SET
+         expected_phone    = EXCLUDED.expected_phone,
+         label             = EXCLUDED.label,
+         last_state        = EXCLUDED.last_state,
+         last_reason       = EXCLUDED.last_reason,
+         own_store_ts      = EXCLUDED.own_store_ts,
+         peer_store_ts     = EXCLUDED.peer_store_ts,
+         checked_at        = NOW(),
+         updated_at        = NOW(),
+         down_since        = CASE $8 WHEN 'open' THEN EXCLUDED.down_since
+                                     WHEN 'keep' THEN system_instance_health.down_since END,
+         down_notified_at  = CASE WHEN $8 = 'keep' THEN system_instance_health.down_notified_at END,
+         down_notify_count = CASE WHEN $8 = 'keep' THEN system_instance_health.down_notify_count ELSE 0 END
+       RETURNING instance, expected_phone, label, down_since, down_notified_at, down_notify_count`,
+      [t.instance, t.expectedPhone, t.label, v.state, v.reason, v.ownStoreTs, v.peerStoreTs, plan, observedDownSince],
     );
-    await client.query('COMMIT');
     const r = rows[0];
+
+    if (plan === 'open') {
+      // O episódio nasce com o MESMO início gravado na saúde — copiado DENTRO do
+      // banco: passar `r.down_since` pelo JS truncaria o NOW() de µs para ms e as
+      // duas colunas deixariam de bater. A linha de saúde sempre existe aqui (o
+      // upsert acima é desta mesma transação), então o SELECT nunca vem vazio.
+      // ON CONFLICT: o índice único parcial garante um aberto por instância — um
+      // órfão já aberto é mantido como o episódio.
+      await client.query(
+        `INSERT INTO instance_outages (instance, kind, number_id, started_at, started_at_source, reason, detected_by)
+         SELECT h.instance, 'system', NULL, h.down_since, $2, $3, 'watch'
+           FROM system_instance_health h
+          WHERE h.instance = $1 AND h.down_since IS NOT NULL
+         ON CONFLICT (instance) WHERE ended_at IS NULL DO NOTHING`,
+        [t.instance, observedDownSince ? 'observed_store' : 'detected_now', v.reason],
+      );
+    } else if (plan === 'close') {
+      await client.query(
+        `UPDATE instance_outages SET ended_at = NOW(), updated_at = NOW()
+          WHERE instance = $1 AND ended_at IS NULL`,
+        [t.instance],
+      );
+    }
+
+    await client.query('COMMIT');
     return {
       instance: r.instance,
       expectedPhone: r.expected_phone,

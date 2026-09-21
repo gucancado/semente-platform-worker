@@ -95,7 +95,18 @@ const verdict = (down: boolean) => ({
   peerStoreTs: null,
 });
 
-test('sistema: saudável→fora abre o episódio; fora→fora preserva o início', async () => {
+/** Dois ticks consecutivos fora: o primeiro é suspeita, o segundo abre o episódio. */
+async function openEpisode(observed: Date | null = null) {
+  await recordSystemHealth(pool, saturno, verdict(true), observed);
+  return recordSystemHealth(pool, saturno, verdict(true), observed);
+}
+
+test('sistema: um tick fora é só SUSPEITA; o segundo consecutivo abre; fora→fora preserva o início', async () => {
+  const suspect = await recordSystemHealth(pool, saturno, verdict(true));
+  assert.equal(suspect.downSince, null);
+  const { rows } = await pool.query(`SELECT last_reason, down_since FROM system_instance_health`);
+  assert.deepEqual(rows[0], { last_reason: 'state', down_since: null });
+
   const a = await recordSystemHealth(pool, saturno, verdict(true));
   assert.ok(a.downSince instanceof Date);
   await new Promise((r) => setTimeout(r, 20));
@@ -104,32 +115,63 @@ test('sistema: saudável→fora abre o episódio; fora→fora preserva o início
   assert.equal(b.expectedPhone, '+553195950748');
 });
 
-test('sistema: fora→saudável encerra o episódio e zera o aviso', async () => {
+test('sistema: suspeita desfeita por um tick saudável NÃO vale para a confirmação seguinte', async () => {
   await recordSystemHealth(pool, saturno, verdict(true));
-  await claimSystemNotification(pool, 'saturno', fresh);
+  await recordSystemHealth(pool, saturno, verdict(false));
+  // fora de novo: volta a ser o PRIMEIRO tick, não o segundo
+  const r = await recordSystemHealth(pool, saturno, verdict(true));
+  assert.equal(r.downSince, null);
+});
+
+test('sistema: fora→saudável encerra o episódio e zera o aviso', async () => {
+  await openEpisode();
+  assert.equal(await claimSystemNotification(pool, 'saturno', fresh), true);
   const r = await recordSystemHealth(pool, saturno, verdict(false));
   assert.equal(r.downSince, null);
   assert.equal(r.lastNotifiedAt, null);
   assert.equal(r.notifyCount, 0);
 });
 
+test('sistema: episódio aberto preserva o aviso já dado (contagem e instante) entre ticks', async () => {
+  await openEpisode();
+  await claimSystemNotification(pool, 'saturno', fresh);
+  const r = await recordSystemHealth(pool, saturno, verdict(true));
+  assert.equal(r.notifyCount, 1);
+  assert.ok(r.lastNotifiedAt instanceof Date);
+});
+
 test('sistema: claim e release otimistas', async () => {
-  await recordSystemHealth(pool, saturno, verdict(true));
+  await openEpisode();
   assert.equal(await claimSystemNotification(pool, 'saturno', fresh), true);
   assert.equal(await claimSystemNotification(pool, 'saturno', fresh), false);
   await releaseSystemNotification(pool, 'saturno', fresh);
   assert.equal(await claimSystemNotification(pool, 'saturno', fresh), true);
 });
 
-test('sistema: claim não reivindica instância saudável', async () => {
+test('sistema: claim não reivindica instância saudável nem SUSPEITA', async () => {
   await recordSystemHealth(pool, saturno, verdict(false));
+  assert.equal(await claimSystemNotification(pool, 'saturno', fresh), false);
+  await recordSystemHealth(pool, saturno, verdict(true));
   assert.equal(await claimSystemNotification(pool, 'saturno', fresh), false);
 });
 
 test('sistema: abre o episódio no início observado; episódio aberto não é reescrito', async () => {
   const observed = new Date('2026-09-09T21:10:00.000Z');
-  const a = await recordSystemHealth(pool, saturno, verdict(true), observed);
+  const a = await openEpisode(observed);
   assert.equal(a.downSince!.getTime(), observed.getTime());
   const b = await recordSystemHealth(pool, saturno, verdict(true), new Date('2026-09-11T00:00:00.000Z'));
   assert.equal(b.downSince!.getTime(), observed.getTime());
+});
+
+test('sistema: início estimado no FUTURO é trazido para agora — senão o episódio nunca fecharia', async () => {
+  await pool.query('TRUNCATE instance_outages RESTART IDENTITY');
+  const future = new Date(Date.now() + 3_600_000);
+  const a = await openEpisode(future);
+  assert.ok(a.downSince!.getTime() <= Date.now() + 5_000);
+  // fechar não pode violar ended_at >= started_at
+  const closed = await recordSystemHealth(pool, saturno, verdict(false));
+  assert.equal(closed.downSince, null);
+  const { rows } = await pool.query(`SELECT ended_at FROM instance_outages WHERE instance = 'saturno'`);
+  assert.equal(rows.length, 1);
+  assert.notEqual(rows[0].ended_at, null);
 });

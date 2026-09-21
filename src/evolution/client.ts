@@ -112,6 +112,9 @@ export async function fetchMessages(
   return { records: Array.isArray(m.records) ? m.records : [], total: m.total ?? 0, pages: m.pages ?? 0 };
 }
 
+/** Registros lidos quando há filtro. O vigia pula no máximo 6 avisos por episódio. */
+const SKIP_SCAN_PAGE = 20;
+
 /**
  * Instante da mensagem mais recente no store da Evolution desta instância.
  *
@@ -120,9 +123,26 @@ export async function fetchMessages(
  * `findMessages` pagina em ordem decrescente de `messageTimestamp`, então o
  * primeiro registro da primeira página é o mais novo.
  */
-export async function fetchLatestMessageTs(deps: EvolutionDeps, instance: string): Promise<Date | null> {
-  const { records } = await fetchMessages(deps, instance, 1, 1);
-  const raw = records[0]?.messageTimestamp;
+export async function fetchLatestMessageTs(
+  deps: EvolutionDeps,
+  instance: string,
+  opts?: { skip?: (record: unknown) => boolean },
+): Promise<Date | null> {
+  // Sem filtro basta o registro do topo. Com filtro a página precisa ser larga o
+  // bastante para passar POR CIMA do que será pulado — o `where` da Evolution só
+  // tem igualdade (sem negação), então o descarte é feito aqui, numa chamada só.
+  const { records } = await fetchMessages(deps, instance, 1, opts?.skip ? SKIP_SCAN_PAGE : 1);
+  return latestTrafficTs(records, opts?.skip);
+}
+
+/**
+ * Instante do registro mais recente que NÃO é pulado. `records` vem em ordem
+ * decrescente de `messageTimestamp` (é como `findMessages` pagina). Página
+ * inteira pulada, store vazio ou timestamp ilegível = sem tráfego (null).
+ */
+export function latestTrafficTs(records: unknown[], skip?: (record: unknown) => boolean): Date | null {
+  const top = skip ? records.find((r) => !skip(r)) : records[0];
+  const raw = (top as { messageTimestamp?: unknown } | undefined)?.messageTimestamp;
   const secs = typeof raw === 'number' ? raw : typeof raw === 'string' && /^\d+$/.test(raw) ? Number(raw) : NaN;
   return Number.isFinite(secs) && secs > 0 ? new Date(secs * 1000) : null;
 }

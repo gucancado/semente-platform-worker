@@ -1,10 +1,10 @@
 import type { Pool } from 'pg';
 import { config } from '../config.js';
-import { fetchLatestMessageTs, getConnectionState } from '../evolution/client.js';
 import { cloudPhoneNumberIdForAgent } from '../webhook-cloud/send.js';
 import { resolveWorkspaceNames } from '../bloquim/workspace-names.js';
 import { listConnectedInstances } from './numbers.js';
 import { makeCloudDownSender } from './down-notify-sender.js';
+import { makeEvolutionProbe } from './down-notify-probe.js';
 import {
   runSystemInstanceWatch,
   sweepDownNumbers,
@@ -55,12 +55,10 @@ export function buildDownNotifyDeps(
 
 /** Sondas reais da vigia de sistema — compartilhadas pelo daemon e pelo CLI. */
 export function buildSystemProbe(pool: Pool): SystemProbe {
-  const evolution = { baseUrl: config.EVOLUTION_API_URL, apiKey: config.EVOLUTION_API_KEY };
-  return {
-    connectionState: (i: string) => getConnectionState(evolution, i),
-    latestStoreTs: (i: string) => fetchLatestMessageTs(evolution, i),
-    listPeerInstances: () => listConnectedInstances(pool),
-  };
+  return makeEvolutionProbe(
+    { baseUrl: config.EVOLUTION_API_URL, apiKey: config.EVOLUTION_API_KEY },
+    () => listConnectedInstances(pool),
+  );
 }
 
 /**

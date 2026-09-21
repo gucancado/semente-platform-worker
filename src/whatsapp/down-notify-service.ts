@@ -7,6 +7,7 @@ import {
   shouldNotify,
   type SystemHealth,
 } from './down-notify.js';
+import { businessMsBetween } from './business-hours.js';
 import { ensureReconnectLink } from './provision-links.js';
 import {
   claimNumberNotification,
@@ -185,7 +186,9 @@ export type SystemAssessment = {
  *
  * Sonda falhando NÃO mexe no episódio (a instância fica fora do resultado): um
  * soluço da Evolution não pode abrir nem fechar queda. Episódio novo começa no
- * início observado (`observedDownSince`), não no instante da detecção.
+ * início observado (`observedDownSince`), não no instante da detecção — e só
+ * abre no SEGUNDO tick consecutivo fora (`planEpisode`): o primeiro é suspeita,
+ * com `row.downSince` nulo, e por isso não avisa.
  */
 export async function assessSystemTargets(
   deps: { pool: Pool; log: DownNotifyLog; probe: SystemProbe; staleMs: number },
@@ -235,13 +238,22 @@ export async function assessSystemTargets(
       if (ts && (!peerStoreTs || ts > peerStoreTs)) peerStoreTs = ts;
     }
 
-    const verdict = decideSystemHealth({ state, ownStoreTs, peerStoreTs, staleMs: deps.staleMs });
+    const verdict = decideSystemHealth({
+      state,
+      ownStoreTs,
+      peerStoreTs,
+      staleMs: deps.staleMs,
+      // Alvo de horário comercial (o padrão): o atraso do store só conta em expediente.
+      elapsedMs: t.traffic === 'always' ? undefined : businessMsBetween,
+    });
     const since = verdict.down ? observedDownSince({ ownStoreTs, peerStoreTs }) : null;
     const row = await recordSystemHealth(deps.pool, t, { ...verdict, state, ownStoreTs, peerStoreTs }, since);
     if (verdict.down) {
       deps.log.info(
         { instance: t.instance, reason: verdict.reason, state, ownStoreTs, peerStoreTs, downSince: row.downSince },
-        'down-notify: instância de sistema fora do ar',
+        row.downSince
+          ? 'down-notify: instância de sistema fora do ar'
+          : 'down-notify: instância de sistema suspeita — confirma no próximo tick',
       );
     }
     out.push({ target: t, state, verdict, ownStoreTs, peerStoreTs, row });

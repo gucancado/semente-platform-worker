@@ -37,8 +37,30 @@ const SystemWatchSchema = z.array(
     instance: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/),
     expected_phone: z.string().regex(/^\+\d{10,15}$/),
     label: z.string().min(1).optional(),
+    // Perfil de tráfego do alvo. Padrão 'business_hours': só fala em horário
+    // comercial (grupos de equipe), então o atraso do store só conta em expediente.
+    // 'always' mede pelo relógio de parede — para alvo que recebe a qualquer hora.
+    traffic: z.enum(['business_hours', 'always']).optional(),
   })
 );
+
+export type SystemWatchTarget = {
+  instance: string;
+  expectedPhone: string;
+  label: string | null;
+  traffic: 'business_hours' | 'always';
+};
+
+/** Parse do SYSTEM_INSTANCE_WATCH_JSON. Exportado para o teste travar a compatibilidade do formato. */
+export function parseSystemWatch(json: string | undefined): SystemWatchTarget[] {
+  if (!json) return [];
+  return SystemWatchSchema.parse(JSON.parse(json)).map((w) => ({
+    instance: w.instance,
+    expectedPhone: w.expected_phone,
+    label: w.label ?? null,
+    traffic: w.traffic ?? 'business_hours',
+  }));
+}
 
 const EnvSchema = z.object({
   PORT: z.coerce.number().default(3000),
@@ -136,17 +158,13 @@ const EnvSchema = z.object({
 
   // ── Vigia de instância de SISTEMA (ex.: saturno, fora de whatsapp_numbers por contrato) ──
   // JSON: [{"instance":"saturno","expected_phone":"+553195950748","label":"Monitor de grupos"}]
+  // Opcional por alvo: "traffic":"always" (padrão "business_hours" — ver SystemWatchSchema).
   SYSTEM_INSTANCE_WATCH_JSON: z
     .string()
     .optional()
     .transform((s, ctx) => {
-      if (!s) return [] as Array<{ instance: string; expectedPhone: string; label: string | null }>;
       try {
-        return SystemWatchSchema.parse(JSON.parse(s)).map((w) => ({
-          instance: w.instance,
-          expectedPhone: w.expected_phone,
-          label: w.label ?? null,
-        }));
+        return parseSystemWatch(s);
       } catch (e) {
         ctx.addIssue({ code: 'custom', message: `SYSTEM_INSTANCE_WATCH_JSON inválido: ${(e as Error).message}` });
         return z.NEVER;
@@ -154,6 +172,8 @@ const EnvSchema = z.object({
     }),
   SYSTEM_INSTANCE_WATCH_INTERVAL_MS: z.coerce.number().int().positive().default(300_000),
   // Store da instância atrás do de um par por mais que isto = sessão morta por dentro.
+  // Para alvo 'business_hours' (o padrão) o atraso é contado em tempo de EXPEDIENTE
+  // (seg–sex, 09h–18h de São Paulo, fora feriado nacional); para 'always', em relógio de parede.
   SYSTEM_INSTANCE_STORE_STALE_MS: z.coerce.number().int().positive().default(6 * 3_600_000),
 
   // Burst smoothing / debounce: tempo de espera após cada msg recebida antes
