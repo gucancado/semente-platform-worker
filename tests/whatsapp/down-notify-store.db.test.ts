@@ -95,18 +95,24 @@ const verdict = (down: boolean) => ({
   peerStoreTs: null,
 });
 
-/** Dois ticks consecutivos fora: o primeiro é suspeita, o segundo abre o episódio. */
+/** Faz um intervalo do vigia passar para a suspeita (o relógio dela é o `checked_at`). */
+const oneTickLater = () =>
+  pool.query(`UPDATE system_instance_health SET checked_at = NOW() - INTERVAL '5 minutes'`);
+
+/** Duas observações fora separadas por um intervalo: a 1ª é suspeita, a 2ª abre o episódio. */
 async function openEpisode(observed: Date | null = null) {
   await recordSystemHealth(pool, saturno, verdict(true), observed);
+  await oneTickLater();
   return recordSystemHealth(pool, saturno, verdict(true), observed);
 }
 
-test('sistema: um tick fora é só SUSPEITA; o segundo consecutivo abre; fora→fora preserva o início', async () => {
+test('sistema: um tick fora é só SUSPEITA; o segundo, um intervalo depois, abre; fora→fora preserva o início', async () => {
   const suspect = await recordSystemHealth(pool, saturno, verdict(true));
   assert.equal(suspect.downSince, null);
   const { rows } = await pool.query(`SELECT last_reason, down_since FROM system_instance_health`);
   assert.deepEqual(rows[0], { last_reason: 'state', down_since: null });
 
+  await oneTickLater();
   const a = await recordSystemHealth(pool, saturno, verdict(true));
   assert.ok(a.downSince instanceof Date);
   await new Promise((r) => setTimeout(r, 20));
@@ -118,9 +124,21 @@ test('sistema: um tick fora é só SUSPEITA; o segundo consecutivo abre; fora→
 test('sistema: suspeita desfeita por um tick saudável NÃO vale para a confirmação seguinte', async () => {
   await recordSystemHealth(pool, saturno, verdict(true));
   await recordSystemHealth(pool, saturno, verdict(false));
-  // fora de novo: volta a ser o PRIMEIRO tick, não o segundo
+  await oneTickLater();
+  // fora de novo, já no prazo de uma confirmação: mesmo assim é o PRIMEIRO tick, não o segundo
   const r = await recordSystemHealth(pool, saturno, verdict(true));
   assert.equal(r.downSince, null);
+});
+
+test('sistema: gravação colada na suspeita devolve a linha como está — sem episódio e sem mexer no aviso', async () => {
+  await recordSystemHealth(pool, saturno, verdict(true));
+  const r = await recordSystemHealth(pool, saturno, verdict(true)); // cedo demais: ignorada
+  assert.equal(r.downSince, null);
+  assert.equal(r.notifyCount, 0);
+  assert.equal(r.lastNotifiedAt, null);
+  assert.equal(r.instance, 'saturno');
+  assert.equal(r.expectedPhone, '+553195950748');
+  assert.equal(await claimSystemNotification(pool, 'saturno', fresh), false);
 });
 
 test('sistema: fora→saudável encerra o episódio e zera o aviso', async () => {

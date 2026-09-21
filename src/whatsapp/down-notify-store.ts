@@ -92,24 +92,42 @@ export type SystemHealthRow = NotifyVersion & {
   downSince: Date | null;
 };
 
+/** Intervalo do vigia quando o chamador não informa — o mesmo default do config. */
+export const DEFAULT_WATCH_INTERVAL_MS = 300_000;
+
+function toHealthRow(r: any): SystemHealthRow {
+  return {
+    instance: r.instance,
+    expectedPhone: r.expected_phone,
+    label: r.label,
+    downSince: r.down_since ?? null,
+    lastNotifiedAt: r.down_notified_at ?? null,
+    notifyCount: Number(r.down_notify_count),
+  };
+}
+
 /**
- * Grava o veredito do tick e devolve o estado do episódio. A transição é decidida
- * por `planEpisode` (pura, testada sem banco):
- *   saudável → fora        : SUSPEITA — anota o veredito, não abre episódio
- *   suspeita → fora        : abre no início observado (ou NOW(), sem estimativa)
- *   suspeita → saudável    : some sem rastro (era um soluço)
- *   episódio → fora        : preserva o início — o episódio continua
- *   episódio → saudável    : encerra e zera o aviso (a próxima queda é episódio novo)
+ * Grava o veredito da observação e devolve o estado do episódio. A transição é
+ * decidida por `planEpisode` (pura, testada sem banco):
+ *   saudável → fora              : SUSPEITA — anota o veredito, não abre episódio
+ *   suspeita → fora, cedo demais : não grava NADA (o relógio da suspeita não renova)
+ *   suspeita → fora, no prazo    : abre no início observado (ou na 1ª observação)
+ *   suspeita → fora, velha demais: recomeça como primeira observação
+ *   suspeita → saudável          : some sem rastro (era um soluço)
+ *   episódio → fora              : preserva o início — o episódio continua
+ *   episódio → saudável          : encerra e zera o aviso (a próxima queda é episódio novo)
  *
- * "O tick anterior viu fora" é `last_reason IS NOT NULL` da própria linha — o
- * veredito do tick anterior já mora ali, então a confirmação em dois ticks não
- * pede coluna nova. `down_since` nulo com `last_reason` preenchido = suspeita.
+ * O estado da suspeita mora na própria linha, sem coluna nova: `last_reason`
+ * preenchido com `down_since` nulo = suspeita, e `checked_at` = instante da
+ * PRIMEIRA observação fora (é por isso que o 'hold' não pode regravar a linha).
+ * A idade é medida com o NOW() do BANCO — o relógio do processo pode divergir.
  */
 export async function recordSystemHealth(
   pool: Pool,
   t: SystemTarget,
   v: SystemVerdict,
   observedDownSince: Date | null = null,
+  intervalMs: number = DEFAULT_WATCH_INTERVAL_MS,
 ): Promise<SystemHealthRow> {
   const client = await pool.connect();
   try {
@@ -121,18 +139,43 @@ export async function recordSystemHealth(
     // separados — ninguém mais escreve esta instância enquanto ele vale.
     await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [t.instance]);
     const prev = (
-      await client.query(`SELECT down_since, last_reason FROM system_instance_health WHERE instance = $1`, [t.instance])
-    ).rows[0] as { down_since: Date | null; last_reason: string | null } | undefined;
-    const plan = planEpisode({ downSince: prev?.down_since ?? null, sawDown: prev?.last_reason != null }, v.down);
+      await client.query(
+        `SELECT instance, expected_phone, label, down_since, down_notified_at, down_notify_count, last_reason,
+                EXTRACT(EPOCH FROM (NOW() - checked_at)) * 1000 AS age_ms
+           FROM system_instance_health WHERE instance = $1`,
+        [t.instance],
+      )
+    ).rows[0];
+    const plan = planEpisode(
+      {
+        downSince: prev?.down_since ?? null,
+        sawDown: prev?.last_reason != null,
+        ageMs: prev?.age_ms == null ? null : Number(prev.age_ms),
+      },
+      v.down,
+      intervalMs,
+    );
 
+    if (plan === 'hold') {
+      // Observação cedo demais para confirmar: a linha fica EXATAMENTE como está.
+      await client.query('COMMIT');
+      return toHealthRow(prev);
+    }
+
+    // Só 'open' e 'keep' carregam `down_since`, e nenhum dos dois acontece sem
+    // linha anterior — por isso o ramo de INSERT grava sempre NULL.
+    //
+    // Início do episódio, na ordem: estimativa pelo store ($9) → instante da
+    // PRIMEIRA observação fora (o `checked_at` antigo; no SET o lado direito
+    // ainda enxerga a linha anterior) → agora. Sem o `checked_at`, o "desde" de
+    // uma queda sem par à frente saía um intervalo atrasado.
     // LEAST(.., NOW()): início estimado no FUTURO (relógio da Evolution adiantado)
     // violaria `ended_at >= started_at` no fechamento, e o episódio nunca fecharia.
     const { rows } = await client.query(
       `INSERT INTO system_instance_health
          (instance, expected_phone, label, last_state, last_reason, own_store_ts, peer_store_ts,
           checked_at, down_since, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(),
-               CASE WHEN $8 = 'open' THEN LEAST(COALESCE($9::timestamptz, NOW()), NOW()) END, NOW())
+       VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NULL, NOW())
        ON CONFLICT (instance) DO UPDATE SET
          expected_phone    = EXCLUDED.expected_phone,
          label             = EXCLUDED.label,
@@ -142,10 +185,12 @@ export async function recordSystemHealth(
          peer_store_ts     = EXCLUDED.peer_store_ts,
          checked_at        = NOW(),
          updated_at        = NOW(),
-         down_since        = CASE $8 WHEN 'open' THEN EXCLUDED.down_since
-                                     WHEN 'keep' THEN system_instance_health.down_since END,
-         down_notified_at  = CASE WHEN $8 = 'keep' THEN system_instance_health.down_notified_at END,
-         down_notify_count = CASE WHEN $8 = 'keep' THEN system_instance_health.down_notify_count ELSE 0 END
+         down_since        = CASE $8::text
+                               WHEN 'open' THEN LEAST(COALESCE($9::timestamptz, system_instance_health.checked_at, NOW()), NOW())
+                               WHEN 'keep' THEN system_instance_health.down_since
+                             END,
+         down_notified_at  = CASE WHEN $8::text = 'keep' THEN system_instance_health.down_notified_at END,
+         down_notify_count = CASE WHEN $8::text = 'keep' THEN system_instance_health.down_notify_count ELSE 0 END
        RETURNING instance, expected_phone, label, down_since, down_notified_at, down_notify_count`,
       [t.instance, t.expectedPhone, t.label, v.state, v.reason, v.ownStoreTs, v.peerStoreTs, plan, observedDownSince],
     );
@@ -175,14 +220,7 @@ export async function recordSystemHealth(
     }
 
     await client.query('COMMIT');
-    return {
-      instance: r.instance,
-      expectedPhone: r.expected_phone,
-      label: r.label,
-      downSince: r.down_since ?? null,
-      lastNotifiedAt: r.down_notified_at ?? null,
-      notifyCount: Number(r.down_notify_count),
-    };
+    return toHealthRow(r);
   } catch (e) {
     await client.query('ROLLBACK');
     throw e;

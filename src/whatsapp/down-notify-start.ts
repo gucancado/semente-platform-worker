@@ -5,12 +5,14 @@ import { resolveWorkspaceNames } from '../bloquim/workspace-names.js';
 import { listConnectedInstances } from './numbers.js';
 import { makeCloudDownSender } from './down-notify-sender.js';
 import { makeEvolutionProbe } from './down-notify-probe.js';
+import { parseOffDates } from './business-hours.js';
 import {
   runSystemInstanceWatch,
   sweepDownNumbers,
   type DownNotifyDeps,
   type DownNotifyLog,
   type SystemProbe,
+  type SystemWatchOpts,
 } from './down-notify-service.js';
 
 const LINK_MAX_CLICKS = 10;
@@ -62,6 +64,26 @@ export function buildSystemProbe(pool: Pool): SystemProbe {
 }
 
 /**
+ * Opções da vigia de sistema a partir do config — compartilhadas pelo daemon e
+ * pelo CLI, para o smoke avaliar exatamente como o vigia. Data extra malformada
+ * vira WARN e é ignorada: nunca derruba o processo.
+ */
+export function buildSystemWatchOpts(log: DownNotifyLog): SystemWatchOpts {
+  const { dates, invalid } = parseOffDates(config.BUSINESS_HOURS_EXTRA_OFF_DATES);
+  if (invalid.length > 0) {
+    log.warn(
+      { invalid, accepted: [...dates] },
+      'down-notify: BUSINESS_HOURS_EXTRA_OFF_DATES tem entrada inválida (esperado yyyy-MM-dd) — ignorada',
+    );
+  }
+  return {
+    staleMs: config.SYSTEM_INSTANCE_STORE_STALE_MS,
+    intervalMs: config.SYSTEM_INSTANCE_WATCH_INTERVAL_MS,
+    offDates: dates,
+  };
+}
+
+/**
  * Liga os vigias conforme o config. Configuração incompleta NÃO derruba o
  * worker: loga em erro e não inicia — o resto do processo segue.
  */
@@ -84,10 +106,11 @@ export function startDownNotify(pool: Pool, log: DownNotifyLog): void {
   }
   if (targets.length > 0) {
     const probe = buildSystemProbe(pool);
+    const watchOpts = buildSystemWatchOpts(log);
     loop(
       'system',
       config.SYSTEM_INSTANCE_WATCH_INTERVAL_MS,
-      () => runSystemInstanceWatch({ ...deps, probe, staleMs: config.SYSTEM_INSTANCE_STORE_STALE_MS }, targets),
+      () => runSystemInstanceWatch({ ...deps, probe, ...watchOpts }, targets),
       log,
     );
   }
@@ -95,6 +118,7 @@ export function startDownNotify(pool: Pool, log: DownNotifyLog): void {
     {
       numbers: numbersOn,
       systemTargets: targets.map((t) => t.instance),
+      extraOffDates: parseOffDates(config.BUSINESS_HOURS_EXTRA_OFF_DATES).dates.size,
       sender: built.phoneNumberId,
       template: config.CONNECTION_NOTIFY_TEMPLATE_NAME ?? null,
     },

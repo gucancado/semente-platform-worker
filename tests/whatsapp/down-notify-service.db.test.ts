@@ -11,6 +11,11 @@ import {
 import type { DownNotifyTarget, DownSendResult } from '../../src/whatsapp/down-notify-sender.js';
 
 const H = 3_600_000;
+const TICK = 5 * 60_000; // intervalo do vigia de sistema
+
+/** Faz o tempo passar para a suspeita: recua o `checked_at`, que é o relógio dela. */
+const elapse = (interval = '5 minutes') =>
+  pool.query(`UPDATE system_instance_health SET checked_at = NOW() - $1::interval`, [interval]);
 
 beforeEach(async () => {
   await pool.query('TRUNCATE whatsapp_numbers RESTART IDENTITY CASCADE');
@@ -145,12 +150,14 @@ function probe(p: {
 
 test('instância de sistema fechada: 1º tick é suspeita, o 2º abre o episódio e, passado o debounce, avisa o telefone travado', async () => {
   const { deps, sent } = harness();
-  const watch = { ...deps, probe: probe({ state: async () => 'close' }), staleMs: 6 * H };
+  const watch = { ...deps, probe: probe({ state: async () => 'close' }), staleMs: 6 * H, intervalMs: TICK };
 
   // 1º tick: suspeita — nada aberto
   assert.deepEqual(await runSystemInstanceWatch(watch, [saturno]), []);
   assert.equal((await pool.query(`SELECT down_since FROM system_instance_health`)).rows[0].down_since, null);
-  // 2º tick: abre agora (sem par não há início estimado) — ainda dentro do debounce
+  // 2ª observação, 3min depois (já conta como outra, mas ainda DENTRO do debounce de 5min):
+  // abre — o início é o instante da 1ª observação, porque sem par não há início estimado
+  await elapse('3 minutes');
   assert.deepEqual(await runSystemInstanceWatch(watch, [saturno]), []);
   assert.notEqual((await pool.query(`SELECT down_since FROM system_instance_health`)).rows[0].down_since, null);
   assert.equal(sent.length, 0);
@@ -174,9 +181,10 @@ test('open com store atrás do par é queda por store_stale; par emparelhado dev
   const staleWatch = {
     ...deps,
     probe: probe({ store: { saturno: stale, 'ws-peer': new Date() }, peers: ['ws-peer'] }),
-    staleMs: 6 * H,
+    staleMs: 6 * H, intervalMs: TICK,
   };
   await runSystemInstanceWatch(staleWatch, [saturno]);
+  await elapse();
   await runSystemInstanceWatch(staleWatch, [saturno]);
   let h = (await pool.query(`SELECT last_reason, down_since FROM system_instance_health`)).rows[0];
   assert.equal(h.last_reason, 'store_stale');
@@ -186,7 +194,7 @@ test('open com store atrás do par é queda por store_stale; par emparelhado dev
     {
       ...deps,
       probe: probe({ store: { saturno: stale, 'ws-peer': new Date(stale.getTime() + H) }, peers: ['ws-peer'] }),
-      staleMs: 6 * H,
+      staleMs: 6 * H, intervalMs: TICK,
     },
     [saturno],
   );
@@ -197,21 +205,64 @@ test('open com store atrás do par é queda por store_stale; par emparelhado dev
 
 test('sonda com erro não mexe no episódio nem avisa', async () => {
   const { deps, sent } = harness();
-  const closed = { ...deps, probe: probe({ state: async () => 'close' }), staleMs: 6 * H };
+  const closed = { ...deps, probe: probe({ state: async () => 'close' }), staleMs: 6 * H, intervalMs: TICK };
   await runSystemInstanceWatch(closed, [saturno]);
+  await elapse();
+  // A confirmação abre o episódio com início na 1ª observação (5min atrás): o debounce já
+  // está cumprido, então ESTE tick avisa. O que o teste mede é a sonda com erro, logo abaixo.
   await runSystemInstanceWatch(closed, [saturno]);
   const before = (await pool.query(`SELECT down_since FROM system_instance_health`)).rows[0].down_since as Date;
+  assert.notEqual(before, null);
+  const sentBefore = sent.length;
 
   const broken = probe({
     state: async () => {
       throw new Error('evolution fora');
     },
   });
-  assert.deepEqual(await runSystemInstanceWatch({ ...deps, probe: broken, staleMs: 6 * H }, [saturno]), []);
+  assert.deepEqual(await runSystemInstanceWatch({ ...deps, probe: broken, staleMs: 6 * H, intervalMs: TICK }, [saturno]), []);
 
   const later = (await pool.query(`SELECT down_since FROM system_instance_health`)).rows[0].down_since as Date;
   assert.equal(later.getTime(), before.getTime());
+  assert.equal(sent.length, sentBefore);
+});
+
+test('suspeita → sondas com erro por horas → nova leitura fora: NÃO abre com a suspeita velha; recomeça', async () => {
+  const { deps, sent } = harness();
+  const closed = { ...deps, probe: probe({ state: async () => 'close' }), staleMs: 6 * H, intervalMs: TICK };
+  const broken = {
+    ...deps,
+    probe: probe({
+      state: async () => {
+        throw new Error('evolution fora');
+      },
+    }),
+    staleMs: 6 * H, intervalMs: TICK,
+  };
+
+  await runSystemInstanceWatch(closed, [saturno]); //  suspeita
+  await runSystemInstanceWatch(broken, [saturno]); //  sonda com erro: linha intocada…
+  await runSystemInstanceWatch(broken, [saturno]);
+  await elapse('4 hours'); //                          …e o tempo passando
+  assert.deepEqual(await runSystemInstanceWatch(closed, [saturno]), []);
+  assert.equal((await pool.query(`SELECT down_since FROM system_instance_health`)).rows[0].down_since, null);
   assert.equal(sent.length, 0);
+
+  // a leitura de agora virou a 1ª observação: confirmada um intervalo depois, aí sim abre
+  await elapse();
+  await runSystemInstanceWatch(closed, [saturno]);
+  assert.notEqual((await pool.query(`SELECT down_since FROM system_instance_health`)).rows[0].down_since, null);
+});
+
+test('rodada manual (CLI --dry-run) colada num tick do vigia NÃO confirma a suspeita dele', async () => {
+  const { deps, sent } = harness();
+  const closed = { ...deps, probe: probe({ state: async () => 'close' }), staleMs: 6 * H, intervalMs: TICK };
+  await runSystemInstanceWatch(closed, [saturno]); // tick do daemon vê o flap
+  await runSystemInstanceWatch(closed, [saturno]); // 2s depois: dry-run, ou o tick de boot do 2º container
+  await runSystemInstanceWatch(closed, [saturno]);
+  assert.equal((await pool.query(`SELECT down_since FROM system_instance_health`)).rows[0].down_since, null);
+  assert.equal(sent.length, 0);
+  assert.equal(Number((await pool.query(`SELECT count(*)::int c FROM whatsapp_provision_links`)).rows[0].c), 0);
 });
 
 test('instância que já estava fora começa na última mensagem, não na detecção', async () => {
@@ -220,9 +271,10 @@ test('instância que já estava fora começa na última mensagem, não na detec�
   const watch = {
     ...deps,
     probe: probe({ state: async () => 'connecting', store: { saturno: lastMsg, 'ws-peer': new Date() }, peers: ['ws-peer'] }),
-    staleMs: 6 * H,
+    staleMs: 6 * H, intervalMs: TICK,
   };
   await runSystemInstanceWatch(watch, [saturno]);
+  await elapse();
   await runSystemInstanceWatch(watch, [saturno]);
   const h = (await pool.query(`SELECT down_since FROM system_instance_health`)).rows[0];
   assert.equal((h.down_since as Date).getTime(), lastMsg.getTime());
@@ -272,9 +324,10 @@ test('instância de sistema não consulta workspace: usa o rótulo configurado',
       store: { saturno: new Date(Date.now() - 80 * H), 'ws-peer': new Date() },
       peers: ['ws-peer'],
     }),
-    staleMs: 6 * H,
+    staleMs: 6 * H, intervalMs: TICK,
   };
   await runSystemInstanceWatch(watch, [saturno]);
+  await elapse();
   await runSystemInstanceWatch(watch, [saturno]);
   assert.equal(called, false);
   assert.equal(sent[0].name, 'Monitor de grupos');

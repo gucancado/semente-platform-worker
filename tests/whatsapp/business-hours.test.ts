@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { businessMsBetween, isBusinessDay } from '../../src/whatsapp/business-hours.js';
+import { businessMsBetween, isBusinessDay, parseOffDates } from '../../src/whatsapp/business-hours.js';
 
 const H = 3_600_000;
 const MIN = 60_000;
@@ -74,4 +74,54 @@ test('dia útil comum, sábado, domingo e feriados fixos', () => {
 test('intervalo absurdo de longo termina (teto de iteração) e segue acima de qualquer limite', () => {
   const ms = businessMsBetween(brt('2015-01-01T00:00'), brt('2026-09-21T12:00'));
   assert.ok(ms > 1000 * H);
+});
+
+// ── Datas extras sem expediente (BUSINESS_HOURS_EXTRA_OFF_DATES) ────────────────
+// Dias úteis de calendário em que os grupos de equipe ficam mudos: feriado de BH
+// (08/12, 15/08), véspera (24/12, 31/12), Quarta de Cinzas, recesso.
+
+test('sem datas extras, 08/12 (feriado de BH), 24/12 e a Quarta de Cinzas contam como dia útil', () => {
+  const day = (s: string) => isBusinessDay(brt(`${s}T12:00`));
+  assert.equal(day('2026-12-08'), true); // terça
+  assert.equal(day('2026-12-24'), true); // quinta
+  assert.equal(day('2026-02-18'), true); // Quarta de Cinzas
+});
+
+test('data extra tira o dia do expediente — no dia CIVIL de São Paulo', () => {
+  const off = parseOffDates('2026-12-08,2026-12-24').dates;
+  assert.equal(isBusinessDay(brt('2026-12-08T12:00'), off), false);
+  assert.equal(isBusinessDay(brt('2026-12-24T09:00'), off), false);
+  assert.equal(isBusinessDay(brt('2026-12-09T12:00'), off), true);
+  // 08/12 23:30 BRT já é 09/12 em UTC — e continua sendo o dia 08 de São Paulo
+  assert.equal(isBusinessDay(new Date('2026-12-09T02:30:00Z'), off), false);
+  // 09/12 00:30 BRT ainda é 09/12 03:30Z: dia útil
+  assert.equal(isBusinessDay(new Date('2026-12-09T03:30:00Z'), off), true);
+});
+
+test('o store_stale falso das ~15h de um feriado local desaparece com a data extra', () => {
+  // segunda 07/12 17:30 → terça 08/12 (feriado de BH) 17:00
+  const from = brt('2026-12-07T17:30');
+  const to = brt('2026-12-08T17:00');
+  assert.equal(businessMsBetween(from, to), 30 * MIN + 8 * H); //         sem a data: 8h30 ≥ 6h → falso positivo
+  assert.equal(businessMsBetween(from, to, parseOffDates('2026-12-08').dates), 30 * MIN); // com a data: 30min
+});
+
+test('recesso inteiro: o relógio só volta a andar no primeiro dia de expediente', () => {
+  const off = parseOffDates('2026-12-24,2026-12-28,2026-12-29,2026-12-30,2026-12-31').dates;
+  // quarta 23/12 17:00 → segunda 04/01/2027 10:00 = 1h (23/12) + 1h (04/01); 25/12 e 01/01 já são nacionais
+  assert.equal(businessMsBetween(brt('2026-12-23T17:00'), brt('2027-01-04T10:00'), off), 2 * H);
+});
+
+test('parseOffDates é TOLERANTE: fica com o que é válido e devolve o resto para o warn', () => {
+  const r = parseOffDates(' 2026-12-08 , lixo,2026-02-30,2026-13-01, 2026-12-24,,08/12/2026,2026-12-8 ');
+  assert.deepEqual([...r.dates].sort(), ['2026-12-08', '2026-12-24']);
+  assert.deepEqual(r.invalid, ['lixo', '2026-02-30', '2026-13-01', '08/12/2026', '2026-12-8']);
+});
+
+test('parseOffDates com env ausente, vazia ou só de vírgulas não inventa nada e não lança', () => {
+  for (const raw of [undefined, null, '', ' ', ',,,']) {
+    const r = parseOffDates(raw as any);
+    assert.equal(r.dates.size, 0);
+    assert.deepEqual(r.invalid, []);
+  }
 });

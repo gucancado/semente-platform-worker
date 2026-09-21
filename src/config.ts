@@ -175,6 +175,11 @@ const EnvSchema = z.object({
   // Para alvo 'business_hours' (o padrão) o atraso é contado em tempo de EXPEDIENTE
   // (seg–sex, 09h–18h de São Paulo, fora feriado nacional); para 'always', em relógio de parede.
   SYSTEM_INSTANCE_STORE_STALE_MS: z.coerce.number().int().positive().default(6 * 3_600_000),
+  // Datas extras SEM expediente (yyyy-MM-dd de São Paulo, separadas por vírgula): feriado
+  // municipal/estadual, ponto facultativo, véspera, recesso. Ex.: 2026-12-08,2026-12-24,2026-12-31
+  // ⚠️ String crua DE PROPÓSITO: quem interpreta é `parseOffDates`, que ignora entrada inválida
+  // com warn. Validar aqui faria um erro de digitação derrubar o boot do worker inteiro.
+  BUSINESS_HOURS_EXTRA_OFF_DATES: z.string().optional(),
 
   // Burst smoothing / debounce: tempo de espera após cada msg recebida antes
   // de disparar trigger pro mercurio. Nova msg na janela reseta o timer.

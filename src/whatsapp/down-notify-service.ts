@@ -7,7 +7,7 @@ import {
   shouldNotify,
   type SystemHealth,
 } from './down-notify.js';
-import { businessMsBetween } from './business-hours.js';
+import { businessMsBetween, type OffDates } from './business-hours.js';
 import { ensureReconnectLink } from './provision-links.js';
 import {
   claimNumberNotification,
@@ -190,8 +190,16 @@ export type SystemAssessment = {
  * abre no SEGUNDO tick consecutivo fora (`planEpisode`): o primeiro é suspeita,
  * com `row.downSince` nulo, e por isso não avisa.
  */
+export type SystemWatchOpts = {
+  staleMs: number;
+  /** Intervalo entre ticks do vigia — dimensiona a janela em que a 2ª observação confirma a suspeita. */
+  intervalMs: number;
+  /** Datas extras sem expediente (além dos feriados nacionais). */
+  offDates?: OffDates;
+};
+
 export async function assessSystemTargets(
-  deps: { pool: Pool; log: DownNotifyLog; probe: SystemProbe; staleMs: number },
+  deps: { pool: Pool; log: DownNotifyLog; probe: SystemProbe } & SystemWatchOpts,
   targets: SystemTarget[],
 ): Promise<SystemAssessment[]> {
   let peers: string[] = [];
@@ -244,16 +252,22 @@ export async function assessSystemTargets(
       peerStoreTs,
       staleMs: deps.staleMs,
       // Alvo de horário comercial (o padrão): o atraso do store só conta em expediente.
-      elapsedMs: t.traffic === 'always' ? undefined : businessMsBetween,
+      elapsedMs: t.traffic === 'always' ? undefined : (from, to) => businessMsBetween(from, to, deps.offDates),
     });
     const since = verdict.down ? observedDownSince({ ownStoreTs, peerStoreTs }) : null;
-    const row = await recordSystemHealth(deps.pool, t, { ...verdict, state, ownStoreTs, peerStoreTs }, since);
+    const row = await recordSystemHealth(
+      deps.pool,
+      t,
+      { ...verdict, state, ownStoreTs, peerStoreTs },
+      since,
+      deps.intervalMs,
+    );
     if (verdict.down) {
       deps.log.info(
         { instance: t.instance, reason: verdict.reason, state, ownStoreTs, peerStoreTs, downSince: row.downSince },
         row.downSince
           ? 'down-notify: instância de sistema fora do ar'
-          : 'down-notify: instância de sistema suspeita — confirma no próximo tick',
+          : 'down-notify: instância de sistema suspeita — só vira episódio se outra observação confirmar',
       );
     }
     out.push({ target: t, state, verdict, ownStoreTs, peerStoreTs, row });
@@ -266,7 +280,7 @@ export async function assessSystemTargets(
  * por isso nunca é vista pelo vigia 1.
  */
 export async function runSystemInstanceWatch(
-  deps: DownNotifyDeps & { probe: SystemProbe; staleMs: number },
+  deps: DownNotifyDeps & { probe: SystemProbe } & SystemWatchOpts,
   targets: SystemTarget[],
 ): Promise<NotifyAttempt[]> {
   const attempts: NotifyAttempt[] = [];

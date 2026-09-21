@@ -51,18 +51,54 @@ function isHoliday(day: DateTime): boolean {
   return EASTER_OFFSETS.has(day.ordinal - easterSunday(day.year).ordinal);
 }
 
-function isBusinessLocalDay(day: DateTime): boolean {
+/** Datas civis de SÃO PAULO (`yyyy-MM-dd`) sem expediente além dos feriados nacionais. */
+export type OffDates = ReadonlySet<string>;
+
+const NO_OFF_DATES: OffDates = new Set();
+
+function isBusinessLocalDay(day: DateTime, offDates: OffDates): boolean {
   // luxon: 1 = segunda … 7 = domingo
-  return day.weekday <= 5 && !isHoliday(day);
+  return day.weekday <= 5 && !isHoliday(day) && !offDates.has(day.toFormat('yyyy-MM-dd'));
 }
 
-/** O dia (de São Paulo) em que `d` cai é dia útil? Só feriado NACIONAL entra na conta. */
-export function isBusinessDay(d: Date): boolean {
-  return isBusinessLocalDay(DateTime.fromJSDate(d, { zone: ZONE }));
+/**
+ * Lê a lista de datas extras sem expediente (`BUSINESS_HOURS_EXTRA_OFF_DATES`):
+ * feriado municipal/estadual, ponto facultativo, véspera, recesso — dias úteis
+ * de calendário em que os grupos de equipe ficam mudos e o vigia denunciaria o
+ * alvo à toa. Formato `yyyy-MM-dd`, separadas por vírgula.
+ *
+ * TOLERANTE de propósito: entrada inválida é devolvida em `invalid` (quem chama
+ * loga o warn) e o resto vale. Um erro de digitação nesta env não pode derrubar o
+ * boot do worker inteiro. A data é CIVIL, validada no calendário sem passar por
+ * `new Date("yyyy-MM-dd")` — que é meia-noite UTC, ou seja, o dia ANTERIOR em
+ * São Paulo.
+ */
+export function parseOffDates(raw: string | undefined | null): { dates: Set<string>; invalid: string[] } {
+  const dates = new Set<string>();
+  const invalid: string[] = [];
+  for (const part of (raw ?? '').split(',')) {
+    const s = part.trim();
+    if (!s) continue;
+    const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s);
+    const ok = m
+      ? DateTime.fromObject({ year: Number(m[1]), month: Number(m[2]), day: Number(m[3]) }, { zone: ZONE }).isValid
+      : false;
+    if (ok) dates.add(s);
+    else invalid.push(s);
+  }
+  return { dates, invalid };
 }
 
-/** Milissegundos de expediente (seg–sex, 09h–18h de São Paulo, fora feriado nacional) entre dois instantes. */
-export function businessMsBetween(from: Date, to: Date): number {
+/** O dia (de São Paulo) em que `d` cai é dia útil? Feriado NACIONAL e as datas extras ficam de fora. */
+export function isBusinessDay(d: Date, offDates: OffDates = NO_OFF_DATES): boolean {
+  return isBusinessLocalDay(DateTime.fromJSDate(d, { zone: ZONE }), offDates);
+}
+
+/**
+ * Milissegundos de expediente (seg–sex, 09h–18h de São Paulo, fora feriado
+ * nacional e fora das datas extras) entre dois instantes.
+ */
+export function businessMsBetween(from: Date, to: Date, offDates: OffDates = NO_OFF_DATES): number {
   const start = from.getTime();
   const end = to.getTime();
   if (!(end > start)) return 0;
@@ -70,7 +106,7 @@ export function businessMsBetween(from: Date, to: Date): number {
   let total = 0;
   let day = DateTime.fromJSDate(from, { zone: ZONE }).startOf('day');
   for (let n = 0; n < MAX_DAYS && day.toMillis() <= end; n++, day = day.plus({ days: 1 })) {
-    if (!isBusinessLocalDay(day)) continue;
+    if (!isBusinessLocalDay(day, offDates)) continue;
     const open = Math.max(day.set({ hour: OPEN_HOUR }).toMillis(), start);
     const close = Math.min(day.set({ hour: CLOSE_HOUR }).toMillis(), end);
     if (close > open) total += close - open;

@@ -17,6 +17,7 @@ import type { DownNotifyTarget, DownSendResult } from '../../src/whatsapp/down-n
 import type { SystemTarget } from '../../src/whatsapp/down-notify-store.js';
 
 const H = 3_600_000;
+const TICK = 5 * 60_000; // intervalo do vigia de sistema em prod
 const brt = (s: string) => new Date(`${s}-03:00`);
 const secs = (d: Date) => Math.floor(d.getTime() / 1000);
 
@@ -81,13 +82,15 @@ function world(init: { stores: Record<string, Rec[]>; states?: Record<string, st
     link: { maxClicks: 10, ttlDays: 7 },
     log: { info() {}, warn() {}, error() {} },
   };
-  const watch = { ...deps, probe: makeEvolutionProbe({ baseUrl: 'http://evo', apiKey: 'k', fetch }, async () => ['ws-peer']), staleMs: 6 * H };
+  const watch = { ...deps, probe: makeEvolutionProbe({ baseUrl: 'http://evo', apiKey: 'k', fetch }, async () => ['ws-peer']), staleMs: 6 * H, intervalMs: TICK };
   return {
     sent,
     stores,
     states,
     deliverAt: (d: Date) => { deliverAt = d; },
     tick: () => runSystemInstanceWatch(watch, [target]),
+    /** Um intervalo do vigia se passa: recua o `checked_at`, o relógio da suspeita. */
+    elapse: () => pool.query(`UPDATE system_instance_health SET checked_at = NOW() - INTERVAL '5 minutes'`),
   };
 }
 
@@ -119,6 +122,7 @@ test('[defeito 1] alvo marcado como tráfego contínuo mantém a regra antiga, p
     target: { ...saturno, traffic: 'always' },
   });
   await w.tick();
+  await w.elapse();
   await w.tick();
   assert.equal((await health()).last_reason, 'store_stale');
   assert.equal((await outages()).length, 1);
@@ -131,6 +135,7 @@ test('[defeito 2] o aviso entregue ao próprio número NÃO fecha o episódio, N
   w.deliverAt(brt('2026-09-15T16:36:00'));
 
   assert.deepEqual(await w.tick(), []); //                       1º tick: só suspeita
+  await w.elapse();
   assert.deepEqual((await w.tick()).map((a) => a.outcome), ['sent']); // 2º tick: confirma, abre e avisa
   assert.equal(w.sent.length, 1);
   assert.equal(w.sent[0].downSince.getTime(), lastReal.getTime());
@@ -178,6 +183,7 @@ test('[defeito 2] queda seguinte começa na última mensagem REAL, não no horá
     states: { saturno: 'close' },
   });
   await w.tick();
+  await w.elapse();
   await w.tick();
   const rows = await outages();
   assert.equal(rows.length, 1);
@@ -200,7 +206,8 @@ test('[defeito 3] flap connecting→open de 1s (17/09 18:39:35): um tick fora N�
   assert.equal(await links(), 0);
   assert.equal(w.sent.length, 0);
 
-  w.states.saturno = 'open'; // 1s depois já tinha voltado
+  w.states.saturno = 'open'; // 1s depois já tinha voltado; o tick seguinte vem um intervalo depois
+  await w.elapse();
   assert.deepEqual(await w.tick(), []);
   h = await health();
   assert.equal(h.last_reason, null);
@@ -210,9 +217,32 @@ test('[defeito 3] flap connecting→open de 1s (17/09 18:39:35): um tick fora N�
 
   // Outro flap no dia seguinte (o de ~15:1x é quase diário): continua sem abrir nada.
   w.states.saturno = 'connecting';
+  await w.elapse();
   await w.tick();
   w.states.saturno = 'open';
+  await w.elapse();
   await w.tick();
+  assert.equal((await outages()).length, 0);
+  assert.equal(w.sent.length, 0);
+});
+
+test('[defeito 3] o flap de 1s não volta pela porta dos fundos: tick + boot do 2º container + dry-run no MESMO segundo são UMA observação', async () => {
+  const w = world({
+    stores: { saturno: [groupMsg(brt('2026-09-17T18:20:00'))], 'ws-peer': [leadDm(brt('2026-09-17T18:39:00'))] },
+    states: { saturno: 'connecting' },
+  });
+  // três gravações dentro do mesmo flap — concorrentes, como num rolling deploy
+  const attempts = await Promise.all([w.tick(), w.tick(), w.tick()]);
+  assert.deepEqual(attempts, [[], [], []]);
+  assert.equal((await health()).down_since, null);
+  assert.equal((await outages()).length, 0);
+  assert.equal(await links(), 0);
+  assert.equal(w.sent.length, 0);
+
+  w.states.saturno = 'open'; // o tick seguinte, um intervalo depois, já vê a instância de volta
+  await w.elapse();
+  assert.deepEqual(await w.tick(), []);
+  assert.equal((await health()).last_reason, null);
   assert.equal((await outages()).length, 0);
   assert.equal(w.sent.length, 0);
 });
@@ -224,6 +254,7 @@ test('[defeito 3] queda de verdade: dois ticks consecutivos fora abrem UM episó
     states: { saturno: 'close' },
   });
   assert.deepEqual(await w.tick(), []);
+  await w.elapse();
   assert.deepEqual((await w.tick()).map((a) => a.outcome), ['sent']);
   await w.tick();
   const rows = await outages();

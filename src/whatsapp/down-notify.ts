@@ -140,35 +140,59 @@ export function isOwnDownNotice(record: unknown): boolean {
   return body.includes(NOTICE_LINK_MARK) || body.includes(NOTICE_TEXT_MARK);
 }
 
-/** O que o tick anterior deixou gravado sobre o alvo. */
+/** O que a observação anterior deixou gravado sobre o alvo. */
 export type EpisodePrev = {
   /** Episódio aberto (início); null = nenhum. */
   downSince: Date | null;
-  /** O tick ANTERIOR também viu o alvo fora? */
+  /** A observação ANTERIOR também viu o alvo fora? */
   sawDown: boolean;
+  /**
+   * Idade da suspeita, em ms: há quanto tempo foi a PRIMEIRA observação fora
+   * (`checked_at`, medido pelo relógio do BANCO — o do processo pode divergir).
+   * null = desconhecida, tratada como velha demais.
+   */
+  ageMs: number | null;
 };
 
-export type EpisodePlan = 'healthy' | 'suspect' | 'open' | 'keep' | 'close';
+export type EpisodePlan = 'healthy' | 'suspect' | 'hold' | 'open' | 'keep' | 'close';
+
+/** A confirmação só vale com a suspeita entre estas frações do intervalo do vigia. */
+export const CONFIRM_MIN_FACTOR = 0.5;
+/** 3,5 e não 3: tolera duas sondas perdidas seguidas mais o atraso natural do tick. */
+export const CONFIRM_MAX_FACTOR = 3.5;
 
 /**
  * Máquina de estados do episódio de queda de uma instância de sistema.
  *
- *   saudável → fora          : 'suspect' — anota, mas NÃO abre episódio nem avisa
- *   suspeita → fora de novo  : 'open'    — dois ticks consecutivos confirmam
- *   suspeita → saudável      : 'healthy' — era um soluço; some sem rastro
- *   episódio → fora          : 'keep'
- *   episódio → saudável      : 'close'   — encerra e zera o aviso
+ *   saudável → fora                   : 'suspect' — anota, NÃO abre episódio nem avisa
+ *   suspeita → fora, cedo demais      : 'hold'    — ignora: não grava NADA, o relógio não renova
+ *   suspeita → fora, no prazo         : 'open'    — segunda observação INDEPENDENTE confirma
+ *   suspeita → fora, velha demais     : 'suspect' — recomeça como primeira observação
+ *   suspeita → saudável               : 'healthy' — era um soluço; some sem rastro
+ *   episódio → fora                   : 'keep'
+ *   episódio → saudável               : 'close'   — encerra e zera o aviso
  *
- * Um tick só não basta: a Evolution tem um `connecting→open` de ~1s quase diário,
- * e o debounce não o segura — ele conta a partir do INÍCIO do episódio, que para
- * instância de sistema é a última mensagem do store (sempre mais velha que o
- * debounce). Medido em 2026-09-17: link emitido às 18:39:35, consumido às
- * 18:39:36. A confirmação no tick seguinte é o debounce de verdade deste vigia.
+ * Uma observação só não basta: a Evolution tem um `connecting→open` de ~1s quase
+ * diário, e o debounce não o segura — ele conta a partir do INÍCIO do episódio,
+ * que para instância de sistema é a última mensagem do store (sempre mais velha
+ * que o debounce). Medido em 2026-09-17: link emitido às 18:39:35, consumido às
+ * 18:39:36.
+ *
+ * E duas GRAVAÇÕES seguidas não são duas observações: o `notify-down --dry-run`
+ * grava uma, o segundo container de um rolling deploy grava outra (com tick
+ * imediato no boot), e três chamadas concorrentes caem todas dentro do mesmo
+ * flap de 1s. Por isso a segunda só confirma se a suspeita tiver idade de ao
+ * menos meio intervalo. No outro extremo, sonda com erro não toca a linha: sem
+ * teto, uma suspeita de horas atrás seria "confirmada" por uma leitura que não
+ * tem nada a ver com ela — acima de ~3 intervalos ela recomeça do zero.
  */
-export function planEpisode(prev: EpisodePrev, down: boolean): EpisodePlan {
+export function planEpisode(prev: EpisodePrev, down: boolean, intervalMs: number): EpisodePlan {
   if (!down) return prev.downSince ? 'close' : 'healthy';
   if (prev.downSince) return 'keep';
-  return prev.sawDown ? 'open' : 'suspect';
+  if (!prev.sawDown || prev.ageMs == null) return 'suspect';
+  if (prev.ageMs < intervalMs * CONFIRM_MIN_FACTOR) return 'hold';
+  if (prev.ageMs > intervalMs * CONFIRM_MAX_FACTOR) return 'suspect';
+  return 'open';
 }
 
 export type SendOutcome =

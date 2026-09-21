@@ -299,17 +299,53 @@ test('[defeito 2] store só com avisos não tem tráfego nenhum', () => {
   );
 });
 
+const TICK = 5 * 60_000; // SYSTEM_INSTANCE_WATCH_INTERVAL_MS em prod
+const healthy = { downSince: null, sawDown: false, ageMs: null };
+const suspectAged = (ageMs: number | null) => ({ downSince: null, sawDown: true, ageMs });
+
 test('[defeito 3] flap connecting→open de 1s (17/09 18:39:35) NÃO abre episódio: um tick só é suspeita', () => {
   // tick das 18:39 vê `connecting`
-  assert.equal(planEpisode({ downSince: null, sawDown: false }, true), 'suspect');
+  assert.equal(planEpisode(healthy, true, TICK), 'suspect');
   // o tick seguinte já vê `open`: a suspeita some sem nunca ter virado episódio
-  assert.equal(planEpisode({ downSince: null, sawDown: true }, false), 'healthy');
+  assert.equal(planEpisode(suspectAged(TICK), false, TICK), 'healthy');
 });
 
-test('[defeito 3] dois ticks consecutivos fora abrem o episódio; depois ele é mantido e fechado', () => {
-  assert.equal(planEpisode({ downSince: null, sawDown: true }, true), 'open');
+test('[defeito 3] segunda observação NO PRAZO confirma; depois o episódio é mantido e fechado', () => {
+  assert.equal(planEpisode(suspectAged(TICK), true, TICK), 'open');
   const since = brt('2026-09-09T15:10:00');
-  assert.equal(planEpisode({ downSince: since, sawDown: true }, true), 'keep');
-  assert.equal(planEpisode({ downSince: since, sawDown: true }, false), 'close');
-  assert.equal(planEpisode({ downSince: null, sawDown: false }, false), 'healthy');
+  assert.equal(planEpisode({ downSince: since, sawDown: true, ageMs: TICK }, true, TICK), 'keep');
+  assert.equal(planEpisode({ downSince: since, sawDown: true, ageMs: TICK }, false, TICK), 'close');
+  assert.equal(planEpisode(healthy, false, TICK), 'healthy');
+});
+
+test('[defeito 3] ramo CEDO DEMAIS: duas gravações não são duas observações (dry-run, rolling deploy, concorrência)', () => {
+  // o flap dura ~1s: tudo que cair dentro dele é a MESMA observação
+  assert.equal(planEpisode(suspectAged(0), true, TICK), 'hold');
+  assert.equal(planEpisode(suspectAged(1_000), true, TICK), 'hold');
+  assert.equal(planEpisode(suspectAged(2_000), true, TICK), 'hold'); // 2º container, tick imediato no boot
+  assert.equal(planEpisode(suspectAged(TICK / 2 - 1), true, TICK), 'hold');
+  // a partir de meio intervalo já é outra observação
+  assert.equal(planEpisode(suspectAged(TICK / 2), true, TICK), 'open');
+});
+
+test('[defeito 3] ramo NO PRAZO tolera jitter do tick e até duas sondas perdidas', () => {
+  assert.equal(planEpisode(suspectAged(TICK - 700), true, TICK), 'open'); //  tick adiantado
+  assert.equal(planEpisode(suspectAged(TICK + 900), true, TICK), 'open'); //  tick atrasado
+  assert.equal(planEpisode(suspectAged(3 * TICK + 900), true, TICK), 'open'); // 2 sondas com erro no meio
+});
+
+test('[defeito 3] ramo VELHA DEMAIS: suspeita de horas atrás não é confirmada — recomeça como 1ª observação', () => {
+  // sonda com erro não toca a linha: a suspeita pode ficar parada por horas
+  assert.equal(planEpisode(suspectAged(3.5 * TICK + 1), true, TICK), 'suspect');
+  assert.equal(planEpisode(suspectAged(4 * 3_600_000), true, TICK), 'suspect');
+  // idade desconhecida (checked_at nulo) é tratada como velha demais, nunca como confirmação
+  assert.equal(planEpisode(suspectAged(null), true, TICK), 'suspect');
+});
+
+test('[defeito 3] leitura saudável desfaz a suspeita em QUALQUER idade; episódio aberto ignora a janela', () => {
+  assert.equal(planEpisode(suspectAged(500), false, TICK), 'healthy');
+  assert.equal(planEpisode(suspectAged(9 * 3_600_000), false, TICK), 'healthy');
+  const since = brt('2026-09-09T15:10:00');
+  assert.equal(planEpisode({ downSince: since, sawDown: true, ageMs: 500 }, true, TICK), 'keep');
+  assert.equal(planEpisode({ downSince: since, sawDown: true, ageMs: 9 * 3_600_000 }, true, TICK), 'keep');
 });

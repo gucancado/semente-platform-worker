@@ -19,7 +19,7 @@ import { getNumberByInstance, normalizePhone } from '../whatsapp/numbers.js';
 import { ensureReconnectLink } from '../whatsapp/provision-links.js';
 import { reconnectUrl } from '../whatsapp/down-notify.js';
 import { renderConnectionDownText } from '../webhook-cloud/templates.js';
-import { buildDownNotifyDeps, buildSystemProbe } from '../whatsapp/down-notify-start.js';
+import { buildDownNotifyDeps, buildSystemProbe, buildSystemWatchOpts } from '../whatsapp/down-notify-start.js';
 import { assessSystemTargets } from '../whatsapp/down-notify-service.js';
 import { resolveWorkspaceNames } from '../bloquim/workspace-names.js';
 
@@ -39,7 +39,7 @@ async function resolveTarget(instance: string) {
   if (sys) {
     // Mesma avaliação do vigia: grava o episódio com o início observado, sem avisar.
     const [a] = await assessSystemTargets(
-      { pool, log, staleMs: config.SYSTEM_INSTANCE_STORE_STALE_MS, probe: buildSystemProbe(pool) },
+      { pool, log, probe: buildSystemProbe(pool), ...buildSystemWatchOpts(log) },
       [sys],
     );
     // Fora sem `downSince` = SUSPEITA: o episódio só abre no segundo tick consecutivo fora.
@@ -47,7 +47,7 @@ async function resolveTarget(instance: string) {
       ? 'saudável'
       : a.row.downSince
         ? `fora — ${a.verdict.reason}`
-        : `suspeita — ${a.verdict.reason} (episódio só abre se o próximo tick confirmar)`;
+        : `suspeita — ${a.verdict.reason} (só vira episódio se outra observação confirmar; esta rodada conta como uma)`;
     if (a) console.log(`estado    : ${a.state} (${verdict})`);
     return { phone: sys.expectedPhone, name: sys.label, workspaceId: null, downSince: a?.row.downSince ?? new Date() };
   }
