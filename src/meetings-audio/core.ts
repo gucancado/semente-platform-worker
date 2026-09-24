@@ -92,11 +92,13 @@ export function parseRecordingFilename(name: string): number | null {
 
 /** Nome do arquivo baixado: data da reunião em São Paulo + id do episódio.
  *  O container roda em UTC, então a data sai do fuso explícito. */
-export function audioDownloadName(episodeId: number, occurredAt: Date): string {
+export function audioDownloadName(episodeId: number, occurredAt: Date, key = '.webm'): string {
   const day = new Intl.DateTimeFormat('en-CA', {
     timeZone: 'America/Sao_Paulo', year: 'numeric', month: '2-digit', day: '2-digit',
   }).format(occurredAt);
-  return `reuniao-${day}-${episodeId}.webm`;
+  // Extensão sai da chave: episódios do Fireflies guardam mp3, os da Vexa webm.
+  const ext = /\.([a-z0-9]{2,4})$/i.exec(key)?.[1]?.toLowerCase() ?? 'webm';
+  return `reuniao-${day}-${episodeId}.${ext}`;
 }
 
 /**

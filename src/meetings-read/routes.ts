@@ -83,7 +83,7 @@ export function registerMeetingsReadRoutes(
     if (!a) return reply.code(404).send({ error: 'not_found' });
     const download = req.query?.download === '1';
     const url = await presignGet(a.key, AUDIO_URL_TTL_S, undefined, download
-      ? { contentDisposition: `attachment; filename="${audioDownloadName(episodeId, a.occurredAt)}"` }
+      ? { contentDisposition: `attachment; filename="${audioDownloadName(episodeId, a.occurredAt, a.key)}"` }
       : undefined);
     return reply.send({ schema: 'meetings_read_v1', url });
   });

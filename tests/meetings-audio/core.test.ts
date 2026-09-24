@@ -44,6 +44,8 @@ test('parseRecordingFilename lê o id do nome do arquivo do bot', () => {
 test('audioDownloadName usa o dia de São Paulo, não o do UTC', () => {
   // 17/09 01:30 UTC = 16/09 22:30 em São Paulo
   assert.equal(audioDownloadName(471, new Date('2026-09-17T01:30:00Z')), 'reuniao-2026-09-16-471.webm');
+  assert.equal(audioDownloadName(12, new Date('2026-06-01T15:00:00Z'), 'fireflies/abc.mp3'), 'reuniao-2026-06-01-12.mp3');
+  assert.equal(audioDownloadName(471, new Date('2026-09-17T01:30:00Z'), 'vexa/audio/199.webm'), 'reuniao-2026-09-16-471.webm');
 });
 
 test('TTL do link cobre uma reunião longa', () => {
