@@ -70,3 +70,76 @@ export function renderConnectionDownText(p: DownMessageInput): string {
   const { bodyParams } = connectionDownTemplateParams(p);
   return BODY_TEXT.replace(/\{\{(\d+)\}\}/g, (_, n: string) => bodyParams[Number(n) - 1] ?? '');
 }
+
+// ── Aviso OPERACIONAL do painel (beeads-central-de-dados) ────────────────────
+
+/**
+ * Template do aviso de operação do painel (WhatsApp Cloud API).
+ *
+ * Existe porque o canal antigo saía pela Evolution, da instância do PRÓPRIO
+ * destinatário — e ficou 35 dias mudo quando aquela instância caiu (todo envio
+ * dava 400). Instância Evolution é leitura; quem envia é sempre o número Cloud,
+ * que não tem sessão para cair. O remetente é o MESMO do aviso de queda.
+ *
+ * ⚠️ Esta constante é o que foi SUBMETIDO à aprovação da Meta (id
+ * 1896879847947648, em PENDING). Mudar texto ou variáveis exige submeter um
+ * template NOVO (nome novo): editar só aqui faz o envio divergir do aprovado e
+ * ser recusado — mesma regra do CONNECTION_DOWN_TEMPLATE acima.
+ */
+export const OPS_ALERT_TEMPLATE_NAME = 'aviso_operacional_v1';
+
+// Duas variáveis, nesta ordem: {{1}} título curto, {{2}} detalhe de uma linha.
+// A Meta recusa corpo que termina em variável — daí a linha fixa no fim.
+const OPS_ALERT_BODY_TEXT =
+  'Aviso do painel BeeAds: {{1}}\n' +
+  'Detalhe: {{2}}\n' +
+  'Mensagem automática da BeeAds.';
+
+export const OPS_ALERT_TEMPLATE: {
+  name: string;
+  language: string;
+  category: 'UTILITY';
+  components: TemplateComponent[];
+} = {
+  name: OPS_ALERT_TEMPLATE_NAME,
+  language: 'pt_BR',
+  category: 'UTILITY',
+  components: [
+    {
+      type: 'BODY',
+      text: OPS_ALERT_BODY_TEXT,
+      example: { body_text: [['3 erros novos no painel', 'TypeError em /[slug]/whatsapp — 12x']] },
+    },
+  ],
+};
+
+/**
+ * Teto por parâmetro. A Meta aceita até 1024 chars num parâmetro de corpo; 600
+ * é folga deliberada para as duas variáveis juntas caberem numa mensagem que
+ * ainda se lê no celular. Trunca com reticência em vez de deixar a Meta recusar.
+ */
+export const OPS_ALERT_PARAM_MAX = 600;
+
+/** Parâmetro VAZIO é recusado pela Meta — o travessão preserva o envio. */
+const EMPTY_PARAM = '—';
+
+function opsParam(s: string | null | undefined): string {
+  const flat = oneLine(s ?? '');
+  if (!flat) return EMPTY_PARAM;
+  return flat.length > OPS_ALERT_PARAM_MAX ? `${flat.slice(0, OPS_ALERT_PARAM_MAX - 1)}…` : flat;
+}
+
+export type OpsAlertInput = { titulo: string; detalhe?: string | null };
+
+export function opsAlertTemplateParams(p: OpsAlertInput): { bodyParams: string[] } {
+  return { bodyParams: [opsParam(p.titulo), opsParam(p.detalhe)] };
+}
+
+/**
+ * O mesmo corpo com as variáveis preenchidas: é o texto livre de fallback
+ * enquanto a Meta não aprova o template. Uma fonte só.
+ */
+export function renderOpsAlertText(p: OpsAlertInput): string {
+  const { bodyParams } = opsAlertTemplateParams(p);
+  return OPS_ALERT_BODY_TEXT.replace(/\{\{(\d+)\}\}/g, (_, n: string) => bodyParams[Number(n) - 1] ?? '');
+}

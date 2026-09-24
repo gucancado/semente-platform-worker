@@ -9,6 +9,8 @@ import { registerSdrRoutes } from './sdr/routes.js';
 import { registerTimelineRoutes } from './timeline/routes.js';
 import { registerProjectsRoutes } from './projects/routes.js';
 import { registerWebhookCloudRoutes, registerSendCloudRoute } from './webhook-cloud/routes.js';
+import { registerOpsNotifyRoute } from './ops-notify/routes.js';
+import { cloudPhoneNumberIdForAgent, sendCloudTemplate, sendCloudText } from './webhook-cloud/send.js';
 import { registerEpisodesRoutes } from './episodes/routes.js';
 import { registerMemoriaRoutes } from './lua/routes.js';
 import { registerProvisionRoutes } from './whatsapp/provision-routes.js';
@@ -93,6 +95,25 @@ async function main() {
   await app.register(async (scope) => {
     scope.addHook('preHandler', requireAgentToken);
     await registerSendCloudRoute(scope);
+  });
+
+  // POST /ops-notify — aviso de operação do painel central, enviado pelo número
+  // Cloud (o MESMO remetente do aviso de queda). Auth própria no handler
+  // (X-Ops-Notify-Token). Registrada SEMPRE: sem config ela responde 503
+  // declarado, que é diagnosticável — rota ausente daria 404 e pareceria bug de
+  // URL no painel. O destino e o remetente moram aqui, nunca no corpo do POST.
+  await app.register(async (scope) => {
+    registerOpsNotifyRoute(scope, {
+      token: config.OPS_NOTIFY_TOKEN,
+      to: config.OPS_NOTIFY_TO,
+      phoneNumberId: cloudPhoneNumberIdForAgent(
+        config.WHATSAPP_CLOUD_NUMBERS_JSON as Record<string, { agent: string; project: string }>,
+        config.CONNECTION_NOTIFY_CLOUD_AGENT,
+      ),
+      cloudConfigured: Boolean(config.WHATSAPP_CLOUD_ACCESS_TOKEN),
+      sendTemplate: sendCloudTemplate,
+      sendText: sendCloudText,
+    });
   });
 
   // REST /contacts: auth por X-Agent-Token (registrado dentro do plugin)

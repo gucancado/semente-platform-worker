@@ -156,6 +156,16 @@ const EnvSchema = z.object({
   // Base pública do painel — monta a URL do link de reconexão.
   PANEL_PUBLIC_URL: z.string().url().default('https://painel.beeads.com.br'),
 
+  // ── Aviso de OPERAÇÃO do painel (POST /ops-notify) ──
+  // O beeads-central-de-dados manda {titulo, detalhe} e este worker envia pelo
+  // número Cloud — o MESMO remetente do aviso de queda (CONNECTION_NOTIFY_CLOUD_AGENT).
+  // Segredo DEDICADO: não reusa PANEL_TOKEN (que vive no app web) nem X-Agent-Token
+  // (que exigiria mexer em AGENT_TOKENS_JSON, cujo parse malformado derruba o boot).
+  // Ausentes → a rota existe e responde 503 declarado, sem derrubar nada.
+  OPS_NOTIFY_TOKEN: z.string().optional(),
+  // Destino do aviso: E.164 sem '+' (ex.: 553196039118).
+  OPS_NOTIFY_TO: z.string().optional(),
+
   // ── Vigia de instância de SISTEMA (ex.: saturno, fora de whatsapp_numbers por contrato) ──
   // JSON: [{"instance":"saturno","expected_phone":"+553195950748","label":"Monitor de grupos"}]
   // Opcional por alvo: "traffic":"always" (padrão "business_hours" — ver SystemWatchSchema).
