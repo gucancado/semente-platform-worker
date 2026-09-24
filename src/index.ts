@@ -43,6 +43,7 @@ import { startDownNotify } from './whatsapp/down-notify-start.js';
 import { startPresenceKeepalive } from './whatsapp/presence-keepalive.js';
 import { startTranscriptionPoller } from './transcription/poller.js';
 import { startSummaryPoller } from './meetings-summary/poller.js';
+import { startMeetingsAudioPoller } from './meetings-audio/poller.js';
 import { OpenAISummaryLlm } from './meetings-summary/provider.js';
 import { r2Configured } from './integrations/r2.js';
 import { startCreationPoller } from './whatsapp/opportunity-pipeline.js';
@@ -322,6 +323,14 @@ async function main() {
   // (chave presente quando o modo é 'auto') já validados por
   // assertMeetingSummaryConfig acima — aqui NÃO se re-checa a chave, para não
   // criar um segundo comportamento possível para o mesmo estado.
+  // Áudio da reunião: cópia da gravação da Vexa pro R2. Sem coleta ou sem R2 não
+  // há de onde nem pra onde copiar, então o modo 'auto' fica inerte e avisa.
+  if (config.MEETINGS_AUDIO_MODE === 'auto' && meetingsEnabled && r2Configured()) {
+    startMeetingsAudioPoller(app.log);
+  } else {
+    app.log.info({ mode: config.MEETINGS_AUDIO_MODE, meetingsEnabled, r2: r2Configured() }, 'meetings-audio: poller NÃO iniciado');
+  }
+
   if (config.MEETING_SUMMARY_MODE === 'auto') {
     const summaryLlm = new OpenAISummaryLlm({
       apiKey: config.OPENAI_API_KEY!, model: config.MEETING_SUMMARY_MODEL,

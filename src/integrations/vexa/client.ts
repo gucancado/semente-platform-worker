@@ -1,3 +1,5 @@
+import type { VexaRecording } from '../../meetings-audio/core.js';
+
 export type VexaSegment = {
   start: number;              // epoch SEGUNDOS (float)
   end: number;                // epoch SEGUNDOS (float)
@@ -23,6 +25,7 @@ export type VexaMeeting = {
 };
 
 const PLATFORM = 'google_meet';
+
 
 /** Client HTTP do Vexa Lite. `fetchFn` injetável para testes. Erros não-2xx estouram com status+corpo. */
 export class VexaClient {
@@ -75,5 +78,29 @@ export class VexaClient {
 
   async getBotStatus(): Promise<unknown> {
     return this.req('GET', '/bots/status');
+  }
+
+  /** Gravações do usuário da API key, com o `meeting_id` da Vexa em cada uma. */
+  async listRecordings(): Promise<VexaRecording[]> {
+    const body = await this.req('GET', '/recordings');
+    return Array.isArray(body?.recordings) ? body.recordings : [];
+  }
+
+  /**
+   * Bytes do arquivo de áudio de uma gravação. A rota `/raw` da Vexa monta o
+   * arquivo final se ele ainda não existir (finalize-on-read), então dispensa a
+   * chamada a `/master`. Timeout longo: uma reunião de 2h passa de 50 MB.
+   */
+  async downloadRecordingAudio(recordingId: number, mediaFileId: number | string): Promise<Buffer> {
+    const path = `/recordings/${recordingId}/media/${encodeURIComponent(String(mediaFileId))}/raw?type=audio`;
+    const r = await this.fetchFn(`${this.baseUrl}${path}`, {
+      headers: { 'X-API-Key': this.apiKey },
+      signal: AbortSignal.timeout(180_000),
+    });
+    if (!r.ok) {
+      const text = (await r.text().catch(() => '')).slice(0, 300);
+      throw new Error(`vexa: HTTP ${r.status} — ${text}`);
+    }
+    return Buffer.from(await r.arrayBuffer());
   }
 }

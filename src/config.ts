@@ -282,6 +282,9 @@ const EnvSchema = z.object({
   // src/meetings-summary/{poller,db}.ts.
   MEETING_SUMMARY_MODE: z.enum(['off', 'auto']).default('off'),
   MEETING_SUMMARY_MODEL: z.string().default('gpt-5.4-mini'),
+  // ── Áudio da reunião: copia a gravação do bot da Vexa pro R2 (src/meetings-audio) ──
+  // Nasce 'off'. 'auto' exige coleta de reuniões ligada (VEXA_*) + R2 + ffmpeg na imagem.
+  MEETINGS_AUDIO_MODE: z.enum(['off', 'auto']).default('off'),
   R2_BUCKET_WHATSAPP_MEDIA: z.string().optional(),
   // ── Mídia do WhatsApp além de áudio (imagem, vídeo, documento, figurinha) ──
   // Nasce 'off': com 'off' o ingest é byte-idêntico ao de antes (foto sem legenda

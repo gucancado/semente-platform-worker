@@ -24,6 +24,7 @@
     "whatsapp:cloud-template": "tsx src/cli/cloud-template.ts",
     "whatsapp:media-usage": "tsx src/cli/whatsapp-media-usage.ts",
     "meetings:summarize": "tsx src/cli/summarize-meetings.ts",
+    "meetings:audio-backfill": "tsx src/cli/backfill-meeting-audio.ts",
     "transcribe:pending": "tsx src/transcription/cli.ts pending",
     "transcribe:redo": "tsx src/transcription/cli.ts redo",
     "lua:sample": "tsx eval/lua/sample.ts",

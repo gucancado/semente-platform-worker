@@ -144,6 +144,8 @@ export type MeetingDigestView = {
   id: number; title: string | null; occurred_at: Date; duration_seconds: number | null;
   participants: Array<{ name: string; email: string | null }>;
   summary: string | null; summary_points: string[] | null; summary_generated_at: Date | null;
+  /** Há arquivo de áudio no R2. O painel mostra o player só com `true`. */
+  has_audio: boolean;
 };
 
 /** `summary_points` é jsonb: o driver devolve o que estiver gravado, e uma row
@@ -162,6 +164,7 @@ function mapDigestView(row: any): MeetingDigestView {
     summary: row.summary ?? null,
     summary_points: coercePoints(row.summary_points),
     summary_generated_at: row.summary_generated_at ?? null,
+    has_audio: row.audio_r2_key != null,
   };
 }
 
@@ -171,7 +174,7 @@ export async function getMeetingDigest(
 ): Promise<MeetingDigestView | null> {
   const { rows } = await pool.query(
     `SELECT id, title, occurred_at, duration_seconds, participants, workspace_id,
-            summary, summary_points, summary_generated_at
+            summary, summary_points, summary_generated_at, audio_r2_key
      FROM episodes WHERE id=$1 AND fonte='reuniao'`, [a.episodeId]);
   const row = rows[0];
   // Mesma revalidação de tenant do transcript: episódio de outro workspace → null.
@@ -193,7 +196,7 @@ export async function getMeetingTranscript(
 ): Promise<MeetingTranscript | null> {
   const ep = await pool.query(
     `SELECT id, title, occurred_at, duration_seconds, participants, workspace_id,
-            summary, summary_points, summary_generated_at
+            summary, summary_points, summary_generated_at, audio_r2_key
      FROM episodes WHERE id=$1 AND fonte='reuniao'`, [a.episodeId]);
   const row = ep.rows[0];
   // Revalidação de tenant: episódio inexistente OU de outro workspace → null (404 na rota).

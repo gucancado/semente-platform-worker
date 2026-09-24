@@ -3,6 +3,9 @@ import type { Pool } from 'pg';
 import type { MeetingDigestView } from './db.js';
 import { requirePanelToken } from '../whatsapp/provision-routes.js';
 import { listMeetings, getMeetingsStats, getMeetingTranscript, getMeetingDigest } from './db.js';
+import { getEpisodeAudio } from '../meetings-audio/db.js';
+import { AUDIO_URL_TTL_S, audioDownloadName } from '../meetings-audio/core.js';
+import { presignGet } from '../integrations/r2.js';
 
 /**
  * Rotas REST `meetings_read_v1` de leitura de reuniões (listagem, stats, transcrição).
@@ -67,6 +70,22 @@ export function registerMeetingsReadRoutes(
     const d = await getMeetingDigest(deps.pool, { episodeId, workspaceId });
     if (!d) return reply.code(404).send({ error: 'not_found' });
     return reply.send({ schema: 'meetings_read_v1', episode: serializeEpisode(d) });
+  });
+
+  // Link assinado do áudio. Visível a qualquer membro do workspace, como o digest
+  // (decisão do owner, 2026-09-24); a autorização por usuário é do painel, e aqui
+  // vale a de tenant. `download=1` assina com Content-Disposition de anexo.
+  app.get('/meetings-read/:episodeId/audio', { preHandler: auth }, async (req: any, reply) => {
+    const workspaceId = req.query?.workspace_id as string | undefined;
+    const episodeId = Number(req.params?.episodeId);
+    if (!workspaceId || !Number.isFinite(episodeId)) return reply.code(400).send({ error: 'params_required' });
+    const a = await getEpisodeAudio(deps.pool, { episodeId, workspaceId });
+    if (!a) return reply.code(404).send({ error: 'not_found' });
+    const download = req.query?.download === '1';
+    const url = await presignGet(a.key, AUDIO_URL_TTL_S, undefined, download
+      ? { contentDisposition: `attachment; filename="${audioDownloadName(episodeId, a.occurredAt)}"` }
+      : undefined);
+    return reply.send({ schema: 'meetings_read_v1', url });
   });
 }
 
