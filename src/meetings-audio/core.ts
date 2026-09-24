@@ -37,6 +37,47 @@ export function pickAudioRecording(recs: VexaRecording[], vexaMeetingId: number)
   return best;
 }
 
+/**
+ * Cabeçalho do webm do bot: EBML + Segment + Info + Tracks (Opus, 48 kHz,
+ * estéreo), copiado de uma gravação válida (reunião 199). É idêntico em toda
+ * gravação porque o gravador do bot usa sempre a mesma configuração; só o UID
+ * da trilha muda, e os blocos de áudio referenciam a trilha pelo NÚMERO (1).
+ */
+export const WEBM_OPUS_INIT_HEX =
+  '1a45dfa39f4286810142f7810142f2810442f381084282847765626d42878104428581021853806701ffffffffffffff'
+  + '1549a966992ad7b1830f42404d80864368726f6d655741864368726f6d651654ae6bbfaebdd7810173c587cefd7bc0'
+  + '8f6b368381028686415f4f50555363a2934f707573486561640102000080bb0000000000e18db584473b80009f81'
+  + '0262648120';
+
+const EBML_MAGIC = Buffer.from('1a45dfa3', 'hex');
+const CLUSTER_ID = Buffer.from('1f43b675', 'hex');
+/** Cluster de tamanho desconhecido com Timecode 0: é exatamente como o gravador
+ *  abre o primeiro cluster de toda gravação. */
+const CLUSTER_AT_ZERO = Buffer.from('1f43b67501ffffffffffffffe78100', 'hex');
+const SIMPLEBLOCK_ID = 0xa3;
+
+/**
+ * Repara gravação sem cabeçalho. Medido em 2026-09-24: 41 de 46 gravações do bot
+ * chegam sem o PRIMEIRO pedaço de 15s, que é o único com o cabeçalho do arquivo.
+ * O corte cai logo depois do byte de ID do bloco de áudio (`a3`), então o
+ * arquivo começa no tamanho do bloco (`8c 81 …`) — até o ffprobe o confunde com
+ * AMR. Os bytes seguintes ainda pertencem ao primeiro cluster (Timecode 0), que
+ * pode durar minutos antes do próximo marcador de cluster.
+ *
+ * Reparo: cabeçalho + cluster em 0 + o `a3` perdido + os bytes originais. Assim
+ * nada é descartado além do pedaço que o bot já perdeu (~14s do início). Pular
+ * até o próximo cluster perderia mais de 2 min na gravação medida.
+ */
+export function repairHeaderlessWebm(bytes: Buffer): { bytes: Buffer; repaired: boolean } {
+  if (bytes.subarray(0, 4).equals(EBML_MAGIC)) return { bytes, repaired: false };
+  const head = Buffer.from(WEBM_OPUS_INIT_HEX, 'hex');
+  if (bytes.subarray(0, 4).equals(CLUSTER_ID)) return { bytes: Buffer.concat([head, bytes]), repaired: true };
+  const prefix = bytes[0] === SIMPLEBLOCK_ID
+    ? Buffer.concat([head, CLUSTER_AT_ZERO])
+    : Buffer.concat([head, CLUSTER_AT_ZERO, Buffer.from([SIMPLEBLOCK_ID])]);
+  return { bytes: Buffer.concat([prefix, bytes]), repaired: true };
+}
+
 /** Chave determinística no R2: re-tentar sobrescreve o mesmo objeto. */
 export function audioKeyFor(vexaMeetingId: number): string {
   return `vexa/audio/${vexaMeetingId}.webm`;

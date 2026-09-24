@@ -53,7 +53,7 @@ async function main(): Promise<void> {
         },
         { episodeId: ep.episodeId, vexaMeetingId: vexaId, bytes: await readFile(join(dir, name)) },
       );
-      console.log(`${name} → episódio ${ep.episodeId} (${r.key}, ${r.bytes} bytes)`);
+      console.log(`${name} → episódio ${ep.episodeId} (${r.key}, ${r.bytes} bytes${r.repaired ? ', cabeçalho reparado' : ''})`);
       report.stored += 1;
     } catch (err) {
       report.failed.push(`${name}: ${(err as Error).message}`);

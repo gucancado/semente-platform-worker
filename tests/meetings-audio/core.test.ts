@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   pickAudioRecording, audioKeyFor, parseRecordingFilename, audioDownloadName, AUDIO_URL_TTL_S,
+  repairHeaderlessWebm, WEBM_OPUS_INIT_HEX,
 } from '../../src/meetings-audio/core.js';
 import { archiveFromVexa, runAudioBatch, storeEpisodeAudio } from '../../src/meetings-audio/service.js';
 
@@ -61,9 +62,21 @@ function fakes() {
 
 test('storeEpisodeAudio: remux antes do R2, chave só depois do upload', async () => {
   const { calls, store } = fakes();
-  const r = await storeEpisodeAudio(store, { episodeId: 471, vexaMeetingId: 199, bytes: Buffer.from('abc') });
-  assert.deepEqual(calls, ['remux', 'put:vexa/audio/199.webm:4:audio/webm', 'set:471:vexa/audio/199.webm']);
-  assert.equal(r.bytes, 4);
+  const valid = Buffer.from('1a45dfa3aa', 'hex');
+  const r = await storeEpisodeAudio(store, { episodeId: 471, vexaMeetingId: 199, bytes: valid });
+  assert.deepEqual(calls, ['remux', 'put:vexa/audio/199.webm:6:audio/webm', 'set:471:vexa/audio/199.webm']);
+  assert.equal(r.bytes, 6);
+  assert.equal(r.repaired, false);
+});
+
+test('storeEpisodeAudio: gravação sem cabeçalho chega reparada ao remux', async () => {
+  let seen: Buffer | null = null;
+  const r = await storeEpisodeAudio(
+    { remux: async (b) => { seen = b; return b; }, put: async () => {}, setKey: async () => true },
+    { episodeId: 1, vexaMeetingId: 2, bytes: Buffer.from('8c81', 'hex') },
+  );
+  assert.equal(r.repaired, true);
+  assert.ok(seen!.subarray(0, 4).equals(Buffer.from('1a45dfa3', 'hex')));
 });
 
 test('storeEpisodeAudio: falha no upload não grava chave', async () => {
@@ -111,4 +124,38 @@ test('runAudioBatch: nada pendente → não chama a Vexa', async () => {
   });
   assert.equal(lists, 0);
   assert.deepEqual(r, { pending: 0, stored: 0 });
+});
+
+test('repairHeaderlessWebm: arquivo com cabeçalho passa intacto', () => {
+  const ok = Buffer.from('1a45dfa3' + '00ff', 'hex');
+  const r = repairHeaderlessWebm(ok);
+  assert.equal(r.repaired, false);
+  assert.equal(r.bytes, ok);
+});
+
+test('repairHeaderlessWebm: começo no tamanho do bloco recebe cabeçalho, cluster em 0 e o a3 perdido', () => {
+  // É assim que 41 das 46 gravações começam: "8c 81 ..." logo depois do a3 cortado.
+  const bad = Buffer.from('8c813887' + '80ff03fffe', 'hex');
+  const r = repairHeaderlessWebm(bad);
+  assert.equal(r.repaired, true);
+  const expected = WEBM_OPUS_INIT_HEX + '1f43b67501ffffffffffffffe78100' + 'a3' + bad.toString('hex');
+  assert.equal(r.bytes.toString('hex'), expected);
+});
+
+test('repairHeaderlessWebm: começo exato num bloco não duplica o a3', () => {
+  const r = repairHeaderlessWebm(Buffer.from('a38c81', 'hex'));
+  assert.ok(r.bytes.toString('hex').endsWith('1f43b67501ffffffffffffffe78100a38c81'));
+});
+
+test('repairHeaderlessWebm: começo num cluster recebe só o cabeçalho', () => {
+  const r = repairHeaderlessWebm(Buffer.from('1f43b67501ff', 'hex'));
+  assert.equal(r.bytes.toString('hex'), WEBM_OPUS_INIT_HEX + '1f43b67501ff');
+});
+
+test('WEBM_OPUS_INIT_HEX é um cabeçalho webm Opus completo', () => {
+  const h = Buffer.from(WEBM_OPUS_INIT_HEX, 'hex');
+  assert.equal(h.length, 146);
+  assert.ok(h.subarray(0, 4).equals(Buffer.from('1a45dfa3', 'hex')));
+  assert.ok(h.includes(Buffer.from('A_OPUS')));
+  assert.ok(h.includes(Buffer.from('OpusHead')));
 });

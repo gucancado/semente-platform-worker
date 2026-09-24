@@ -5,7 +5,7 @@
  * (reuniões novas, arquivo vindo da Vexa) e pelo backfill (gravações antigas,
  * arquivo vindo do disco): remux → R2 → `episodes.audio_r2_key`.
  */
-import { audioKeyFor, pickAudioRecording, type VexaRecording } from './core.js';
+import { audioKeyFor, pickAudioRecording, repairHeaderlessWebm, type VexaRecording } from './core.js';
 
 export type AudioLogger = {
   info: (o: unknown, m?: string) => void;
@@ -30,12 +30,13 @@ export type ArchiveAudioDeps = StoreAudioDeps & {
  *  verificado no R2: nunca aponta pra um arquivo que não existe. */
 export async function storeEpisodeAudio(
   deps: StoreAudioDeps, a: { episodeId: number; vexaMeetingId: number; bytes: Buffer },
-): Promise<{ key: string; bytes: number; recorded: boolean }> {
-  const fixed = await deps.remux(a.bytes);
+): Promise<{ key: string; bytes: number; recorded: boolean; repaired: boolean }> {
+  const { bytes: whole, repaired } = repairHeaderlessWebm(a.bytes);
+  const fixed = await deps.remux(whole);
   const key = audioKeyFor(a.vexaMeetingId);
   await deps.put(key, fixed, 'audio/webm');
   const recorded = await deps.setKey(a.episodeId, key);
-  return { key, bytes: fixed.length, recorded };
+  return { key, bytes: fixed.length, recorded, repaired };
 }
 
 /**
@@ -51,7 +52,7 @@ export async function archiveFromVexa(
   if (!picked) return 'not_ready';
   const bytes = await deps.vexa.downloadRecordingAudio(picked.recordingId, picked.mediaFileId);
   const r = await storeEpisodeAudio(deps, { episodeId: a.episodeId, vexaMeetingId: a.vexaMeetingId, bytes });
-  deps.log?.info({ episode: a.episodeId, vexa: a.vexaMeetingId, key: r.key, bytes: r.bytes }, 'meetings-audio: áudio arquivado');
+  deps.log?.info({ episode: a.episodeId, vexa: a.vexaMeetingId, key: r.key, bytes: r.bytes, repaired: r.repaired }, 'meetings-audio: áudio arquivado');
   return 'stored';
 }
 
