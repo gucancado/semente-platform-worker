@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   pickAudioRecording, audioKeyFor, parseRecordingFilename, audioDownloadName, AUDIO_URL_TTL_S,
-  repairHeaderlessWebm, WEBM_OPUS_INIT_HEX,
+  repairHeaderlessWebm, WEBM_OPUS_INIT_HEX, audioCoversEpisode,
 } from '../../src/meetings-audio/core.js';
 import { archiveFromVexa, runAudioBatch, storeEpisodeAudio } from '../../src/meetings-audio/service.js';
 
@@ -55,7 +55,7 @@ test('TTL do link cobre uma reunião longa', () => {
 function fakes() {
   const calls: string[] = [];
   const store = {
-    remux: async (b: Buffer) => { calls.push('remux'); return Buffer.concat([b, Buffer.from('!')]); },
+    remux: async (b: Buffer) => { calls.push('remux'); return { bytes: Buffer.concat([b, Buffer.from('!')]), durationS: 600 }; },
     put: async (key: string, body: Buffer, ct: string) => { calls.push(`put:${key}:${body.length}:${ct}`); },
     setKey: async (id: number, key: string) => { calls.push(`set:${id}:${key}`); return true; },
   };
@@ -65,7 +65,7 @@ function fakes() {
 test('storeEpisodeAudio: remux antes do R2, chave só depois do upload', async () => {
   const { calls, store } = fakes();
   const valid = Buffer.from('1a45dfa3aa', 'hex');
-  const r = await storeEpisodeAudio(store, { episodeId: 471, vexaMeetingId: 199, bytes: valid });
+  const r = await storeEpisodeAudio(store, { episodeId: 471, vexaMeetingId: 199, bytes: valid, episodeDurationS: 656 });
   assert.deepEqual(calls, ['remux', 'put:vexa/audio/199.webm:6:audio/webm', 'set:471:vexa/audio/199.webm']);
   assert.equal(r.bytes, 6);
   assert.equal(r.repaired, false);
@@ -74,8 +74,8 @@ test('storeEpisodeAudio: remux antes do R2, chave só depois do upload', async (
 test('storeEpisodeAudio: gravação sem cabeçalho chega reparada ao remux', async () => {
   let seen: Buffer | null = null;
   const r = await storeEpisodeAudio(
-    { remux: async (b) => { seen = b; return b; }, put: async () => {}, setKey: async () => true },
-    { episodeId: 1, vexaMeetingId: 2, bytes: Buffer.from('8c81', 'hex') },
+    { remux: async (b) => { seen = b; return { bytes: b, durationS: 600 }; }, put: async () => {}, setKey: async () => true },
+    { episodeId: 1, vexaMeetingId: 2, bytes: Buffer.from('8c81', 'hex'), episodeDurationS: 600 },
   );
   assert.equal(r.repaired, true);
   assert.ok(seen!.subarray(0, 4).equals(Buffer.from('1a45dfa3', 'hex')));
@@ -85,7 +85,7 @@ test('storeEpisodeAudio: falha no upload não grava chave', async () => {
   const { calls, store } = fakes();
   await assert.rejects(storeEpisodeAudio(
     { ...store, put: async () => { throw new Error('r2 fora'); } },
-    { episodeId: 1, vexaMeetingId: 2, bytes: Buffer.from('a') },
+    { episodeId: 1, vexaMeetingId: 2, bytes: Buffer.from('a'), episodeDurationS: 600 },
   ));
   assert.ok(!calls.some((c) => c.startsWith('set:')));
 });
@@ -95,7 +95,7 @@ test('archiveFromVexa: sem gravação ainda → not_ready, sem download', async 
   let downloads = 0;
   const out = await archiveFromVexa(
     { ...store, vexa: { listRecordings: async () => [], downloadRecordingAudio: async () => { downloads++; return Buffer.alloc(0); } } },
-    { episodeId: 1, vexaMeetingId: 199, recordings: [] },
+    { episodeId: 1, vexaMeetingId: 199, episodeDurationS: 600, recordings: [] },
   );
   assert.equal(out, 'not_ready');
   assert.equal(downloads, 0);
@@ -106,7 +106,11 @@ test('runAudioBatch: lista a Vexa uma vez por ciclo e isola falhas por reunião'
   let lists = 0;
   const r = await runAudioBatch({
     ...store,
-    listPending: async () => [{ episodeId: 1, vexaMeetingId: 10 }, { episodeId: 2, vexaMeetingId: 20 }, { episodeId: 3, vexaMeetingId: 30 }],
+    listPending: async () => [
+      { episodeId: 1, vexaMeetingId: 10, episodeDurationS: 600 },
+      { episodeId: 2, vexaMeetingId: 20, episodeDurationS: 600 },
+      { episodeId: 3, vexaMeetingId: 30, episodeDurationS: 600 },
+    ],
     vexa: {
       listRecordings: async () => { lists++; return [rec(100, 10), rec(200, 20)]; },
       downloadRecordingAudio: async (id) => { if (id === 100) throw new Error('500'); return Buffer.from('x'); },
@@ -160,4 +164,39 @@ test('WEBM_OPUS_INIT_HEX é um cabeçalho webm Opus completo', () => {
   assert.ok(h.subarray(0, 4).equals(Buffer.from('1a45dfa3', 'hex')));
   assert.ok(h.includes(Buffer.from('A_OPUS')));
   assert.ok(h.includes(Buffer.from('OpusHead')));
+});
+
+test('audioCoversEpisode: exige metade da duração da reunião', () => {
+  assert.equal(audioCoversEpisode(693, 656), true);     // Chianca 16/09
+  assert.equal(audioCoversEpisode(948, 964), true);     // reparada, perdeu ~2 min
+  assert.equal(audioCoversEpisode(15, 190), false);     // ep. 448
+  assert.equal(audioCoversEpisode(1.2, 2400), false);   // sobra de 3 KB do 2º master
+  assert.equal(audioCoversEpisode(null, 600), false);   // ffprobe não leu
+  assert.equal(audioCoversEpisode(45, null), true);     // sem duração do episódio: piso de 30s
+  assert.equal(audioCoversEpisode(10, 0), false);
+});
+
+test('storeEpisodeAudio: áudio curto não sobe pro R2 nem grava chave', async () => {
+  const calls: string[] = [];
+  const r = await storeEpisodeAudio(
+    {
+      remux: async (b) => ({ bytes: b, durationS: 1.2 }),
+      put: async () => { calls.push('put'); },
+      setKey: async () => { calls.push('set'); return true; },
+    },
+    { episodeId: 9, vexaMeetingId: 251, bytes: Buffer.from('1a45dfa3', 'hex'), episodeDurationS: 1200 },
+  );
+  assert.equal(r.tooShort, true);
+  assert.deepEqual(calls, []);
+});
+
+test('archiveFromVexa: áudio curto → too_short', async () => {
+  const out = await archiveFromVexa(
+    {
+      remux: async (b) => ({ bytes: b, durationS: 2 }), put: async () => {}, setKey: async () => true,
+      vexa: { listRecordings: async () => [], downloadRecordingAudio: async () => Buffer.from('1a45dfa3', 'hex') },
+    },
+    { episodeId: 9, vexaMeetingId: 251, episodeDurationS: 1200, recordings: [rec(1, 251)] },
+  );
+  assert.equal(out, 'too_short');
 });

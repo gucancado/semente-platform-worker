@@ -15,7 +15,9 @@ import { mkdtemp, writeFile, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-export async function remuxWebm(input: Buffer, ffmpegPath = 'ffmpeg'): Promise<Buffer> {
+export type Remuxed = { bytes: Buffer; durationS: number | null };
+
+export async function remuxWebm(input: Buffer, ffmpegPath = 'ffmpeg', ffprobePath = 'ffprobe'): Promise<Remuxed> {
   const dir = await mkdtemp(join(tmpdir(), 'meeting-audio-'));
   const inPath = join(dir, 'in.webm');
   const outPath = join(dir, 'out.webm');
@@ -36,8 +38,23 @@ export async function remuxWebm(input: Buffer, ffmpegPath = 'ffmpeg'): Promise<B
     });
     const out = await readFile(outPath);
     if (out.length === 0) throw new Error('ffmpeg gerou arquivo vazio');
-    return out;
+    return { bytes: out, durationS: await probeDurationS(outPath, ffprobePath) };
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+}
+
+/** Duração do arquivo reescrito, em segundos. `null` quando o ffprobe não consegue
+ *  ler — o chamador trata como áudio inválido. */
+async function probeDurationS(path: string, ffprobePath: string): Promise<number | null> {
+  return new Promise((resolve) => {
+    const p = spawn(ffprobePath, ['-v', 'error', '-show_entries', 'format=duration', '-of', 'csv=p=0', path]);
+    let out = '';
+    p.stdout.on('data', (d) => { out += String(d); });
+    p.on('error', () => resolve(null));
+    p.on('close', (code) => {
+      const v = Number(out.trim());
+      resolve(code === 0 && Number.isFinite(v) ? v : null);
+    });
+  });
 }

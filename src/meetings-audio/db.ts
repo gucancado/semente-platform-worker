@@ -1,14 +1,14 @@
 import type { Pool } from 'pg';
 import { PENDING_WINDOW_HOURS } from './core.js';
 
-export type PendingAudio = { episodeId: number; vexaMeetingId: number };
+export type PendingAudio = { episodeId: number; vexaMeetingId: number; episodeDurationS: number | null };
 
 /** Reuniões da Vexa importadas recentemente cujo episódio ainda não tem áudio. */
 export async function listPendingAudio(
   pool: Pool, a: { windowHours?: number; limit?: number } = {},
 ): Promise<PendingAudio[]> {
   const { rows } = await pool.query(
-    `SELECT cm.episode_id, cm.vexa_meeting_id
+    `SELECT cm.episode_id, cm.vexa_meeting_id, e.duration_seconds
        FROM collected_meetings cm
        JOIN episodes e ON e.id = cm.episode_id
       WHERE cm.status = 'imported'
@@ -19,16 +19,19 @@ export async function listPendingAudio(
       LIMIT $2`,
     [a.windowHours ?? PENDING_WINDOW_HOURS, a.limit ?? 10],
   );
-  return rows.map((r) => ({ episodeId: Number(r.episode_id), vexaMeetingId: Number(r.vexa_meeting_id) }));
+  return rows.map((r) => ({
+    episodeId: Number(r.episode_id), vexaMeetingId: Number(r.vexa_meeting_id),
+    episodeDurationS: r.duration_seconds == null ? null : Number(r.duration_seconds),
+  }));
 }
 
 /** Episódio importado de uma reunião da Vexa. Usado pelo backfill das gravações
  *  antigas, que chegam pelo id da Vexa no nome do arquivo. */
 export async function findEpisodeForVexaMeeting(
   pool: Pool, vexaMeetingId: number,
-): Promise<{ episodeId: number; hasAudio: boolean } | null> {
+): Promise<{ episodeId: number; hasAudio: boolean; durationS: number | null } | null> {
   const { rows } = await pool.query(
-    `SELECT e.id, e.audio_r2_key
+    `SELECT e.id, e.audio_r2_key, e.duration_seconds
        FROM collected_meetings cm
        JOIN episodes e ON e.id = cm.episode_id
       WHERE cm.vexa_meeting_id = $1
@@ -36,7 +39,10 @@ export async function findEpisodeForVexaMeeting(
     [vexaMeetingId],
   );
   const r = rows[0];
-  return r ? { episodeId: Number(r.id), hasAudio: r.audio_r2_key != null } : null;
+  return r ? {
+    episodeId: Number(r.id), hasAudio: r.audio_r2_key != null,
+    durationS: r.duration_seconds == null ? null : Number(r.duration_seconds),
+  } : null;
 }
 
 /** Grava a chave só se ainda não houver uma: execuções concorrentes (poller e

@@ -51,8 +51,9 @@ async function main(): Promise<void> {
           put: (key, body, ct) => putAndVerify(key, body, ct),
           setKey: (episodeId, key) => setEpisodeAudioKey(pool, episodeId, key),
         },
-        { episodeId: ep.episodeId, vexaMeetingId: vexaId, bytes: await readFile(join(dir, name)) },
+        { episodeId: ep.episodeId, vexaMeetingId: vexaId, bytes: await readFile(join(dir, name)), episodeDurationS: ep.durationS },
       );
+      if (r.tooShort) { report.failed.push(`${name}: áudio curto demais (${r.durationS}s de ${ep.durationS}s)`); continue; }
       console.log(`${name} → episódio ${ep.episodeId} (${r.key}, ${r.bytes} bytes${r.repaired ? ', cabeçalho reparado' : ''})`);
       report.stored += 1;
     } catch (err) {

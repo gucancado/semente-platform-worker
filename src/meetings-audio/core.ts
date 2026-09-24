@@ -78,6 +78,22 @@ export function repairHeaderlessWebm(bytes: Buffer): { bytes: Buffer; repaired: 
   return { bytes: Buffer.concat([prefix, bytes]), repaired: true };
 }
 
+/**
+ * Áudio curto demais não é guardado. Motivo medido em 2026-09-24: o bot monta um
+ * 2º arquivo só com o último pedaço (~3 KB) no MESMO caminho do arquivo completo e
+ * é esse que chega à Vexa. Guardar faria o player aparecer tocando 1 segundo de
+ * uma reunião de 40 min. Referência é a duração do episódio (tempo de fala), que
+ * é sempre menor que o tempo do bot na sala; metade dá folga aos ~2 min que o bot
+ * perde no início das gravações reparadas.
+ */
+export const MIN_AUDIO_COVERAGE = 0.5;
+
+export function audioCoversEpisode(audioS: number | null, episodeS: number | null): boolean {
+  if (audioS == null || !Number.isFinite(audioS) || audioS <= 0) return false;
+  if (episodeS == null || episodeS <= 0) return audioS >= 30;
+  return audioS >= episodeS * MIN_AUDIO_COVERAGE;
+}
+
 /** Chave determinística no R2: re-tentar sobrescreve o mesmo objeto. */
 export function audioKeyFor(vexaMeetingId: number): string {
   return `vexa/audio/${vexaMeetingId}.webm`;
