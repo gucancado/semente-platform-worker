@@ -3,7 +3,7 @@ import { config } from '../config.js';
 import { cloudPhoneNumberIdForAgent } from '../webhook-cloud/send.js';
 import { resolveWorkspaceNames } from '../bloquim/workspace-names.js';
 import { listConnectedInstances } from './numbers.js';
-import { makeCloudDownSender } from './down-notify-sender.js';
+import { makeCloudDownSender, makeOpsCopySender } from './down-notify-sender.js';
 import { makeEvolutionProbe } from './down-notify-probe.js';
 import { parseOffDates } from './business-hours.js';
 import {
@@ -51,6 +51,13 @@ export function buildDownNotifyDeps(
       link: { maxClicks: LINK_MAX_CLICKS, ttlDays: LINK_TTL_DAYS },
       log,
       resolveWorkspaceName: async (id: string) => (await resolveWorkspaceNames([id])).get(id) ?? null,
+      // Cópia para o operador — pelo MESMO número Cloud, com o template de
+      // OPERAÇÃO. Sem OPS_NOTIFY_TO os dois campos ficam undefined e a cópia é
+      // no-op silencioso: o aviso principal não muda em nada.
+      sendOpsCopy: config.OPS_NOTIFY_TO
+        ? makeOpsCopySender({ phoneNumberId, to: config.OPS_NOTIFY_TO })
+        : undefined,
+      opsCopyTo: config.OPS_NOTIFY_TO,
     },
   };
 }
@@ -121,6 +128,9 @@ export function startDownNotify(pool: Pool, log: DownNotifyLog): void {
       extraOffDates: parseOffDates(config.BUSINESS_HOURS_EXTRA_OFF_DATES).dates.size,
       sender: built.phoneNumberId,
       template: config.CONNECTION_NOTIFY_TEMPLATE_NAME ?? null,
+      // Visível no boot: sem isto, "o dono não recebeu a cópia" vira caça ao
+      // env sem nenhum sinal de que ele estava ausente o tempo todo.
+      opsCopy: config.OPS_NOTIFY_TO ? 'on' : 'off (sem OPS_NOTIFY_TO)',
     },
     'down-notify iniciado',
   );

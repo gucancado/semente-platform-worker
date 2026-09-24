@@ -20,7 +20,8 @@ import {
   type SystemHealthRow,
   type SystemTarget,
 } from './down-notify-store.js';
-import type { DownSendResult, DownSender } from './down-notify-sender.js';
+import type { DownSendResult, DownSender, OpsCopySender } from './down-notify-sender.js';
+import { opsCopyFor, sameWhatsappNumber } from './down-notify-ops-copy.js';
 
 /**
  * Orquestração do aviso de queda ao próprio número: decide → reivindica →
@@ -47,6 +48,13 @@ export type DownNotifyDeps = {
   log: DownNotifyLog;
   /** Nome do workspace (Bloquim). Ausente, null ou falhando = usa o rótulo do número. */
   resolveWorkspaceName?: (workspaceId: string) => Promise<string | null>;
+  /**
+   * Cópia do aviso para o OPERADOR (template de operação). Ausente = no-op
+   * silencioso — é o que acontece sem OPS_NOTIFY_TO configurado.
+   */
+  sendOpsCopy?: OpsCopySender;
+  /** Destino da cópia (OPS_NOTIFY_TO). Serve pra não copiar para o próprio alvo. */
+  opsCopyTo?: string;
 };
 
 export type NotifyAttempt = {
@@ -66,6 +74,47 @@ type Target = {
   downSince: Date;
   version: NotifyVersion;
 };
+
+/**
+ * Cópia do aviso para o operador — o dono nunca via as quedas, porque o aviso
+ * vai para o telefone que caiu.
+ *
+ * TRÊS invariantes, nesta ordem de importância:
+ *
+ *  1. NÃO altera o desfecho do aviso principal. Roda DEPOIS dele, dentro de
+ *     try/catch próprio, e não toca em claim, contagem (`down_notified_at` /
+ *     `down_notify_count`), re-aviso de 12h nem teto de 6. O `NotifyAttempt`
+ *     devolvido ao chamador ignora o que acontece aqui.
+ *  2. Só sai quando o principal SAIU. Não é economia: um envio principal que
+ *     falha de forma transitória libera o claim e é re-tentado no PRÓXIMO TICK
+ *     do vigia (minutos), enquanto o envio bem-sucedido respeita a cadência de
+ *     re-aviso (12h, teto 6). Copiar na falha ligaria a cópia ao tick e o
+ *     operador receberia a mesma queda de minuto em minuto.
+ *  3. Não copia quando o alvo JÁ é o número do operador — senão ele recebe a
+ *     mesma queda duas vezes.
+ */
+async function sendOperatorCopy(deps: DownNotifyDeps, t: Target, name: string | null): Promise<void> {
+  const send = deps.sendOpsCopy;
+  if (!send) return; // sem OPS_NOTIFY_TO configurado: no-op silencioso
+  if (sameWhatsappNumber(deps.opsCopyTo, t.phone)) {
+    deps.log.info({ key: t.key }, 'down-notify: cópia dispensada — o alvo já é o número do operador');
+    return;
+  }
+  try {
+    const { titulo, detalhe } = opsCopyFor({
+      name,
+      phone: t.phone,
+      downSince: t.downSince,
+      notifyNumber: t.version.notifyCount + 1,
+      maxNotifies: deps.cadence.maxNotifies,
+    });
+    const r = await send(titulo, detalhe);
+    if (r.ok) deps.log.info({ key: t.key, via: r.via }, 'down-notify: cópia enviada ao operador');
+    else deps.log.warn({ key: t.key, status: r.status, detail: r.detail }, 'down-notify: cópia ao operador falhou');
+  } catch (err) {
+    deps.log.warn({ key: t.key, err: (err as Error).message }, 'down-notify: cópia ao operador falhou');
+  }
+}
 
 async function notifyOne(
   deps: DownNotifyDeps,
@@ -123,6 +172,7 @@ async function notifyOne(
       { key: t.key, via: result.via, reusedLink: link.reused, count: t.version.notifyCount + 1 },
       'down-notify: aviso enviado',
     );
+    await sendOperatorCopy(deps, t, name);
     return { key: t.key, phone: t.phone, outcome: 'sent', via: result.via, reusedLink: link.reused };
   }
   if (isRetryableSendFailure(result)) {

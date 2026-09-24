@@ -1,8 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { makeCloudDownSender } from '../../src/whatsapp/down-notify-sender.js';
+import { makeCloudDownSender, makeOpsCopySender } from '../../src/whatsapp/down-notify-sender.js';
 import type { CloudSendResult, CloudTemplateMessage } from '../../src/webhook-cloud/send.js';
-import { renderConnectionDownText } from '../../src/webhook-cloud/templates.js';
+import {
+  OPS_ALERT_TEMPLATE,
+  renderConnectionDownText,
+  renderOpsAlertText,
+} from '../../src/webhook-cloud/templates.js';
 
 const target = {
   phone: '+553195950748',
@@ -108,4 +112,65 @@ test('destinatário de teste recebe o conteúdo do alvo, sem trocar o número ex
     'tok123',
   ]);
   assert.match(String(calls[1].arg), /Monitor de grupos \(\+553195950748\)/);
+});
+
+// ── cópia do aviso para o operador (makeOpsCopySender) ───────────────────────
+
+const COPY = { titulo: 'WhatsApp de Fulano (+5531...) caiu', detalhe: 'Fora do ar desde 09/09 às 18:10.' };
+
+function wireOps(script: Script) {
+  const calls: Array<{ kind: 'template' | 'text'; pnid: string; to: string; arg: unknown }> = [];
+  const run = (r: CloudSendResult | 'throw' | undefined) => {
+    if (r === 'throw') throw new Error('socket hang up');
+    return r ?? { ok: false, send_id: null, status: 500 };
+  };
+  const send = makeOpsCopySender({
+    phoneNumberId: '222',
+    to: '553196039118',
+    sendTemplate: async (pnid: string, to: string, t: CloudTemplateMessage) => {
+      calls.push({ kind: 'template', pnid, to, arg: t });
+      return run(script.template);
+    },
+    sendText: async (pnid: string, to: string, text: string) => {
+      calls.push({ kind: 'text', pnid, to, arg: text });
+      return run(script.text);
+    },
+  });
+  return { send, calls };
+}
+
+test('cópia sai pelo template de OPERAÇÃO, nunca pelo de queda', async () => {
+  const { send, calls } = wireOps({ template: OK('c1') });
+  const r = await send(COPY.titulo, COPY.detalhe);
+  assert.deepEqual(r, { ok: true, sendId: 'c1', via: 'template' });
+  assert.deepEqual(calls[0].arg, {
+    name: OPS_ALERT_TEMPLATE.name,
+    language: OPS_ALERT_TEMPLATE.language,
+    bodyParams: [COPY.titulo, COPY.detalhe],
+  });
+  // O template de queda manda "escaneie o QR com este celular" — falso pra quem só acompanha.
+  assert.notEqual(OPS_ALERT_TEMPLATE.name, 'conexao_whatsapp_caiu_v2');
+});
+
+test('cópia vai pro número do operador, e pelo MESMO remetente Cloud do aviso principal', async () => {
+  const { send, calls } = wireOps({ template: OK('c1') });
+  await send(COPY.titulo, COPY.detalhe);
+  assert.equal(calls[0].pnid, '222');
+  assert.equal(calls[0].to, '553196039118');
+});
+
+test('template recusado cai no texto livre com o MESMO corpo renderizado', async () => {
+  const { send, calls } = wireOps({ template: HTTP(400), text: OK('c2') });
+  const r = await send(COPY.titulo, COPY.detalhe);
+  assert.deepEqual(r, { ok: true, sendId: 'c2', via: 'text' });
+  assert.deepEqual(calls.map((c) => c.kind), ['template', 'text']);
+  assert.equal(calls[1].arg, renderOpsAlertText(COPY));
+});
+
+test('as duas vias falhando devolvem via null, sem exceção — a cópia nunca derruba o aviso', async () => {
+  const { send } = wireOps({ template: 'throw', text: 'throw' });
+  const r = await send(COPY.titulo, COPY.detalhe);
+  assert.equal(r.ok, false);
+  assert.equal(r.via, null);
+  assert.equal((r as { networkError?: boolean }).networkError, true);
 });

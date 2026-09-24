@@ -12,6 +12,10 @@
  * travado no telefone continuam sendo os do alvo, que NÃO recebe nada.
  * `--dry-run` avalia a saúde (grava o episódio, como o vigia faria) e mostra o
  * texto, sem emitir link nem enviar.
+ *
+ * A CÓPIA ao operador sai junto (quando OPS_NOTIFY_TO está configurado), pelo
+ * mesmo caminho do vigia: sem isto o smoke não exercitaria o único pedaço do
+ * aviso que ninguém consegue verificar sem esperar uma queda de verdade.
  */
 import { pool } from '../db.js';
 import { config } from '../config.js';
@@ -19,6 +23,8 @@ import { getNumberByInstance, normalizePhone } from '../whatsapp/numbers.js';
 import { ensureReconnectLink } from '../whatsapp/provision-links.js';
 import { reconnectUrl } from '../whatsapp/down-notify.js';
 import { renderConnectionDownText } from '../webhook-cloud/templates.js';
+import { opsCopyFor, sameWhatsappNumber } from '../whatsapp/down-notify-ops-copy.js';
+import { makeOpsCopySender } from '../whatsapp/down-notify-sender.js';
 import { buildDownNotifyDeps, buildSystemProbe, buildSystemWatchOpts } from '../whatsapp/down-notify-start.js';
 import { assessSystemTargets } from '../whatsapp/down-notify-service.js';
 import { resolveWorkspaceNames } from '../bloquim/workspace-names.js';
@@ -90,9 +96,28 @@ async function main() {
   console.log(`template  : ${config.CONNECTION_NOTIFY_TEMPLATE_NAME ?? '(nenhum — só texto livre, janela de 24h)'}`);
   console.log(`destino   : ${to ? `${to} (TESTE — o alvo NÃO recebe)` : target.phone}`);
 
+  const copia = opsCopyFor({
+    name: target.name,
+    phone: target.phone,
+    downSince: target.downSince,
+    // O CLI não consome a cadência do episódio, então não há contagem real a
+    // exibir: 1 é o que o primeiro aviso mostraria.
+    notifyNumber: 1,
+    maxNotifies: built.deps.cadence.maxNotifies,
+  });
+  const copiaPara =
+    config.OPS_NOTIFY_TO && !sameWhatsappNumber(config.OPS_NOTIFY_TO, target.phone)
+      ? config.OPS_NOTIFY_TO
+      : null;
+  console.log(
+    `cópia     : ${copiaPara ?? (config.OPS_NOTIFY_TO ? 'dispensada (o alvo já é o operador)' : 'off (sem OPS_NOTIFY_TO)')}`,
+  );
+
   if (dryRun) {
     console.log('--- texto (dry-run, sem link emitido) ---');
     console.log(renderConnectionDownText({ ...target, token: '<token>' }));
+    console.log('--- cópia ao operador (dry-run) ---');
+    console.log(`${copia.titulo}\n${copia.detalhe}`);
     await pool.end();
     return;
   }
@@ -113,6 +138,22 @@ async function main() {
     phone: target.phone, to, name: target.name, downSince: target.downSince, token: link.row.token, link: url,
   });
   console.log(`resultado : ${JSON.stringify(r)}`);
+
+  // Igual ao vigia: a cópia sai DEPOIS e só quando o principal saiu, em
+  // try/catch próprio, e NÃO entra no código de saída — falha dela não pode
+  // fazer um smoke bem-sucedido parecer quebrado.
+  if (r.ok && copiaPara) {
+    try {
+      const c = await makeOpsCopySender({ phoneNumberId: built.phoneNumberId, to: copiaPara })(
+        copia.titulo,
+        copia.detalhe,
+      );
+      console.log(`cópia     : ${JSON.stringify(c)}`);
+    } catch (err) {
+      console.log(`cópia     : falhou — ${(err as Error).message}`);
+    }
+  }
+
   await pool.end();
   process.exit(r.ok ? 0 : 1);
 }

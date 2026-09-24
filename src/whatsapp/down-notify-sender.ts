@@ -4,7 +4,13 @@ import {
   type CloudSendResult,
   type CloudTemplateMessage,
 } from '../webhook-cloud/send.js';
-import { connectionDownTemplateParams, renderConnectionDownText } from '../webhook-cloud/templates.js';
+import {
+  OPS_ALERT_TEMPLATE,
+  connectionDownTemplateParams,
+  opsAlertTemplateParams,
+  renderConnectionDownText,
+  renderOpsAlertText,
+} from '../webhook-cloud/templates.js';
 import { isRetryableSendFailure, type SendOutcome } from './down-notify.js';
 
 export type DownNotifyTarget = {
@@ -76,4 +82,47 @@ async function attempt(fn: () => Promise<CloudSendResult>): Promise<SendOutcome>
   } catch (err) {
     return { ok: false, networkError: true, detail: (err as Error).message };
   }
+}
+
+/** Manda `{titulo, detalhe}` pelo template de OPERAÇÃO. `via: null` = não saiu. */
+export type OpsCopySender = (titulo: string, detalhe: string) => Promise<DownSendResult>;
+
+/**
+ * Remetente da CÓPIA do aviso de queda para o operador.
+ *
+ * Mesmo número Cloud e mesma estratégia do aviso principal (template primeiro,
+ * texto livre depois — só o template chega fora da janela de 24h), mas com o
+ * template de OPERAÇÃO: `conexao_whatsapp_caiu_v2` manda "escaneie o QR com
+ * este celular", instrução falsa para quem só está acompanhando.
+ *
+ * Não reusa a rota /ops-notify de propósito: aquela é a porta de ENTRADA de
+ * outro processo (o painel) e exige o segredo no header. Chamar a si mesmo por
+ * HTTP para enviar o que este processo já sabe enviar acrescentaria um ponto de
+ * falha sem nada em troca. O template e o corpo, que é o que precisa ficar igual,
+ * são compartilhados por `webhook-cloud/templates.ts`.
+ */
+export function makeOpsCopySender(opts: {
+  phoneNumberId: string;
+  to: string;
+  sendTemplate?: (pnid: string, to: string, t: CloudTemplateMessage) => Promise<CloudSendResult>;
+  sendText?: (pnid: string, to: string, text: string) => Promise<CloudSendResult>;
+}): OpsCopySender {
+  const sendTemplate = opts.sendTemplate ?? sendCloudTemplate;
+  const sendText = opts.sendText ?? sendCloudText;
+
+  return async (titulo, detalhe) => {
+    const input = { titulo, detalhe };
+    const viaTemplate = await attempt(() =>
+      sendTemplate(opts.phoneNumberId, opts.to, {
+        name: OPS_ALERT_TEMPLATE.name,
+        language: OPS_ALERT_TEMPLATE.language,
+        ...opsAlertTemplateParams(input),
+      }),
+    );
+    if (viaTemplate.ok) return { ...viaTemplate, via: 'template' };
+
+    const viaText = await attempt(() => sendText(opts.phoneNumberId, opts.to, renderOpsAlertText(input)));
+    if (viaText.ok) return { ...viaText, via: 'text' };
+    return { ...viaText, via: null };
+  };
 }
