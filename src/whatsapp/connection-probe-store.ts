@@ -147,6 +147,16 @@ export async function markProbeSent(
 }
 
 /**
+ * Grava o `wamid` do espelho ao operador, DEPOIS de `markProbeSent` já ter gravado
+ * o do alvo. Separado de propósito: o `delivered` do alvo chega em ~1s (medido:
+ * enviado 7s, entregue 8s) e `recordCloudStatuses` casa por `wamid` — se o do alvo
+ * só fosse gravado depois do envio do espelho, esse status se perderia.
+ */
+export async function markProbeMirrorSent(pool: Pool, id: number, mirrorWamid: string): Promise<void> {
+  await pool.query(`UPDATE connection_probes SET mirror_wamid = $2 WHERE id = $1`, [id, mirrorWamid]);
+}
+
+/**
  * Recebimento (inbound) da mensagem de teste. Casa por `(instance, code)`
  * nos últimos 7 dias, preferindo a sonda ABERTA (`verdict IS NULL`) quando o
  * código se repete dentro da janela — o código é único por instância nos
@@ -265,6 +275,16 @@ export async function setVerdict(
 }
 
 /**
+ * Veredito EFETIVO para o histórico: sonda recebida é `alive`, qualquer que seja o
+ * veredito gravado. O recebimento TARDIO (depois de um `down`/`inconclusive`) fecha
+ * o episódio mas não reescreve `verdict`; sem isto o cooldown de `decideTrigger`
+ * leria `down`, não bloquearia e uma sonda nova sairia no tick seguinte — até 3
+ * pares/dia com episódio e aviso novos. O instante é o do evento mais recente.
+ */
+const EFFECTIVE_VERDICT = `(CASE WHEN received_at IS NOT NULL THEN 'alive' ELSE verdict END)`;
+const EFFECTIVE_AT = `GREATEST(verdict_at, received_at)`;
+
+/**
  * Histórico usado por `decideTrigger` (connection-probe.ts, puro) para
  * decidir se sonda de novo. `lastVerdict` EXCLUI `repeated`: é estado
  * intermediário da 1ª sonda de um par — quem carrega o desfecho real é a
@@ -278,10 +298,10 @@ export async function probeHistory(pool: Pool, instance: string): Promise<ProbeH
       instance,
     ]),
     pool.query(
-      `SELECT verdict, EXTRACT(EPOCH FROM (NOW() - verdict_at)) * 1000 AS age_ms
+      `SELECT ${EFFECTIVE_VERDICT} AS verdict, EXTRACT(EPOCH FROM (NOW() - ${EFFECTIVE_AT})) * 1000 AS age_ms
          FROM connection_probes
-        WHERE instance = $1 AND verdict IS NOT NULL AND verdict <> 'repeated'
-        ORDER BY verdict_at DESC, id DESC
+        WHERE instance = $1 AND verdict IS NOT NULL AND ${EFFECTIVE_VERDICT} <> 'repeated'
+        ORDER BY ${EFFECTIVE_AT} DESC, id DESC
         LIMIT 1`,
       [instance],
     ),
@@ -299,9 +319,9 @@ export async function probeHistory(pool: Pool, instance: string): Promise<ProbeH
       [instance],
     ),
     pool.query(
-      `SELECT verdict FROM connection_probes
-        WHERE instance = $1 AND verdict IS NOT NULL AND verdict <> 'repeated'
-        ORDER BY verdict_at DESC, id DESC
+      `SELECT ${EFFECTIVE_VERDICT} AS verdict FROM connection_probes
+        WHERE instance = $1 AND verdict IS NOT NULL AND ${EFFECTIVE_VERDICT} <> 'repeated'
+        ORDER BY ${EFFECTIVE_AT} DESC, id DESC
         LIMIT 50`,
       [instance],
     ),

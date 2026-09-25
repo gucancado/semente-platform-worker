@@ -587,3 +587,26 @@ test('reconciliação: estado open com status disconnected → updateNumberStatu
   await runProbeTick(h.deps, await listProbeTargets(pool, []));
   assert.deepEqual(h.calls.updateNumberStatus, [{ i: 'i-voltou', s: 'connected' }]);
 });
+
+test('status delivered que chega DURANTE o envio do espelho cai na sonda (wamid gravado antes do espelho)', async () => {
+  const { w, targets } = await zombieWorld();
+  const h = harness(w);
+  const orig = h.deps.sendProbe;
+  let applied = -1;
+  h.deps.sendProbe = async (to, titulo, detalhe) => {
+    if (to === MIRROR) {
+      // Medido: enviado em 7s, entregue em 8s — o status do alvo bate antes do espelho voltar.
+      const [row] = await probes();
+      applied = row?.wamid ? await delivered(row.wamid) : 0;
+    }
+    return orig(to, titulo, detalhe);
+  };
+  const t = await runProbeTick(h.deps, targets);
+  assert.equal(t.sent, 1);
+  assert.equal(applied, 1, 'o wamid do alvo já deveria estar gravado quando o espelho sai');
+  const [row] = await probes();
+  assert.equal(row.cloud_status, 'delivered');
+  assert.ok(row.wamid);
+  assert.ok(row.mirror_wamid);
+  assert.notEqual(row.mirror_wamid, row.wamid);
+});

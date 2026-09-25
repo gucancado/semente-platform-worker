@@ -16,6 +16,7 @@ import { registerProvisionRoutes } from '../../src/whatsapp/provision-routes.js'
 import type { EvolutionDeps } from '../../src/evolution/client.js';
 import { createReconnectLink, getProvisionLink, generateLinkToken } from '../../src/whatsapp/provision-links.js';
 import { updateNumberStatus } from '../../src/whatsapp/numbers.js';
+import { openSystemProbeEpisode, recordSystemHealth, markSystemProbeEpisodeStateDriven } from '../../src/whatsapp/down-notify-store.js';
 
 function buildApp(opts: { state?: 'open' | 'close'; logoutFails?: boolean; logoutStatus?: number; webhookFails?: boolean } = {}) {
   const state = opts.state ?? 'open';
@@ -277,4 +278,56 @@ test('GET com falha de BANCO ao consultar episódio de sonda → 500 internal_er
 
   assert.equal(res.statusCode, 500);
   assert.equal(res.json().error, 'internal_error');
+});
+
+// ── Instância de SISTEMA (sem row em whatsapp_numbers) reconectada pelo link ──
+//
+// updateNumberStatus é no-op para ela, e a saúde de sistema só sai de
+// down_source='probe' quando o vigia OBSERVA `close` — janela de segundos entre o
+// logout e o QR escaneado. Sem a marcação síncrona, o tick `open` seguinte daria
+// 'keep' até haver tráfego real: re-aviso falso 12h depois e marcador preso no Grupo.
+test('POST zumbi em instância de SISTEMA: episódio probe passa a state e o tick open seguinte o fecha', async () => {
+  await pool.query(`DELETE FROM system_instance_health WHERE instance = 'saturno'`);
+  const target = { instance: 'saturno', expectedPhone: '+553195950748', label: 'Saturno' };
+  const { rows: now } = await pool.query(`SELECT NOW() - interval '5 minutes' AS t`);
+  await openSystemProbeEpisode(pool, target, null, now[0].t, 'quiet');
+
+  const { app } = buildApp({ state: 'open' });
+  const token = await mkReconnect();
+
+  const res = await app.inject({ method: 'POST', url: `/admin/whatsapp/link/${token}/reconnect`, headers: H });
+  assert.equal(res.statusCode, 200);
+
+  const { rows: h1 } = await pool.query(`SELECT down_source, down_since FROM system_instance_health WHERE instance='saturno'`);
+  assert.equal(h1[0].down_source, 'state');
+  assert.ok(h1[0].down_since != null);
+
+  // QR escaneado: o vigia lê `open` com store saudável.
+  await recordSystemHealth(pool, target, { down: false, reason: null, state: 'open', ownStoreTs: null, peerStoreTs: null });
+
+  const { rows: h2 } = await pool.query(`SELECT down_since, down_source FROM system_instance_health WHERE instance='saturno'`);
+  assert.equal(h2[0].down_since, null);
+  const { rows: o } = await pool.query(
+    `SELECT ended_at FROM instance_outages WHERE instance='saturno' AND started_at_source='probe'`,
+  );
+  assert.equal(o.length, 1);
+  assert.ok(o[0].ended_at != null, 'o outage probe deveria estar fechado');
+  await pool.query(`DELETE FROM system_instance_health WHERE instance = 'saturno'`);
+});
+
+test('marca state só troca episódio probe: episódio de estado e instância saudável ficam intactos', async () => {
+  await pool.query(`DELETE FROM system_instance_health WHERE instance IN ('sys-a','sys-b')`);
+  await pool.query(
+    `INSERT INTO system_instance_health (instance, expected_phone, label, checked_at, down_since, down_source, down_notify_count, updated_at)
+     VALUES ('sys-a', '+5511', 'A', NOW(), NOW() - interval '1 hour', 'state', 0, NOW()),
+            ('sys-b', '+5512', 'B', NOW(), NULL, NULL, 0, NOW())`,
+  );
+  await markSystemProbeEpisodeStateDriven(pool, 'sys-a');
+  await markSystemProbeEpisodeStateDriven(pool, 'sys-b');
+  await markSystemProbeEpisodeStateDriven(pool, 'nao-existe');
+  const { rows } = await pool.query(
+    `SELECT instance, down_source, down_since IS NOT NULL AS down FROM system_instance_health WHERE instance IN ('sys-a','sys-b') ORDER BY instance`,
+  );
+  assert.deepEqual(rows.map((r) => [r.instance, r.down_source, r.down]), [['sys-a', 'state', true], ['sys-b', null, false]]);
+  await pool.query(`DELETE FROM system_instance_health WHERE instance IN ('sys-a','sys-b')`);
 });

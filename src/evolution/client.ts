@@ -367,7 +367,10 @@ export async function archiveChat(deps: EvolutionDeps, instance: string, key: Me
 
 export async function fetchInstanceOwner(deps: EvolutionDeps, instance: string): Promise<string | null> {
   const r = await evo(deps, 'GET', `/instance/fetchInstances?instanceName=${encodeURIComponent(instance)}`);
-  const row = Array.isArray(r) ? r[0] : r;
+  // O filtro `instanceName` da Evolution não é garantia: escolhe a linha DA instância
+  // pedida. Sem ela, null — sondar o dono de outra instância seria pior que não sondar.
+  const rows: any[] = Array.isArray(r) ? r : r ? [r] : [];
+  const row = rows.find((x) => x && (x.name === instance || x.instance?.instanceName === instance || x.instanceName === instance));
   const jid = row?.ownerJid ?? row?.instance?.owner ?? null;
   if (typeof jid !== 'string') return null;
   const d = (jid.split('@')[0] ?? '').split(':')[0]?.replace(/\D+/g, '') ?? '';

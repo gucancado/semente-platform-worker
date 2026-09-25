@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  OWN_TEMPLATE_IDS, extractProbeCode, isFromOwnCloudRecord, ownCloudText, parseOwnPhones,
+  OWN_TEMPLATE_IDS, extractProbeCode, isFromOwnCloudRecord, ownCloudMatch, ownCloudText, parseOwnPhones,
 } from '../../src/whatsapp/own-cloud.js';
 import { renderConnectionDownText } from '../../src/webhook-cloud/templates.js';
 
@@ -80,4 +80,27 @@ test('grupo, fromMe e terceiro NÃO são nossos', () => {
   assert.equal(isFromOwnCloudRecord(grp, OWN), false);
   assert.equal(isFromOwnCloudRecord(mine, OWN), false);
   assert.equal(isFromOwnCloudRecord(other, OWN), false);
+});
+
+test('ownCloudMatch diz QUAL regra casou, na ordem telefone → template → aviso → marcador', () => {
+  const lid = { remoteJid: '216578842964141@lid', fromMe: false };
+  const byPhone = { key: { remoteJid: '216578842964141@lid', remoteJidAlt: '553190858510@s.whatsapp.net', fromMe: false }, message: probeMsg() };
+  assert.equal(ownCloudMatch(byPhone, OWN), 'phone');
+  assert.equal(ownCloudMatch({ key: lid, message: probeMsg('1620869592995276', 'qualquer') }, OWN), 'template');
+  const noticeText = renderConnectionDownText({
+    name: 'Monitor de grupos', phone: '+553195950748',
+    downSince: new Date('2026-09-19T12:03:00-03:00'), token: 'o4MEzz_exemploDeToken',
+  });
+  assert.equal(ownCloudMatch({ key: lid, message: { conversation: noticeText } }, OWN), 'down_notice');
+  assert.equal(ownCloudMatch({ key: lid, message: probeMsg('999') }, OWN), 'probe_marker');
+});
+
+test('ownCloudMatch devolve null para grupo, fromMe e terceiro (e isFromOwnCloudRecord concorda)', () => {
+  const grp = { key: { remoteJid: '1203@g.us', fromMe: false }, message: probeMsg() };
+  const mine = { key: { remoteJid: '553190858510@s.whatsapp.net', fromMe: true }, message: { conversation: 'x' } };
+  const other = { key: { remoteJid: '553199999999@s.whatsapp.net', fromMe: false }, message: { conversation: 'oi' } };
+  for (const r of [grp, mine, other, null]) {
+    assert.equal(ownCloudMatch(r, OWN), null);
+    assert.equal(isFromOwnCloudRecord(r, OWN), false);
+  }
 });

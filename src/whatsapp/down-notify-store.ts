@@ -339,6 +339,39 @@ export async function openSystemProbeEpisode(
   }
 }
 
+/**
+ * O humano derrubou pelo link de reconexão a sessão zumbi de uma instância de
+ * SISTEMA (sem row em `whatsapp_numbers`, então `updateNumberStatus` é no-op): o
+ * episódio aberto pela sonda passa a `down_source='state'`. Sem isto, a saúde só
+ * sairia de `probe` se o vigia OBSERVASSE `close` — janela de segundos entre o
+ * logout e o QR escaneado —, e o tick `open` seguinte daria 'keep' (`planEpisode`)
+ * até haver tráfego real: re-aviso falso 12h depois e o marcador do Grupo preso.
+ * Com a fonte `state`, a volta a `open` fecha pela regra de sempre ('close'), que
+ * encerra o `instance_outages` aberto qualquer que seja a fonte dele.
+ *
+ * Mesmo lock por instância de `recordSystemHealth`/`openSystemProbeEpisode`.
+ * Só troca episódio de sonda aberto; qualquer outro estado fica intacto.
+ */
+export async function markSystemProbeEpisodeStateDriven(pool: Pool, instance: string): Promise<boolean> {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [instance]);
+    const { rowCount } = await client.query(
+      `UPDATE system_instance_health SET down_source = 'state', updated_at = NOW()
+        WHERE instance = $1 AND down_source = 'probe' AND down_since IS NOT NULL`,
+      [instance],
+    );
+    await client.query('COMMIT');
+    return rowCount === 1;
+  } catch (e) {
+    await client.query('ROLLBACK');
+    throw e;
+  } finally {
+    client.release();
+  }
+}
+
 export async function claimSystemNotification(pool: Pool, instance: string, prev: NotifyVersion): Promise<boolean> {
   const { rowCount } = await pool.query(
     `UPDATE system_instance_health

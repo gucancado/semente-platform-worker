@@ -11,6 +11,7 @@ import { backfillNumber } from './backfill.js';
 import { setGroupExposure } from './thread-meta.js';
 import { tenantContext } from './tenant-context.js';
 import { openProbeEpisodeOf } from './connection-probe-store.js';
+import { markSystemProbeEpisodeStateDriven } from './down-notify-store.js';
 
 const PROVISION_TTL_SECONDS = 90;
 const LINK_MAX_CLICKS = 10;
@@ -284,9 +285,13 @@ export function registerProvisionRoutes(app: FastifyInstance, deps: { pool: Pool
         // updateNumberStatus só fecha um episódio quando old_status ≠ 'connected': a
         // reconexão real chegaria com old_status='connected' de novo e o episódio
         // probe (aberto acima) NUNCA fecharia. Marcar aqui, síncrono com o logout que
-        // o humano acabou de pedir, fecha essa janela. No-op para instância de sistema
-        // sem row em whatsapp_numbers (updateNumberStatus não acha o que atualizar).
-        await updateNumberStatus(deps.pool, link.targetInstance, { status: 'disconnected' });
+        // o humano acabou de pedir, fecha essa janela.
+        const transition = await updateNumberStatus(deps.pool, link.targetInstance, { status: 'disconnected' });
+        // Instância de SISTEMA (sem row em whatsapp_numbers — updateNumberStatus devolve
+        // null): o episódio da sonda passa a ser guiado pelo ESTADO. Senão a saúde só
+        // sairia de 'probe' se o vigia observasse o `close` (segundos entre o logout e
+        // o QR escaneado) e o `open` seguinte o manteria aberto até haver tráfego real.
+        if (transition == null) await markSystemProbeEpisodeStateDriven(deps.pool, link.targetInstance);
         req.log.warn({ instance: link.targetInstance }, 'reconnect-link: sessão zumbi derrubada (logout iniciado pelo humano ao abrir o link)');
       } else {
         await markLinkConsumed(deps.pool, token, null);

@@ -10,6 +10,7 @@ import {
   setVerdict,
   probeHistory,
   takenCodes,
+  markProbeMirrorSent,
 } from '../../src/whatsapp/connection-probe-store.js';
 import type { MessageKey } from '../../src/evolution/client.js';
 
@@ -321,4 +322,36 @@ test('probeHistory: hasOpen é true enquanto houver sonda sem veredito', async (
   const h = await probeHistory(pool, instance);
   assert.equal(h.hasOpen, true);
   assert.equal(h.lastVerdict, null);
+});
+
+test('probeHistory: recebimento TARDIO de sonda com veredito negativo conta como alive (cooldown) e quebra a sequência', async () => {
+  const instance = 'inst-late';
+  const p1 = await createProbe(pool, base(instance, 'AAAA'));
+  await setVerdict(pool, p1!.id, 'down');
+  const p2 = await createProbe(pool, base(instance, 'BBBB'));
+  await setVerdict(pool, p2!.id, 'inconclusive');
+  let h = await probeHistory(pool, instance);
+  assert.equal(h.lastVerdict!.verdict, 'inconclusive');
+  assert.equal(h.consecutiveInconclusive, 1);
+
+  // A 1ª chega depois do veredito da 2ª: ela é o evento mais recente, e prova sessão viva.
+  await recordProbeReceipt(pool, instance, 'AAAA', key('late-1'));
+  h = await probeHistory(pool, instance);
+  assert.equal(h.lastVerdict!.verdict, 'alive');
+  assert.ok(h.lastVerdict!.ageMs < 60_000);
+  assert.equal(h.consecutiveInconclusive, 0);
+});
+
+test('markProbeMirrorSent grava só o mirror_wamid: status já recebido no wamid do alvo é preservado', async () => {
+  const p = await createProbe(pool, base('inst-mir', 'AAAA'));
+  await markProbeSent(pool, p!.id, { wamid: 'wamid.alvo', mirrorWamid: null, sendError: null });
+  assert.equal(await recordCloudStatuses(pool, [{ id: 'wamid.alvo', status: 'delivered', errors: [] }]), 1);
+  await markProbeMirrorSent(pool, p!.id, 'wamid.espelho');
+  const { rows } = await pool.query(
+    `SELECT wamid, mirror_wamid, cloud_status, sent_at, verdict FROM connection_probes WHERE id = $1`, [p!.id]);
+  assert.equal(rows[0].wamid, 'wamid.alvo');
+  assert.equal(rows[0].mirror_wamid, 'wamid.espelho');
+  assert.equal(rows[0].cloud_status, 'delivered');
+  assert.ok(rows[0].sent_at);
+  assert.equal(rows[0].verdict, null);
 });

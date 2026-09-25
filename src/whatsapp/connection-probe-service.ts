@@ -20,6 +20,7 @@ import {
   createProbe,
   listOpenProbes,
   markProbeSent,
+  markProbeMirrorSent,
   openNumberProbeEpisode,
   openProbeEpisodeOf,
   probeHistory,
@@ -228,26 +229,28 @@ async function createAndSend(
     res = { ok: false, wamid: null, detail: errMsg(err) };
   }
 
-  let mirrorWamid: string | null = null;
-  if (res.ok && deps.mirrorTo && !sameWhatsappNumber(deps.mirrorTo, t.phone)) {
-    try {
-      const m = await deps.sendProbe(deps.mirrorTo, titulo, detalhe);
-      mirrorWamid = m.wamid;
-      if (!m.ok) deps.log.warn({ instance: t.instance, detail: m.detail }, 'sonda: espelho ao operador falhou');
-    } catch (err) {
-      deps.log.warn({ instance: t.instance, err: errMsg(err) }, 'sonda: espelho ao operador falhou');
-    }
-  }
-
+  // O wamid do alvo é gravado ANTES de enviar o espelho: o `delivered` dele chega em
+  // ~1s (medido: enviado 7s, entregue 8s) e `recordCloudStatuses` casa por wamid —
+  // gravado só depois do espelho, o status se perderia.
   await markProbeSent(deps.pool, row.id, {
     wamid: res.wamid,
-    mirrorWamid,
+    mirrorWamid: null,
     sendError: res.ok ? null : (res.detail ?? 'envio falhou'),
   });
   if (!res.ok) {
     deps.log.warn({ instance: t.instance, detail: res.detail }, 'sonda: envio falhou');
     await safeOps(deps, 'Sonda de conexão não enviada', `Envio da sonda ${code} para ${who(t)} falhou.`);
     return false;
+  }
+
+  if (deps.mirrorTo && !sameWhatsappNumber(deps.mirrorTo, t.phone)) {
+    try {
+      const m = await deps.sendProbe(deps.mirrorTo, titulo, detalhe);
+      if (m.wamid) await markProbeMirrorSent(deps.pool, row.id, m.wamid);
+      if (!m.ok) deps.log.warn({ instance: t.instance, detail: m.detail }, 'sonda: espelho ao operador falhou');
+    } catch (err) {
+      deps.log.warn({ instance: t.instance, err: errMsg(err) }, 'sonda: espelho ao operador falhou');
+    }
   }
   deps.log.info({ instance: t.instance, code, trigger, parentId }, 'sonda: enviada');
   return true;

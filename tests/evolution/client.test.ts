@@ -222,7 +222,7 @@ test('archiveChat faz POST /chat/archiveChat/i1 com {lastMessage:{key}, chat:key
 });
 
 test('fetchInstanceOwner extrai dígitos do ownerJid', async () => {
-  const deps = { baseUrl: 'https://evo', apiKey: 'k', fetch: mockFetch(() => ({ status: 200, body: [{ ownerJid: '553171070896@s.whatsapp.net' }] })) };
+  const deps = { baseUrl: 'https://evo', apiKey: 'k', fetch: mockFetch(() => ({ status: 200, body: [{ name: 'i1', ownerJid: '553171070896@s.whatsapp.net' }] })) };
   const owner = await fetchInstanceOwner(deps, 'i1');
   assert.equal(owner, '553171070896');
 });
@@ -231,6 +231,27 @@ test('fetchInstanceOwner devolve null se ownerJid não está presente', async ()
   const deps = { baseUrl: 'https://evo', apiKey: 'k', fetch: mockFetch(() => ({ status: 200, body: [{}] })) };
   const owner = await fetchInstanceOwner(deps, 'i1');
   assert.equal(owner, null);
+});
+
+test('fetchInstanceOwner escolhe a linha da instância pedida, não a primeira', async () => {
+  const body = [
+    { name: 'outra', ownerJid: '551100000000@s.whatsapp.net' },
+    { name: 'i1', ownerJid: '553171070896@s.whatsapp.net' },
+  ];
+  const deps = { baseUrl: 'https://evo', apiKey: 'k', fetch: mockFetch(() => ({ status: 200, body })) };
+  assert.equal(await fetchInstanceOwner(deps, 'i1'), '553171070896');
+});
+
+test('fetchInstanceOwner casa também por instance.instanceName e instanceName', async () => {
+  const a = { baseUrl: 'https://evo', apiKey: 'k', fetch: mockFetch(() => ({ status: 200, body: [{ name: 'x', ownerJid: '5511@s.whatsapp.net' }, { instance: { instanceName: 'i1', owner: '5522@s.whatsapp.net' } }] })) };
+  assert.equal(await fetchInstanceOwner(a, 'i1'), '5522');
+  const b = { baseUrl: 'https://evo', apiKey: 'k', fetch: mockFetch(() => ({ status: 200, body: { instanceName: 'i1', ownerJid: '5533@s.whatsapp.net' } })) };
+  assert.equal(await fetchInstanceOwner(b, 'i1'), '5533');
+});
+
+test('fetchInstanceOwner sem linha da instância pedida devolve null (não sonda o dono de outra)', async () => {
+  const deps = { baseUrl: 'https://evo', apiKey: 'k', fetch: mockFetch(() => ({ status: 200, body: [{ name: 'outra', ownerJid: '551100000000@s.whatsapp.net' }] })) };
+  assert.equal(await fetchInstanceOwner(deps, 'i1'), null);
 });
 
 test('findProbeInStore acha o código na 2ª página', async () => {

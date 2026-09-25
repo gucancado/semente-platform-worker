@@ -19,7 +19,7 @@ import { agentsToTrigger, quarantineUnknownInstance } from '../whatsapp/reaction
 import { detectAndTagSource } from '../whatsapp/source-signals.js';
 import { mediaIngestPlan, mediaMessageText } from '../whatsapp/media-policy.js';
 import { insertWhatsappMediaJob } from '../whatsapp/media-jobs.js';
-import { extractProbeCode, isFromOwnCloudRecord, ownCloudText } from '../whatsapp/own-cloud.js';
+import { extractProbeCode, ownCloudMatch, ownCloudText } from '../whatsapp/own-cloud.js';
 
 type ProbeKey = { id: string; remoteJid: string; fromMe: boolean };
 let ownCloudProbeHandler: ((instance: string, code: string, key: ProbeKey) => Promise<void>) | null = null;
@@ -67,7 +67,8 @@ export async function registerWebhookRoutes(app: FastifyInstance) {
     // cópia ou sonda de conexão — nunca é conversa de lead. Sai antes do
     // resolveIngest: sem webhook_logs, messages, gatilho nem IA.
     const rawData = (req.body as any)?.data;
-    if (!msg.isGroup && !msg.fromMe && isFromOwnCloudRecord(rawData, config.WHATSAPP_CLOUD_OWN_PHONES)) {
+    const ownRule = !msg.isGroup && !msg.fromMe ? ownCloudMatch(rawData, config.WHATSAPP_CLOUD_OWN_PHONES) : null;
+    if (ownRule) {
       const code = extractProbeCode(ownCloudText(rawData?.message));
       if (code && ownCloudProbeHandler) {
         try {
@@ -80,7 +81,7 @@ export async function registerWebhookRoutes(app: FastifyInstance) {
           req.log.warn({ instance: msg.instance, err: (err as Error).message }, 'sonda: registrar recebimento falhou');
         }
       }
-      req.log.info({ instance: msg.instance, probe: code != null }, 'webhook: mensagem do nosso número Cloud — fora do CRM');
+      req.log.info({ instance: msg.instance, rule: ownRule, probe: code != null }, 'webhook: mensagem do nosso número Cloud — fora do CRM');
       return { ignored: true, reason: 'own_cloud' };
     }
 

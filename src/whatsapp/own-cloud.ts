@@ -68,15 +68,22 @@ function jidDigits(jid: unknown): string | null {
  * puro numa DM em LID sem `remoteJidAlt` — aí nem o telefone nem o templateId
  * aparecem, e só o CONTEÚDO (link ou frase fixa) prova a origem.
  */
-export function isFromOwnCloudRecord(record: unknown, ownPhones: string[]): boolean {
+export type OwnCloudRule = 'phone' | 'template' | 'down_notice' | 'probe_marker';
+
+/** Qual regra reconheceu o registro como nosso (para o log da porta), ou null. */
+export function ownCloudMatch(record: unknown, ownPhones: string[]): OwnCloudRule | null {
   const r = record as { key?: { remoteJid?: unknown; remoteJidAlt?: unknown; fromMe?: unknown }; message?: unknown } | null;
   const jid = r?.key?.remoteJid;
-  if (typeof jid !== 'string' || jid.endsWith('@g.us')) return false;
-  if (r?.key?.fromMe === true) return false;
+  if (typeof jid !== 'string' || jid.endsWith('@g.us')) return null;
+  if (r?.key?.fromMe === true) return null;
   const sender = jidDigits(r?.key?.remoteJidAlt) ?? jidDigits(jid);
-  if (sender && ownPhones.some((p) => sameWhatsappNumber(p, sender))) return true;
+  if (sender && ownPhones.some((p) => sameWhatsappNumber(p, sender))) return 'phone';
   const tid = templateIdOf(r?.message);
-  if (tid && OWN_TEMPLATE_IDS.includes(tid)) return true;
-  if (isOwnDownNotice(record)) return true;
-  return extractProbeCode(ownCloudText(r?.message)) != null;
+  if (tid && OWN_TEMPLATE_IDS.includes(tid)) return 'template';
+  if (isOwnDownNotice(record)) return 'down_notice';
+  return extractProbeCode(ownCloudText(r?.message)) != null ? 'probe_marker' : null;
+}
+
+export function isFromOwnCloudRecord(record: unknown, ownPhones: string[]): boolean {
+  return ownCloudMatch(record, ownPhones) !== null;
 }
