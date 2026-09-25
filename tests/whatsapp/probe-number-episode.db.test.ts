@@ -102,6 +102,10 @@ test('closeProbeEpisode fecha o episodio probe e zera o aviso; nao fecha episodi
   const closed = await closeProbeEpisode(pool, 'i-fecha');
   assert.equal(closed, true);
 
+  // Fechado o zumbi, o número (status 'connected') sai da lista e não pode mais ser reivindicado.
+  assert.deepEqual(await listDownNumbers(pool), []);
+  assert.equal(await claimNumberNotification(pool, n.id, fresh), false);
+
   const { rows: outageRows } = await pool.query(
     `SELECT ended_at FROM instance_outages WHERE instance = 'i-fecha'`,
   );
@@ -170,4 +174,14 @@ test('numero com episodio webhook aberto segue aparecendo com downSince = starte
   assert.notEqual(numRows[0].disconnected_since.getTime(), earlier.getTime());
 
   assert.equal(await claimNumberNotification(pool, n.id, fresh), true);
+});
+
+test('episodio probe de SISTEMA com o mesmo nome de instancia de um numero conectado nao o torna zumbi', async () => {
+  const n = await seed('i-homonimo', '+5531555');
+  await pool.query(
+    `INSERT INTO instance_outages (instance, kind, number_id, started_at, started_at_source, reason, detected_by)
+     VALUES ('i-homonimo', 'system', NULL, NOW() - INTERVAL '1 hour', 'probe', 'quiet', 'probe')`,
+  );
+  assert.deepEqual(await listDownNumbers(pool), []);
+  assert.equal(await claimNumberNotification(pool, n.id, fresh), false);
 });

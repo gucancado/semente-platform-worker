@@ -373,9 +373,9 @@ export async function openNumberProbeEpisode(
  * `down_notify_count` do número na MESMA instrução (CTE) — atômico com o
  * fechamento, como todo fechamento de episódio de número (spec §7).
  *
- * ⚠️ Task 8 estende aqui o equivalente para `kind='system'` (hoje só número tem
- * contagem de aviso a zerar nesta tabela; o aviso de sistema vive em
- * `system_instance_health`, zerado por outro caminho).
+ * Se for de SISTEMA (`kind='system'`), zera na mesma instrução o episódio e o aviso
+ * em `system_instance_health` (`down_since`, `down_source`, contagem) — senão o
+ * tick seguinte leria o episódio `probe` ainda aberto na saúde e o manteria (`keep`).
  */
 export async function closeProbeEpisode(pool: Pool, instance: string): Promise<boolean> {
   const { rows } = await pool.query(
@@ -383,13 +383,20 @@ export async function closeProbeEpisode(pool: Pool, instance: string): Promise<b
        UPDATE instance_outages
           SET ended_at = GREATEST(NOW(), started_at), updated_at = NOW()
         WHERE instance = $1 AND ended_at IS NULL AND started_at_source = 'probe'
-        RETURNING kind, number_id),
+        RETURNING kind, number_id, instance),
      zeroed AS (
        UPDATE whatsapp_numbers wn
           SET down_notified_at = NULL, down_notify_count = 0
          FROM closed
         WHERE closed.kind = 'number' AND wn.id = closed.number_id
-        RETURNING wn.id)
+        RETURNING wn.id),
+     sys AS (
+       UPDATE system_instance_health h
+          SET down_since = NULL, down_source = NULL, down_notified_at = NULL, down_notify_count = 0,
+              updated_at = NOW()
+         FROM closed
+        WHERE closed.kind = 'system' AND h.instance = closed.instance
+        RETURNING h.instance)
      SELECT count(*)::int AS n FROM closed`,
     [instance],
   );

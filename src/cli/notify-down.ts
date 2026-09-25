@@ -51,6 +51,8 @@ async function resolveTarget(instance: string) {
     // Fora sem `downSince` = SUSPEITA: o episódio só abre no segundo tick consecutivo fora.
     const verdict = !a?.verdict.down
       ? 'saudável'
+      : a.storeStale && !a.row.downSince
+        ? 'store atrasado — só gatilho de sonda, não abre episódio'
       : a.row.downSince
         ? `fora — ${a.verdict.reason}`
         : `suspeita — ${a.verdict.reason} (só vira episódio se outra observação confirmar; esta rodada conta como uma)`;

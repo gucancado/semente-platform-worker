@@ -5,6 +5,7 @@ import {
   fmtBrtShort,
   isOwnDownNotice,
   isRetryableSendFailure,
+  nextDownSource,
   observedDownSince,
   planEpisode,
   shouldNotify,
@@ -348,4 +349,35 @@ test('[defeito 3] leitura saudável desfaz a suspeita em QUALQUER idade; episód
   const since = brt('2026-09-09T15:10:00');
   assert.equal(planEpisode({ downSince: since, sawDown: true, ageMs: 500 }, true, TICK), 'keep');
   assert.equal(planEpisode({ downSince: since, sawDown: true, ageMs: 9 * 3_600_000 }, true, TICK), 'keep');
+});
+
+// ── Sonda de conexão (spec 2026-09-25 §7 "Saturno"): episódio aberto PELA SONDA ──
+
+test('[sonda] episódio de fonte probe: leitura saudável MANTÉM (o estado open é justamente o que mente no zumbi)', () => {
+  const since = brt('2026-09-25T10:00:00');
+  const probe = { downSince: since, sawDown: true, ageMs: 0, downSource: 'probe' as const };
+  assert.equal(planEpisode(probe, false, TICK), 'keep');
+  assert.equal(planEpisode(probe, true, TICK), 'keep'); // estado caiu de vez: continua fora
+  // fonte 'state' segue a regra de sempre
+  assert.equal(planEpisode({ ...probe, downSource: 'state' }, false, TICK), 'close');
+  assert.equal(planEpisode({ ...probe, downSource: null }, false, TICK), 'close');
+});
+
+test('[sonda] episódio probe fecha por TRÁFEGO real depois do início — só com a leitura saudável', () => {
+  const since = brt('2026-09-25T10:00:00');
+  const probe = { downSince: since, sawDown: false, ageMs: 0, downSource: 'probe' as const, trafficAfterDown: true };
+  assert.equal(planEpisode(probe, false, TICK), 'close');
+  assert.equal(planEpisode(probe, true, TICK), 'keep'); // estado fora: tráfego velho não cura
+  assert.equal(planEpisode({ ...probe, trafficAfterDown: false }, false, TICK), 'keep');
+});
+
+test('[sonda] nextDownSource: abrir pelo estado grava state; episódio probe vira state só quando a Evolution admite close', () => {
+  assert.equal(nextDownSource('open', null, 'connecting'), 'state');
+  assert.equal(nextDownSource('keep', 'state', 'close'), 'state');
+  assert.equal(nextDownSource('keep', 'probe', 'open'), 'probe');
+  // `connecting` pode ser o flap diário de 1s — não entrega o zumbi à máquina de estado
+  assert.equal(nextDownSource('keep', 'probe', 'connecting'), 'probe');
+  // logout/queda admitida: a partir daqui a volta do estado (open) fecha o episódio
+  assert.equal(nextDownSource('keep', 'probe', 'close'), 'state');
+  for (const p of ['close', 'healthy', 'suspect'] as const) assert.equal(nextDownSource(p, 'probe', 'close'), null);
 });

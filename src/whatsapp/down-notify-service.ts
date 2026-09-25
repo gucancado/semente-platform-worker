@@ -228,6 +228,12 @@ export type SystemAssessment = {
   ownStoreTs: Date | null;
   peerStoreTs: Date | null;
   row: SystemHealthRow;
+  /**
+   * O store ficou para trás do par com a Evolution dizendo `open`. Desde a sonda de
+   * conexão isso NÃO abre episódio (nem conta como suspeita): é só o gatilho para a
+   * sonda confirmar (spec 2026-09-25 §7).
+   */
+  storeStale: boolean;
 };
 
 /**
@@ -304,23 +310,34 @@ export async function assessSystemTargets(
       // Alvo de horário comercial (o padrão): o atraso do store só conta em expediente.
       elapsedMs: t.traffic === 'always' ? undefined : (from, to) => businessMsBetween(from, to, deps.offDates),
     });
-    const since = verdict.down ? observedDownSince({ ownStoreTs, peerStoreTs }) : null;
+    // Só o ESTADO abre episódio pela máquina do tick. `store_stale` grava como
+    // saudável (`last_reason` NULL): se contasse como suspeita, o flap diário de 1s
+    // (`connecting` num tick, `open`+store atrasado no seguinte) confirmaria direto
+    // — a regressão do 21/09. A confirmação dele é da sonda (openSystemProbeEpisode).
+    const stateDown = verdict.down && verdict.reason === 'state';
+    const storeStale = verdict.down && verdict.reason === 'store_stale';
+    const since = stateDown ? observedDownSince({ ownStoreTs, peerStoreTs }) : null;
     const row = await recordSystemHealth(
       deps.pool,
       t,
-      { ...verdict, state, ownStoreTs, peerStoreTs },
+      { down: stateDown, reason: stateDown ? 'state' : null, state, ownStoreTs, peerStoreTs },
       since,
       deps.intervalMs,
     );
-    if (verdict.down) {
+    if (storeStale && !row.downSince) {
       deps.log.info(
-        { instance: t.instance, reason: verdict.reason, state, ownStoreTs, peerStoreTs, downSince: row.downSince },
+        { instance: t.instance, state, ownStoreTs, peerStoreTs },
+        'down-notify: store da instância de sistema atrasado — gatilho de sonda, sem episódio',
+      );
+    } else if (stateDown) {
+      deps.log.info(
+        { instance: t.instance, reason: 'state', state, ownStoreTs, peerStoreTs, downSince: row.downSince },
         row.downSince
           ? 'down-notify: instância de sistema fora do ar'
           : 'down-notify: instância de sistema suspeita — só vira episódio se outra observação confirmar',
       );
     }
-    out.push({ target: t, state, verdict, ownStoreTs, peerStoreTs, row });
+    out.push({ target: t, state, verdict, ownStoreTs, peerStoreTs, row, storeStale });
   }
   return out;
 }

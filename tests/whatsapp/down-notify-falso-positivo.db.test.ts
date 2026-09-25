@@ -10,11 +10,11 @@
 import { test, beforeEach, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { pool } from '../../src/db.js';
-import { runSystemInstanceWatch, type DownNotifyDeps } from '../../src/whatsapp/down-notify-service.js';
+import { assessSystemTargets, runSystemInstanceWatch, type DownNotifyDeps } from '../../src/whatsapp/down-notify-service.js';
 import { makeEvolutionProbe } from '../../src/whatsapp/down-notify-probe.js';
 import { renderConnectionDownText } from '../../src/webhook-cloud/templates.js';
 import type { DownNotifyTarget, DownSendResult } from '../../src/whatsapp/down-notify-sender.js';
-import type { SystemTarget } from '../../src/whatsapp/down-notify-store.js';
+import { openSystemProbeEpisode, type SystemTarget } from '../../src/whatsapp/down-notify-store.js';
 
 const H = 3_600_000;
 const TICK = 5 * 60_000; // intervalo do vigia de sistema em prod
@@ -89,6 +89,7 @@ function world(init: { stores: Record<string, Rec[]>; states?: Record<string, st
     states,
     deliverAt: (d: Date) => { deliverAt = d; },
     tick: () => runSystemInstanceWatch(watch, [target]),
+    assess: async () => (await assessSystemTargets(watch, [target]))[0],
     /** Um intervalo do vigia se passa: recua o `checked_at`, o relógio da suspeita. */
     elapse: () => pool.query(`UPDATE system_instance_health SET checked_at = NOW() - INTERVAL '5 minutes'`),
   };
@@ -116,16 +117,18 @@ test('[defeito 1] madrugada de segunda (21/09 06:24): alvo só-de-grupos mudo de
   assert.equal(await links(), 0);
 });
 
-test('[defeito 1] alvo marcado como tráfego contínuo mantém a regra antiga, pelo relógio de parede', async () => {
+test('[defeito 1] alvo marcado como tráfego contínuo mede pelo relógio de parede — e o store atrasado é só GATILHO de sonda', async () => {
   const w = world({
     stores: { saturno: [groupMsg(brt('2026-09-20T20:06:00'))], 'ws-peer': [leadDm(brt('2026-09-21T06:20:00'))] },
     target: { ...saturno, traffic: 'always' },
   });
-  await w.tick();
+  assert.equal((await w.assess()).storeStale, true);
   await w.elapse();
-  await w.tick();
-  assert.equal((await health()).last_reason, 'store_stale');
-  assert.equal((await outages()).length, 1);
+  assert.equal((await w.assess()).storeStale, true);
+  // Sonda de conexão (spec 2026-09-25 §7): store_stale não abre episódio nem renova a suspeita.
+  assert.equal((await health()).last_reason, null);
+  assert.equal((await outages()).length, 0);
+  assert.equal(w.sent.length, 0);
 });
 
 test('[defeito 2] o aviso entregue ao próprio número NÃO fecha o episódio, NÃO zera a contagem e NÃO data o seguinte', async () => {
@@ -134,9 +137,13 @@ test('[defeito 2] o aviso entregue ao próprio número NÃO fecha o episódio, N
   const w = world({ stores: { saturno: [groupMsg(lastReal)], 'ws-peer': [leadDm(brt('2026-09-15T16:30:00'))] } });
   w.deliverAt(brt('2026-09-15T16:36:00'));
 
-  assert.deepEqual(await w.tick(), []); //                       1º tick: só suspeita
+  assert.deepEqual(await w.tick(), []); //                       1º tick: store atrasado = gatilho de sonda
   await w.elapse();
-  assert.deepEqual((await w.tick()).map((a) => a.outcome), ['sent']); // 2º tick: confirma, abre e avisa
+  assert.deepEqual(await w.tick(), []); //                       store_stale sozinho não abre mais nada
+  assert.equal((await outages()).length, 0);
+  // A sonda confirma a queda (Task 9) e abre o episódio de fonte `probe`.
+  await openSystemProbeEpisode(pool, saturno, lastReal, brt('2026-09-15T16:31:00'), 'store_stale');
+  assert.deepEqual((await w.tick()).map((a) => a.outcome), ['sent']); // o vigia avisa
   assert.equal(w.sent.length, 1);
   assert.equal(w.sent[0].downSince.getTime(), lastReal.getTime());
   // o aviso está mesmo no store do alvo, como a mensagem MAIS RECENTE dele
@@ -145,7 +152,7 @@ test('[defeito 2] o aviso entregue ao próprio número NÃO fecha o episódio, N
   // 3º tick: era aqui que o episódio se "curava" sozinho (os 8 episódios falsos fecharam em 5min)
   assert.deepEqual(await w.tick(), []);
   let h = await health();
-  assert.equal(h.last_reason, 'store_stale');
+  assert.equal(h.last_reason, null); // store_stale não é mais gravado como suspeita
   assert.equal((h.down_since as Date).getTime(), lastReal.getTime());
   assert.equal(h.down_notify_count, 1);
   let rows = await outages();

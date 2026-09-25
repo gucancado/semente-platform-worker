@@ -152,6 +152,17 @@ export type EpisodePrev = {
    * null = desconhecida, tratada como velha demais.
    */
   ageMs: number | null;
+  /**
+   * Quem abriu o episódio aberto: `'state'` (a máquina deste módulo, por estado da
+   * Evolution) ou `'probe'` (a sonda de conexão PROVOU a queda com a Evolution
+   * dizendo `open`). Ausente/null = sem episódio, ou linha anterior à mig 068.
+   */
+  downSource?: 'state' | 'probe' | null;
+  /**
+   * Só para episódio `probe`: o store do alvo recebeu tráfego REAL depois do início
+   * do episódio (e depois da última leitura gravada). Comparado DENTRO do banco.
+   */
+  trafficAfterDown?: boolean;
 };
 
 export type EpisodePlan = 'healthy' | 'suspect' | 'hold' | 'open' | 'keep' | 'close';
@@ -187,12 +198,36 @@ export const CONFIRM_MAX_FACTOR = 3.5;
  * tem nada a ver com ela — acima de ~3 intervalos ela recomeça do zero.
  */
 export function planEpisode(prev: EpisodePrev, down: boolean, intervalMs: number): EpisodePlan {
+  // Episódio aberto PELA SONDA: a leitura "saudável" do tick (estado `open`, store
+  // sem atraso) é exatamente o que mente no zumbi — não fecha. Só fecha por `alive`
+  // (closeProbeEpisode), por tráfego real depois do início, ou pela máquina de
+  // estado depois que a Evolution admitir a queda (ver `nextDownSource`).
+  if (prev.downSince && prev.downSource === 'probe') return !down && prev.trafficAfterDown ? 'close' : 'keep';
   if (!down) return prev.downSince ? 'close' : 'healthy';
   if (prev.downSince) return 'keep';
   if (!prev.sawDown || prev.ageMs == null) return 'suspect';
   if (prev.ageMs < intervalMs * CONFIRM_MIN_FACTOR) return 'hold';
   if (prev.ageMs > intervalMs * CONFIRM_MAX_FACTOR) return 'suspect';
   return 'open';
+}
+
+/**
+ * Fonte do episódio depois da gravação. Abrir pelo tick é sempre `'state'`; um
+ * episódio `probe` mantido passa a `'state'` quando a Evolution ADMITE a queda
+ * (`close` — logout do link de reconexão, sessão derrubada): daí em diante a volta
+ * do estado encerra o episódio pela regra de sempre, sem depender de tráfego (um
+ * saturno reconectado num domingo mudo ficaria "fora" até segunda). `connecting`
+ * NÃO entrega: é o estado do flap diário de ~1s, e o zumbi não se cura com ele.
+ */
+export function nextDownSource(
+  plan: EpisodePlan,
+  prev: 'state' | 'probe' | null | undefined,
+  state: string,
+): 'state' | 'probe' | null {
+  if (plan === 'open') return 'state';
+  if (plan !== 'keep') return null;
+  if (prev === 'probe') return state === 'close' ? 'state' : 'probe';
+  return prev ?? 'state';
 }
 
 export type SendOutcome =

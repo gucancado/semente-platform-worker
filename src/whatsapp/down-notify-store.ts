@@ -1,5 +1,6 @@
 import type { Pool } from 'pg';
-import { planEpisode } from './down-notify.js';
+import { nextDownSource, planEpisode } from './down-notify.js';
+import type { Trigger } from './connection-probe.js';
 
 /**
  * Estado do aviso de queda ao próprio número — camada de banco (mig 064).
@@ -37,6 +38,7 @@ export async function listDownNumbers(pool: Pool): Promise<DownNumberRow[]> {
             wn.down_notified_at, wn.down_notify_count
        FROM whatsapp_numbers wn
        LEFT JOIN instance_outages o ON o.instance = wn.evolution_instance AND o.ended_at IS NULL
+                                  AND o.kind = 'number'
       WHERE wn.removed_at IS NULL AND wn.phone IS NOT NULL
         AND ( (wn.status <> 'connected' AND wn.disconnected_since IS NOT NULL)
               OR o.started_at_source = 'probe' )
@@ -58,6 +60,13 @@ export async function listDownNumbers(pool: Pool): Promise<DownNumberRow[]> {
  * Reivindicação otimista do aviso. Além do `status <> 'connected'` de sempre,
  * aceita o zumbi: número `connected` com episódio `probe` aberto — a mesma
  * condição de `listDownNumbers`.
+ *
+ * ⚠️ Não é livre de corrida contra um `closeProbeEpisode` concorrente: sob READ
+ * COMMITTED, o EvalPlanQual só reavalia a linha de `whatsapp_numbers` que o
+ * UPDATE trava — o `EXISTS` continua vendo o snapshot antigo, então um claim que
+ * começou antes do fechamento commitar ainda pode contar um aviso a mais (o
+ * fechamento zera a contagem logo em seguida, e o `listDownNumbers` do próximo
+ * tick já não devolve o número). Custo: no máximo um aviso atrasado.
  */
 export async function claimNumberNotification(pool: Pool, id: number, prev: NotifyVersion): Promise<boolean> {
   const { rowCount } = await pool.query(
@@ -67,7 +76,7 @@ export async function claimNumberNotification(pool: Pool, id: number, prev: Noti
         AND ( wn.status <> 'connected'
               OR EXISTS (SELECT 1 FROM instance_outages o
                           WHERE o.instance = wn.evolution_instance AND o.ended_at IS NULL
-                            AND o.started_at_source = 'probe') )`,
+                            AND o.kind = 'number' AND o.started_at_source = 'probe') )`,
     [id, prev.notifyCount],
   );
   return rowCount === 1;
@@ -156,21 +165,32 @@ export async function recordSystemHealth(
     await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [t.instance]);
     const prev = (
       await client.query(
-        `SELECT instance, expected_phone, label, down_since, down_notified_at, down_notify_count, last_reason,
-                EXTRACT(EPOCH FROM (NOW() - checked_at)) * 1000 AS age_ms
+        `SELECT instance, expected_phone, label, down_since, down_source, down_notified_at, down_notify_count,
+                last_reason, EXTRACT(EPOCH FROM (NOW() - checked_at)) * 1000 AS age_ms,
+                -- Tráfego REAL depois do início do episódio E da última leitura gravada
+                -- (a segunda condição segura store com relógio adiantado, cuja "última
+                -- mensagem" já estava à frente do início). Comparado aqui dentro: o
+                -- início pode sair de NOW() com µs e não pode passar pelo JS.
+                ($2::text = 'open' AND $3::timestamptz IS NOT NULL AND down_since IS NOT NULL
+                 AND $3::timestamptz > down_since
+                 AND (own_store_ts IS NULL OR $3::timestamptz > own_store_ts)) AS traffic_after
            FROM system_instance_health WHERE instance = $1`,
-        [t.instance],
+        [t.instance, v.state, v.ownStoreTs],
       )
     ).rows[0];
+    const prevSource: 'state' | 'probe' | null = prev?.down_source ?? null;
     const plan = planEpisode(
       {
         downSince: prev?.down_since ?? null,
         sawDown: prev?.last_reason != null,
         ageMs: prev?.age_ms == null ? null : Number(prev.age_ms),
+        downSource: prevSource,
+        trafficAfterDown: prev?.traffic_after === true,
       },
       v.down,
       intervalMs,
     );
+    const source = nextDownSource(plan, prevSource, v.state);
 
     if (plan === 'hold') {
       // Observação cedo demais para confirmar: a linha fica EXATAMENTE como está.
@@ -205,10 +225,11 @@ export async function recordSystemHealth(
                                WHEN 'open' THEN LEAST(COALESCE($9::timestamptz, system_instance_health.checked_at, NOW()), NOW())
                                WHEN 'keep' THEN system_instance_health.down_since
                              END,
+         down_source       = $10::text,
          down_notified_at  = CASE WHEN $8::text = 'keep' THEN system_instance_health.down_notified_at END,
          down_notify_count = CASE WHEN $8::text = 'keep' THEN system_instance_health.down_notify_count ELSE 0 END
        RETURNING instance, expected_phone, label, down_since, down_notified_at, down_notify_count`,
-      [t.instance, t.expectedPhone, t.label, v.state, v.reason, v.ownStoreTs, v.peerStoreTs, plan, observedDownSince],
+      [t.instance, t.expectedPhone, t.label, v.state, v.reason, v.ownStoreTs, v.peerStoreTs, plan, observedDownSince, source],
     );
     const r = rows[0];
 
@@ -237,6 +258,70 @@ export async function recordSystemHealth(
 
     await client.query('COMMIT');
     return toHealthRow(r);
+  } catch (e) {
+    await client.query('ROLLBACK');
+    throw e;
+  } finally {
+    client.release();
+  }
+}
+
+/**
+ * A SONDA confirmou a queda de uma instância de sistema (spec 2026-09-25 §7):
+ * abre o episódio com `down_source='probe'` — que a leitura `open` do tick seguinte
+ * MANTÉM (`planEpisode`) — e o `instance_outages` de fonte `probe`, sob o MESMO lock
+ * de `recordSystemHealth` (as duas escritas nunca se cruzam).
+ *
+ * Início = `LEAST(COALESCE(startedAt, firstSentAt), firstSentAt, NOW())`: a última
+ * mensagem de tráfego real, se o chamador souber, nunca depois do 1º envio da sonda
+ * nem no futuro (relógio da Evolution adiantado violaria `ended_at >= started_at`).
+ *
+ * Episódio já aberto (de estado, ou desta mesma sonda) é mantido como está — a
+ * instância já está documentada como fora; a contagem de aviso só zera quando abre.
+ * O `instance_outages` copia `down_since` DENTRO do banco (µs), com `ON CONFLICT
+ * DO NOTHING` pelo índice único parcial de episódio aberto.
+ */
+export async function openSystemProbeEpisode(
+  pool: Pool,
+  t: SystemTarget,
+  startedAt: Date | null,
+  firstSentAt: Date,
+  trigger: Trigger,
+): Promise<SystemHealthRow> {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [t.instance]);
+    const { rows } = await client.query(
+      `INSERT INTO system_instance_health
+         (instance, expected_phone, label, checked_at, down_since, down_source,
+          down_notified_at, down_notify_count, updated_at)
+       VALUES ($1, $2, $3, NOW(),
+               LEAST(COALESCE($4::timestamptz, $5::timestamptz), $5::timestamptz, NOW()),
+               'probe', NULL, 0, NOW())
+       ON CONFLICT (instance) DO UPDATE SET
+         down_source       = CASE WHEN system_instance_health.down_since IS NULL THEN 'probe'
+                                  ELSE system_instance_health.down_source END,
+         down_notified_at  = CASE WHEN system_instance_health.down_since IS NULL THEN NULL
+                                  ELSE system_instance_health.down_notified_at END,
+         down_notify_count = CASE WHEN system_instance_health.down_since IS NULL THEN 0
+                                  ELSE system_instance_health.down_notify_count END,
+         down_since        = COALESCE(system_instance_health.down_since, EXCLUDED.down_since),
+         updated_at        = NOW()
+       RETURNING instance, expected_phone, label, down_since, down_source, down_notified_at, down_notify_count`,
+      [t.instance, t.expectedPhone, t.label, startedAt, firstSentAt],
+    );
+    // Só quando o episódio é desta sonda: um episódio de estado já aberto tem o seu.
+    await client.query(
+      `INSERT INTO instance_outages (instance, kind, number_id, started_at, started_at_source, reason, detected_by)
+       SELECT h.instance, 'system', NULL, h.down_since, 'probe', $2, 'probe'
+         FROM system_instance_health h
+        WHERE h.instance = $1 AND h.down_since IS NOT NULL AND h.down_source = 'probe'
+       ON CONFLICT (instance) WHERE ended_at IS NULL DO NOTHING`,
+      [t.instance, trigger],
+    );
+    await client.query('COMMIT');
+    return toHealthRow(rows[0]);
   } catch (e) {
     await client.query('ROLLBACK');
     throw e;

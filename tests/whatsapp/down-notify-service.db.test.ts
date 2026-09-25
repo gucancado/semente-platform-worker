@@ -174,7 +174,7 @@ test('instância de sistema fechada: 1º tick é suspeita, o 2º abre o episódi
   assert.deepEqual(rows[0], { target_instance: 'saturno', expected_phone: '+553195950748', workspace_id: null });
 });
 
-test('open com store atrás do par é queda por store_stale; par emparelhado devolve a saúde', async () => {
+test('open com store atrás do par é só GATILHO de sonda (não abre episódio); par emparelhado segue saudável', async () => {
   const { deps } = harness();
   const stale = new Date(Date.now() - 96 * H);
 
@@ -187,8 +187,9 @@ test('open com store atrás do par é queda por store_stale; par emparelhado dev
   await elapse();
   await runSystemInstanceWatch(staleWatch, [saturno]);
   let h = (await pool.query(`SELECT last_reason, down_since FROM system_instance_health`)).rows[0];
-  assert.equal(h.last_reason, 'store_stale');
-  assert.notEqual(h.down_since, null);
+  // Sonda de conexão (spec 2026-09-25 §7): store_stale não vira suspeita nem episódio.
+  assert.equal(h.last_reason, null);
+  assert.equal(h.down_since, null);
 
   await runSystemInstanceWatch(
     {
