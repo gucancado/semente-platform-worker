@@ -122,9 +122,11 @@ test('[defeito 1] alvo marcado como tráfego contínuo mede pelo relógio de par
     stores: { saturno: [groupMsg(brt('2026-09-20T20:06:00'))], 'ws-peer': [leadDm(brt('2026-09-21T06:20:00'))] },
     target: { ...saturno, traffic: 'always' },
   });
-  assert.equal((await w.assess()).storeStale, true);
+  assert.equal((await w.assess()).storeStale, true); // pelo relógio de parede, o store está atrasado…
   await w.elapse();
-  assert.equal((await w.assess()).storeStale, true);
+  assert.deepEqual(await w.tick(), []); //                …e o vigia não abre nem avisa
+  await w.elapse();
+  assert.deepEqual(await w.tick(), []);
   // Sonda de conexão (spec 2026-09-25 §7): store_stale não abre episódio nem renova a suspeita.
   assert.equal((await health()).last_reason, null);
   assert.equal((await outages()).length, 0);

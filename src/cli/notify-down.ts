@@ -49,12 +49,13 @@ async function resolveTarget(instance: string) {
       [sys],
     );
     // Fora sem `downSince` = SUSPEITA: o episódio só abre no segundo tick consecutivo fora.
-    const verdict = !a?.verdict.down
-      ? 'saudável'
-      : a.storeStale && !a.row.downSince
+    // Episódio aberto primeiro: o da sonda fica aberto com a Evolution dizendo `open`.
+    const verdict = a?.row.downSince
+      ? `fora — ${a.verdict.reason ?? 'episódio aberto pela sonda'}`
+      : !a?.verdict.down
+        ? 'saudável'
+      : a.storeStale
         ? 'store atrasado — só gatilho de sonda, não abre episódio'
-      : a.row.downSince
-        ? `fora — ${a.verdict.reason}`
         : `suspeita — ${a.verdict.reason} (só vira episódio se outra observação confirmar; esta rodada conta como uma)`;
     if (a) console.log(`estado    : ${a.state} (${verdict})`);
     return { phone: sys.expectedPhone, name: sys.label, workspaceId: null, downSince: a?.row.downSince ?? new Date() };

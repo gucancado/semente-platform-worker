@@ -376,6 +376,9 @@ export async function openNumberProbeEpisode(
  * Se for de SISTEMA (`kind='system'`), zera na mesma instrução o episódio e o aviso
  * em `system_instance_health` (`down_since`, `down_source`, contagem) — senão o
  * tick seguinte leria o episódio `probe` ainda aberto na saúde e o manteria (`keep`).
+ * A saúde de fonte `probe` é zerada mesmo sem `instance_outages` de fonte `probe`
+ * a fechar: um episódio ÓRFÃO de outra fonte aberto faz o insert da sonda cair no
+ * `DO NOTHING`, e sem isto a saúde ficaria presa em `probe` para sempre.
  */
 export async function closeProbeEpisode(pool: Pool, instance: string): Promise<boolean> {
   const { rows } = await pool.query(
@@ -394,10 +397,10 @@ export async function closeProbeEpisode(pool: Pool, instance: string): Promise<b
        UPDATE system_instance_health h
           SET down_since = NULL, down_source = NULL, down_notified_at = NULL, down_notify_count = 0,
               updated_at = NOW()
-         FROM closed
-        WHERE closed.kind = 'system' AND h.instance = closed.instance
+        WHERE h.instance = $1
+          AND (h.down_source = 'probe' OR EXISTS (SELECT 1 FROM closed WHERE closed.kind = 'system'))
         RETURNING h.instance)
-     SELECT count(*)::int AS n FROM closed`,
+     SELECT (SELECT count(*) FROM closed)::int + (SELECT count(*) FROM sys)::int AS n`,
     [instance],
   );
   return Number(rows[0]?.n ?? 0) > 0;

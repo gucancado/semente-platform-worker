@@ -7,7 +7,7 @@ import { test, beforeEach, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { pool } from '../../src/db.js';
 import { assessSystemTargets, type SystemProbe } from '../../src/whatsapp/down-notify-service.js';
-import { openSystemProbeEpisode, type SystemTarget } from '../../src/whatsapp/down-notify-store.js';
+import { openSystemProbeEpisode, recordSystemHealth, type SystemTarget } from '../../src/whatsapp/down-notify-store.js';
 import { closeProbeEpisode, openProbeEpisodeOf } from '../../src/whatsapp/connection-probe-store.js';
 
 const H = 3_600_000;
@@ -222,4 +222,49 @@ test('episódio probe + Evolution admite close: continua FORA (vira state); a vo
   const rows = await outages();
   assert.equal(rows.length, 1);
   assert.notEqual(rows[0].ended_at, null);
+});
+
+test('tráfego real visto num tick CONNECTING fecha o episódio probe (não fica preso quando o estado volta a open)', async () => {
+  const { w, tick } = world();
+  await tick();
+  await openSystemProbeEpisode(pool, saturno, OWN, new Date(Date.now() - 10 * 60_000), 'store_stale');
+
+  w.state = 'connecting';
+  w.own = new Date(PEER.getTime() + 60_000); // mensagem de grupo de verdade chega no mesmo tick
+  await elapse();
+  await tick();
+  w.state = 'open'; // store igual ao do tick anterior
+  await elapse();
+  const a = await tick();
+  assert.equal(a.row.downSince, null);
+  const h = await health();
+  assert.equal(h.down_since, null);
+  assert.equal(h.down_source, null);
+  const rows = await outages();
+  assert.equal(rows.length, 1);
+  assert.notEqual(rows[0].ended_at, null);
+});
+
+test('episódio ÓRFÃO de outra fonte aberto: closeProbeEpisode ainda zera a saúde que a sonda pôs em probe', async () => {
+  await pool.query(
+    `INSERT INTO instance_outages (instance, kind, number_id, started_at, started_at_source, reason, detected_by)
+     VALUES ('saturno', 'system', NULL, NOW() - INTERVAL '2 hours', 'observed_store', 'state', 'watch')`,
+  );
+  await openSystemProbeEpisode(pool, saturno, OWN, new Date(Date.now() - 10 * 60_000), 'store_stale');
+  assert.equal((await health()).down_source, 'probe');
+  assert.equal((await outages()).length, 1); // o órfão segue sendo o episódio
+
+  assert.equal(await closeProbeEpisode(pool, 'saturno'), true);
+  const h = await health();
+  assert.equal(h.down_since, null);
+  assert.equal(h.down_source, null);
+  assert.equal(h.down_notify_count, 0);
+});
+
+test('recordSystemHealth recusa store_stale como queda (a porta do 21/09 fica fechada)', async () => {
+  await assert.rejects(
+    recordSystemHealth(pool, saturno, { down: true, reason: 'store_stale', state: 'open', ownStoreTs: OWN, peerStoreTs: PEER }),
+    /store_stale não é queda/,
+  );
+  assert.equal(await health(), undefined);
 });

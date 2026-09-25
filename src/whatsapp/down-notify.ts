@@ -160,7 +160,8 @@ export type EpisodePrev = {
   downSource?: 'state' | 'probe' | null;
   /**
    * Só para episódio `probe`: o store do alvo recebeu tráfego REAL depois do início
-   * do episódio (e depois da última leitura gravada). Comparado DENTRO do banco.
+   * do episódio (e depois da última leitura gravada), em qualquer estado. Comparado
+   * DENTRO do banco.
    */
   trafficAfterDown?: boolean;
 };
@@ -182,6 +183,8 @@ export const CONFIRM_MAX_FACTOR = 3.5;
  *   suspeita → saudável               : 'healthy' — era um soluço; some sem rastro
  *   episódio → fora                   : 'keep'
  *   episódio → saudável               : 'close'   — encerra e zera o aviso
+ *   episódio da SONDA (downSource probe): 'keep'    — a leitura saudável é o que mente no zumbi;
+ *     só fecha ('close') por tráfego real no store depois do início, em QUALQUER estado
  *
  * Uma observação só não basta: a Evolution tem um `connecting→open` de ~1s quase
  * diário, e o debounce não o segura — ele conta a partir do INÍCIO do episódio,
@@ -202,7 +205,11 @@ export function planEpisode(prev: EpisodePrev, down: boolean, intervalMs: number
   // sem atraso) é exatamente o que mente no zumbi — não fecha. Só fecha por `alive`
   // (closeProbeEpisode), por tráfego real depois do início, ou pela máquina de
   // estado depois que a Evolution admitir a queda (ver `nextDownSource`).
-  if (prev.downSince && prev.downSource === 'probe') return !down && prev.trafficAfterDown ? 'close' : 'keep';
+  // Tráfego real prova a sessão viva QUALQUER que seja o estado do instante: se ele
+  // chegar num tick `connecting` e só fechasse com `open`, a leitura seguinte já não
+  // o veria como novo e o episódio ficaria preso. Se a queda for de verdade, a
+  // máquina normal reabre um episódio de estado.
+  if (prev.downSince && prev.downSource === 'probe') return prev.trafficAfterDown ? 'close' : 'keep';
   if (!down) return prev.downSince ? 'close' : 'healthy';
   if (prev.downSince) return 'keep';
   if (!prev.sawDown || prev.ageMs == null) return 'suspect';

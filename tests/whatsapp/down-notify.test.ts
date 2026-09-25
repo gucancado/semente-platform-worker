@@ -363,11 +363,12 @@ test('[sonda] episódio de fonte probe: leitura saudável MANTÉM (o estado open
   assert.equal(planEpisode({ ...probe, downSource: null }, false, TICK), 'close');
 });
 
-test('[sonda] episódio probe fecha por TRÁFEGO real depois do início — só com a leitura saudável', () => {
+test('[sonda] episódio probe fecha por TRÁFEGO real depois do início — em qualquer estado', () => {
   const since = brt('2026-09-25T10:00:00');
   const probe = { downSince: since, sawDown: false, ageMs: 0, downSource: 'probe' as const, trafficAfterDown: true };
   assert.equal(planEpisode(probe, false, TICK), 'close');
-  assert.equal(planEpisode(probe, true, TICK), 'keep'); // estado fora: tráfego velho não cura
+  // tráfego real prova a sessão viva mesmo num tick `connecting`/`close`
+  assert.equal(planEpisode(probe, true, TICK), 'close');
   assert.equal(planEpisode({ ...probe, trafficAfterDown: false }, false, TICK), 'keep');
 });
 

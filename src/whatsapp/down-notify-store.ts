@@ -141,6 +141,12 @@ function toHealthRow(r: any): SystemHealthRow {
  *   suspeita → saudável          : some sem rastro (era um soluço)
  *   episódio → fora              : preserva o início — o episódio continua
  *   episódio → saudável          : encerra e zera o aviso (a próxima queda é episódio novo)
+ *   episódio da SONDA            : mantém (a leitura saudável é o que mente no zumbi); fecha
+ *                                  por tráfego real no store depois do início, em qualquer
+ *                                  estado; passa a fonte 'state' quando a Evolution admite `close`
+ *
+ * `store_stale` NÃO pode chegar aqui como queda (lança): ele é só gatilho de sonda
+ * — gravado como suspeita, o flap diário de 1s confirmaria direto (regressão 21/09).
  *
  * O estado da suspeita mora na própria linha, sem coluna nova: `last_reason`
  * preenchido com `down_since` nulo = suspeita, e `checked_at` = instante da
@@ -154,6 +160,9 @@ export async function recordSystemHealth(
   observedDownSince: Date | null = null,
   intervalMs: number = DEFAULT_WATCH_INTERVAL_MS,
 ): Promise<SystemHealthRow> {
+  if (v.down && v.reason === 'store_stale') {
+    throw new Error('recordSystemHealth: store_stale não é queda — é gatilho de sonda (openSystemProbeEpisode)');
+  }
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -171,11 +180,11 @@ export async function recordSystemHealth(
                 -- (a segunda condição segura store com relógio adiantado, cuja "última
                 -- mensagem" já estava à frente do início). Comparado aqui dentro: o
                 -- início pode sair de NOW() com µs e não pode passar pelo JS.
-                ($2::text = 'open' AND $3::timestamptz IS NOT NULL AND down_since IS NOT NULL
-                 AND $3::timestamptz > down_since
-                 AND (own_store_ts IS NULL OR $3::timestamptz > own_store_ts)) AS traffic_after
+                ($2::timestamptz IS NOT NULL AND down_since IS NOT NULL
+                 AND $2::timestamptz > down_since
+                 AND (own_store_ts IS NULL OR $2::timestamptz > own_store_ts)) AS traffic_after
            FROM system_instance_health WHERE instance = $1`,
-        [t.instance, v.state, v.ownStoreTs],
+        [t.instance, v.ownStoreTs],
       )
     ).rows[0];
     const prevSource: 'state' | 'probe' | null = prev?.down_source ?? null;
