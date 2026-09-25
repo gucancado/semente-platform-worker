@@ -173,6 +173,16 @@ const EnvSchema = z.object({
     .optional()
     .transform((s) => (s ?? '').split(',').map((x) => x.replace(/\D+/g, '')).filter(Boolean)),
 
+  // ── Sonda de conexão do WhatsApp (spec 2026-09-25-sonda-conexao-whatsapp §11) ──
+  // Troca inferência (state/status) por PROVA: o número Cloud manda uma mensagem
+  // de teste e confere se ela chegou ao worker. Nasce 'off'; ligar exige
+  // WHATSAPP_CLOUD_OWN_PHONES preenchido (down-notify-start.ts:buildProbeConfig
+  // recusa e loga erro, sem derrubar o boot).
+  CONNECTION_PROBE_MODE: z.enum(['off', 'on']).default('off'),
+  // Repete cada sonda (1ª e 2ª) para OPS_NOTIFY_TO — acompanhamento do rollout.
+  // 'on' por padrão a pedido do Gustavo; desligar depois.
+  CONNECTION_PROBE_MIRROR: z.enum(['off', 'on']).default('on'),
+
   // ── Vigia de instância de SISTEMA (ex.: saturno, fora de whatsapp_numbers por contrato) ──
   // JSON: [{"instance":"saturno","expected_phone":"+553195950748","label":"Monitor de grupos"}]
   // Opcional por alvo: "traffic":"always" (padrão "business_hours" — ver SystemWatchSchema).

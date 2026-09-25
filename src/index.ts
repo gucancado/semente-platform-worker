@@ -39,7 +39,9 @@ import { startFirefliesImportCron } from './integrations/fireflies/import-cron.j
 import { startProvisioningReaperCron } from './whatsapp/provisioning-reaper.js';
 import { startGroupSyncCron } from './whatsapp/group-sync-cron.js';
 import { startConnectionAlertSweep } from './whatsapp/connection-alerts.js';
-import { startDownNotify } from './whatsapp/down-notify-start.js';
+import { buildProbeConfig, buildProbeEvolution, probeStarted, startDownNotify } from './whatsapp/down-notify-start.js';
+import { handleProbeReceipt } from './whatsapp/connection-probe-service.js';
+import { setOwnCloudProbeHandler } from './webhook/routes.js';
 import { startPresenceKeepalive } from './whatsapp/presence-keepalive.js';
 import { startTranscriptionPoller } from './transcription/poller.js';
 import { startSummaryPoller } from './meetings-summary/poller.js';
@@ -290,6 +292,28 @@ async function main() {
   // CONNECTION_NOTIFY_NUMBERS=on; instância de sistema (saturno) pela vigia de
   // SYSTEM_INSTANCE_WATCH_JSON, que olha o store da Evolution — `state` sozinho mente.
   startDownNotify(pool, app.log);
+
+  // Sonda de conexão (spec 2026-09-25-sonda-conexao-whatsapp-design.md §3, §11):
+  // liga o RECEBIMENTO da sonda pelo webhook só quando `startDownNotify` também
+  // ligaria o loop de envio — MESMA decisão (`buildProbeConfig`/`probeStarted`),
+  // pra nunca receber sem nunca enviar (ou o inverso). Com o modo 'off' (ou
+  // WHATSAPP_CLOUD_OWN_PHONES ausente) o handler fica `null` e a porta anti-CRM
+  // (SEMPRE ligada) segue descartando a DM do nosso Cloud sem tentar casar
+  // código nenhum.
+  const probeCfg = probeStarted(
+    buildProbeConfig({
+      mode: config.CONNECTION_PROBE_MODE,
+      ownPhones: config.WHATSAPP_CLOUD_OWN_PHONES,
+      mirror: config.CONNECTION_PROBE_MIRROR,
+      opsTo: config.OPS_NOTIFY_TO,
+    }),
+  );
+  if (probeCfg) {
+    const probeEvolution = buildProbeEvolution(pool);
+    setOwnCloudProbeHandler((instance, code, key) =>
+      handleProbeReceipt({ pool, log: app.log, evolution: probeEvolution }, instance, code, key),
+    );
+  }
 
   // Keep-alive de presença: reafirma `unavailable` nas instâncias conectadas. Sem isso
   // o estado decai no servidor do WhatsApp e o CELULAR DO CLIENTE para de receber push
