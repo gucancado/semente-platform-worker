@@ -10,6 +10,7 @@ import { syncGroupSubjects } from './group-sync.js';
 import { backfillNumber } from './backfill.js';
 import { setGroupExposure } from './thread-meta.js';
 import { tenantContext } from './tenant-context.js';
+import { openProbeEpisodeOf } from './connection-probe-store.js';
 
 const PROVISION_TTL_SECONDS = 90;
 const LINK_MAX_CLICKS = 10;
@@ -268,8 +269,18 @@ export function registerProvisionRoutes(app: FastifyInstance, deps: { pool: Pool
       return reply.code(502).send({ error: 'evolution_unavailable' });
     }
     if (conn === 'open') {
-      await markLinkConsumed(deps.pool, token, null);
-      return reply.send({ state: 'connected' });
+      // Zumbi: a Evolution diz open, mas a sonda provou que a sessão está morta.
+      // O humano abriu o link — derruba a sessão morta e segue para o QR.
+      if (await openProbeEpisodeOf(deps.pool, link.targetInstance)) {
+        try {
+          await logoutInstance(deps.evolution, link.targetInstance);
+        } catch {
+          return reply.code(502).send({ error: 'evolution_unavailable' });
+        }
+      } else {
+        await markLinkConsumed(deps.pool, token, null);
+        return reply.send({ state: 'connected' });
+      }
     }
 
     const inc = await incrementLinkClick(deps.pool, token);
@@ -307,7 +318,9 @@ export function registerProvisionRoutes(app: FastifyInstance, deps: { pool: Pool
     // em andamento (paridade deliberada com o GET do provisionamento — o 10º QR vale).
 
     try {
-      if ((await getConnectionState(deps.evolution, instance)) === 'open') {
+      // Estado open só consome quando não há episódio `probe` aberto (zumbi) —
+      // havendo, segue para o QR (a Evolution mente, a sonda já provou).
+      if ((await getConnectionState(deps.evolution, instance)) === 'open' && !(await openProbeEpisodeOf(deps.pool, instance))) {
         await markLinkConsumed(deps.pool, token, null);
         return reply.send({ state: 'connected' });
       }
