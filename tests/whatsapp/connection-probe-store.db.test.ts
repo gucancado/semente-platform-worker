@@ -39,6 +39,7 @@ test('createProbe: segunda sonda para a mesma instância enquanto a 1ª está ab
   assert.equal(p1!.instance, 'inst-a');
   assert.equal(p1!.code, 'AAAA');
   assert.equal(p1!.parentId, null);
+  assert.equal(p1!.verdict, null);
 
   const p2 = await createProbe(pool, base('inst-a', 'BBBB'));
   assert.equal(p2, null);
@@ -74,6 +75,39 @@ test('markProbeSent sem sendError não mexe no verdict', async () => {
   assert.equal(rows[0].mirror_wamid, 'wamid.2m');
   assert.equal(rows[0].verdict, null);
   assert.ok(rows[0].sent_at instanceof Date);
+});
+
+test('markProbeSent com sendError NÃO sobrescreve sonda já recebida (timeout do envio depois da entrega real)', async () => {
+  const p = await createProbe(pool, base('inst-a', 'AAAA'));
+  // O webhook de recebimento chega ANTES do timeout de 15s do sender estourar.
+  await recordProbeReceipt(pool, 'inst-a', 'AAAA', key('chegou-antes'));
+
+  await markProbeSent(pool, p!.id, { wamid: 'wamid.late', mirrorWamid: null, sendError: { message: 'timeout' } });
+
+  const { rows } = await pool.query(
+    `SELECT wamid, verdict, received_at FROM connection_probes WHERE id = $1`,
+    [p!.id],
+  );
+  assert.equal(rows[0].wamid, 'wamid.late'); // wamid/sent_at/send_error são sempre gravados
+  assert.equal(rows[0].verdict, null); // mas o veredito NÃO vira send_failed — a mensagem chegou
+  assert.ok(rows[0].received_at instanceof Date);
+
+  // o tick resolve normalmente: setVerdict devolve 'received' e grava alive
+  const outcome = await setVerdict(pool, p!.id, 'down');
+  assert.equal(outcome, 'received');
+  const row2 = (await pool.query(`SELECT verdict FROM connection_probes WHERE id = $1`, [p!.id])).rows[0];
+  assert.equal(row2.verdict, 'alive');
+});
+
+test('markProbeSent com sendError NÃO sobrescreve veredito já gravado por outro caminho', async () => {
+  const p = await createProbe(pool, base('inst-a', 'AAAA'));
+  await setVerdict(pool, p!.id, 'inconclusive');
+
+  await markProbeSent(pool, p!.id, { wamid: 'wamid.late2', mirrorWamid: null, sendError: { message: 'timeout' } });
+
+  const row = (await pool.query(`SELECT wamid, verdict FROM connection_probes WHERE id = $1`, [p!.id])).rows[0];
+  assert.equal(row.wamid, 'wamid.late2');
+  assert.equal(row.verdict, 'inconclusive');
 });
 
 test('recordProbeReceipt casa pelo código e é idempotente', async () => {
@@ -122,6 +156,22 @@ test('recordCloudStatuses: delivered depois sent não regride; failed grava clou
   row = (await pool.query(`SELECT cloud_status, cloud_error FROM connection_probes WHERE id = $1`, [p2!.id])).rows[0];
   assert.equal(row.cloud_status, 'failed');
   assert.deepEqual(row.cloud_error, [{ code: 131047, title: 'Re-engagement message' }]);
+
+  // read (rank 3) depois delivered (rank 2) AVANÇA — rank maior sobrescreve
+  const n5 = await recordCloudStatuses(pool, [{ id: 'wamid.d1', status: 'read', errors: [] }]);
+  assert.equal(n5, 1);
+  row = (await pool.query(`SELECT cloud_status FROM connection_probes WHERE id = $1`, [p1!.id])).rows[0];
+  assert.equal(row.cloud_status, 'read');
+
+  // failed (rank 4) depois delivered (rank 2, no p2) AVANÇA e grava cloud_error
+  const p3 = await createProbe(pool, base('inst-c', 'CCCC'));
+  await markProbeSent(pool, p3!.id, { wamid: 'wamid.f2', mirrorWamid: null, sendError: null });
+  await recordCloudStatuses(pool, [{ id: 'wamid.f2', status: 'delivered', errors: [] }]);
+  const n6 = await recordCloudStatuses(pool, [{ id: 'wamid.f2', status: 'failed', errors: [{ code: 1, title: 'x' }] }]);
+  assert.equal(n6, 1);
+  row = (await pool.query(`SELECT cloud_status, cloud_error FROM connection_probes WHERE id = $1`, [p3!.id])).rows[0];
+  assert.equal(row.cloud_status, 'failed');
+  assert.deepEqual(row.cloud_error, [{ code: 1, title: 'x' }]);
 });
 
 test('corrida: recordProbeReceipt antes de setVerdict(down) devolve received e grava alive', async () => {
@@ -146,6 +196,28 @@ test('setVerdict duas vezes: a 2ª devolve already e não sobrescreve', async ()
   assert.equal(row.verdict, 'inconclusive'); // não foi sobrescrito por 'down'
 });
 
+test("setVerdict('alive') é caminho positivo explícito: grava direto, sem exigir received_at", async () => {
+  const p = await createProbe(pool, base('inst-a', 'AAAA'));
+  await recordProbeReceipt(pool, 'inst-a', 'AAAA', key('m1'));
+
+  const first = await setVerdict(pool, p!.id, 'alive');
+  assert.equal(first, 'set'); // nunca 'received' — esse resultado é exclusivo do caminho negativo
+  const second = await setVerdict(pool, p!.id, 'alive');
+  assert.equal(second, 'already');
+
+  const row = (await pool.query(`SELECT verdict FROM connection_probes WHERE id = $1`, [p!.id])).rows[0];
+  assert.equal(row.verdict, 'alive');
+});
+
+test("setVerdict('alive') grava mesmo sem received_at preenchido (chamador decidiu por outro motivo)", async () => {
+  const p = await createProbe(pool, base('inst-a', 'AAAA'));
+  const outcome = await setVerdict(pool, p!.id, 'alive');
+  assert.equal(outcome, 'set');
+  const row = (await pool.query(`SELECT verdict, received_at FROM connection_probes WHERE id = $1`, [p!.id])).rows[0];
+  assert.equal(row.verdict, 'alive');
+  assert.equal(row.received_at, null);
+});
+
 test('listOpenProbes lista só sondas sem veredito, com ageMs', async () => {
   const p1 = await createProbe(pool, base('inst-a', 'AAAA'));
   await setVerdict(pool, p1!.id, 'inconclusive');
@@ -155,6 +227,21 @@ test('listOpenProbes lista só sondas sem veredito, com ageMs', async () => {
   assert.deepEqual(open.map((r) => r.id).sort(), [p2!.id].sort());
   assert.equal(typeof open[0].ageMs, 'number');
   assert.ok(open[0].ageMs >= 0);
+  assert.equal(open[0].verdict, null);
+});
+
+test('ProbeRow.verdict distingue recebida-sem-veredito de aberta-sem-nada (ambas listOpenProbes)', async () => {
+  const p1 = await createProbe(pool, base('inst-a', 'AAAA'));
+  await recordProbeReceipt(pool, 'inst-a', 'AAAA', key('m1')); // recebida, ainda sem veredito
+  const p2 = await createProbe(pool, base('inst-b', 'BBBB')); // aberta, nada chegou
+
+  const open = await listOpenProbes(pool);
+  const r1 = open.find((r) => r.id === p1!.id)!;
+  const r2 = open.find((r) => r.id === p2!.id)!;
+  assert.equal(r1.verdict, null);
+  assert.ok(r1.receivedAt instanceof Date);
+  assert.equal(r2.verdict, null);
+  assert.equal(r2.receivedAt, null);
 });
 
 test('takenCodes devolve os códigos dos últimos 7 dias só da instância pedida', async () => {

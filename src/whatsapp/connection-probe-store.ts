@@ -26,11 +26,13 @@ export type ProbeRow = {
   cloudStatus: CloudStatus | null;
   receivedAt: Date | null;
   msgKey: MessageKey | null;
+  /** `null` = ainda em aberto. Distingue "recebida mas ainda sem veredito" (`receivedAt` preenchido, `verdict` null) de "aberta e nada chegou". */
+  verdict: Verdict | null;
   ageMs: number;
 };
 
 const ROW_SELECT = `id, instance, kind, number_id, phone, label, code, parent_id, trigger, wamid, sent_at,
-  cloud_status, received_at, msg_key,
+  cloud_status, received_at, msg_key, verdict,
   EXTRACT(EPOCH FROM (NOW() - COALESCE(sent_at, created_at))) * 1000 AS age_ms`;
 
 function mapProbeRow(r: any): ProbeRow {
@@ -49,13 +51,23 @@ function mapProbeRow(r: any): ProbeRow {
     cloudStatus: r.cloud_status,
     receivedAt: r.received_at,
     msgKey: r.msg_key,
+    verdict: r.verdict,
     ageMs: Number(r.age_ms),
   };
 }
 
-/** Serializa erro/objeto arbitrário para JSONB — Error não tem propriedades enumeráveis. */
+/**
+ * Serializa erro/objeto arbitrário para JSONB. `name`/`message` de `Error`
+ * são explícitos porque não são enumeráveis (`JSON.stringify(err)` cru daria
+ * `'{}'`); o spread depois cobre propriedades próprias adicionais que um
+ * erro customizado tenha atribuído (ex.: `.code`), sem perder `name`/`message`
+ * caso alguma delas também exista como própria.
+ */
 function toJsonbParam(v: unknown): string {
-  if (v instanceof Error) return JSON.stringify({ name: v.name, message: v.message });
+  if (v instanceof Error) {
+    const { name, message, ...rest } = v as Error & Record<string, unknown>;
+    return JSON.stringify({ name, message, ...rest });
+  }
   return JSON.stringify(v ?? null);
 }
 
@@ -102,9 +114,15 @@ export async function createProbe(
 }
 
 /**
- * Grava o resultado do envio. Com `sendError` preenchido, o veredito já sai
- * decidido (`send_failed`) — não há por que esperar o tick seguinte para uma
- * falha que já aconteceu na hora de mandar.
+ * Grava o resultado do envio. Com `sendError` preenchido, o veredito É
+ * DECIDIDO ALI (`send_failed`) — mas só se a sonda ainda estiver em aberto E
+ * sem recebimento. O sender pode estourar o timeout de 15s DEPOIS de a Meta
+ * já ter aceitado o envio — o HTTP falha, mas a mensagem foi entregue, e o
+ * webhook de recebimento é independente desse timeout e pode já ter batido
+ * (`recordProbeReceipt`) antes desta chamada terminar. Sem o CASE,
+ * `send_failed` sobrescreveria uma sonda já recebida (ou com outro veredito
+ * já gravado), inclusive um `alive` que o recebimento ainda não teve chance
+ * de materializar via `setVerdict`.
  */
 export async function markProbeSent(
   pool: Pool,
@@ -115,7 +133,8 @@ export async function markProbeSent(
     await pool.query(
       `UPDATE connection_probes
           SET wamid = $2, mirror_wamid = $3, sent_at = NOW(), send_error = $4::jsonb,
-              verdict = 'send_failed', verdict_at = NOW()
+              verdict = CASE WHEN verdict IS NULL AND received_at IS NULL THEN 'send_failed' ELSE verdict END,
+              verdict_at = CASE WHEN verdict IS NULL AND received_at IS NULL THEN NOW() ELSE verdict_at END
         WHERE id = $1`,
       [id, p.wamid, p.mirrorWamid, toJsonbParam(p.sendError)],
     );
@@ -129,12 +148,15 @@ export async function markProbeSent(
 
 /**
  * Recebimento (inbound) da mensagem de teste. Casa por `(instance, code)`
- * nos últimos 7 dias, preferindo a sonda ABERTA (`verdict IS NULL`) — parent
- * e child de uma repetição compartilham o mesmo código, e só uma das duas
- * costuma estar aberta a qualquer momento. Idempotente: `COALESCE` preserva
- * o primeiro `received_at`/`msg_key` gravado. Recebimento TARDIO (após
- * veredito já definido) também é aceito — é o que sustenta a corrida com
- * `setVerdict` (spec §6): o texto chegou, então a sonda não estava morta.
+ * nos últimos 7 dias, preferindo a sonda ABERTA (`verdict IS NULL`) quando o
+ * código se repete dentro da janela — o código é único por instância nos
+ * últimos 7 dias (garantido pelo chamador via `takenCodes`), mas nada aqui
+ * impede duas linhas com o mesmo texto de código coexistirem na janela, e
+ * "preferir a aberta" é o desempate seguro para esse caso. Idempotente:
+ * `COALESCE` preserva o primeiro `received_at`/`msg_key` gravado. Recebimento
+ * TARDIO (após veredito já definido) também é aceito — é o que sustenta a
+ * corrida com `setVerdict` (spec §6): o texto chegou, então a sonda não
+ * estava morta.
  */
 export async function recordProbeReceipt(
   pool: Pool,
@@ -194,12 +216,24 @@ export async function listOpenProbes(pool: Pool): Promise<ProbeRow[]> {
 }
 
 /**
- * Grava um veredito NEGATIVO (`!== 'alive'`) de forma idempotente entre
- * containers: só grava se ainda `verdict IS NULL AND received_at IS NULL`.
- * Se a 1ª UPDATE não pegar ninguém, relê: se enquanto isso a mensagem
- * chegou (`received_at` preenchido, sem veredito ainda — a corrida do
- * spec §6), o resultado correto é `alive`, NUNCA o veredito negativo que
- * o chamador tentou gravar. Se já havia veredito, devolve `already`.
+ * Grava o veredito de uma sonda, idempotente entre containers. Dois
+ * caminhos, conforme `verdict`:
+ *
+ * - **`'alive'` (positivo)**: o chamador já SABE que a mensagem foi
+ *   recebida (ou decidiu por outro motivo direto) — não há corrida a
+ *   arbitrar, só idempotência. Grava sempre que `verdict IS NULL`, com ou
+ *   sem `received_at` preenchido (não é condição aqui: quem chama com
+ *   `'alive'` não precisa que o recebimento já tenha sido registrado nesta
+ *   tabela). `rowCount=1` → `'set'`; já tinha veredito → `'already'`
+ *   (nunca `'received'` — esse resultado é exclusivo do caminho negativo).
+ *
+ * - **qualquer outro valor (negativo)**: só grava se ainda
+ *   `verdict IS NULL AND received_at IS NULL`. Se a 1ª UPDATE não pegar
+ *   ninguém, relê: se enquanto isso a mensagem chegou (`received_at`
+ *   preenchido, sem veredito ainda — a corrida do spec §6), o resultado
+ *   correto é `'alive'`, NUNCA o veredito negativo que o chamador tentou
+ *   gravar — devolve `'received'`. Se já havia veredito, devolve
+ *   `'already'`.
  */
 export async function setVerdict(
   pool: Pool,
@@ -207,6 +241,15 @@ export async function setVerdict(
   verdict: Verdict,
   extra?: { storeSeen?: boolean },
 ): Promise<'set' | 'received' | 'already'> {
+  if (verdict === 'alive') {
+    const { rowCount } = await pool.query(
+      `UPDATE connection_probes SET verdict = 'alive', verdict_at = NOW(), store_seen = COALESCE($2, store_seen)
+        WHERE id = $1 AND verdict IS NULL`,
+      [id, extra?.storeSeen ?? null],
+    );
+    return rowCount === 1 ? 'set' : 'already';
+  }
+
   const upd = await pool.query(
     `UPDATE connection_probes SET verdict = $2, verdict_at = NOW(), store_seen = COALESCE($3, store_seen)
       WHERE id = $1 AND verdict IS NULL AND received_at IS NULL`,
@@ -214,9 +257,9 @@ export async function setVerdict(
   );
   if (upd.rowCount === 1) return 'set';
   const alive = await pool.query(
-    `UPDATE connection_probes SET verdict = 'alive', verdict_at = NOW()
+    `UPDATE connection_probes SET verdict = 'alive', verdict_at = NOW(), store_seen = COALESCE($2, store_seen)
       WHERE id = $1 AND verdict IS NULL AND received_at IS NOT NULL`,
-    [id],
+    [id, extra?.storeSeen ?? null],
   );
   return alive.rowCount === 1 ? 'received' : 'already';
 }
