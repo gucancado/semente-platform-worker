@@ -125,3 +125,46 @@ export function reconcileStatus(state: 'open' | 'connecting' | 'close', status: 
   if (state === 'close' && status === 'connected') return 'disconnected';
   return null;
 }
+
+// ── Config de boot da sonda (spec §11) ───────────────────────────────────────
+//
+// Vive aqui, e não em `down-notify-start.ts`, porque este módulo é ZERO-IMPORT
+// (sem config/pool/rede) — importar `down-notify-start.ts` (que importa
+// `config.ts`, que faz `EnvSchema.parse(process.env)` no top-level do módulo)
+// obriga qualquer teste puro dessa função a rodar com `--env-file`, mesmo sem
+// nenhuma dependência real de env. `down-notify-start.ts` re-exporta os três
+// símbolos abaixo pra quem já importa dali continuar funcionando.
+
+export type ProbeConfigEnv = {
+  mode: 'off' | 'on';
+  ownPhones: string[];
+  mirror?: 'off' | 'on';
+  opsTo?: string;
+};
+export type ProbeConfigResult = { mode: 'off' } | { error: string } | { mode: 'on'; mirrorTo: string | null };
+
+/**
+ * Config da sonda de conexão, resolvida de forma PURA: `mode:'off'` (ou
+ * ausência dele) é "não inicia"; `mode:'on'` sem telefone próprio é erro
+ * declarado — nunca deriva um estado "on" quebrado.
+ */
+export function buildProbeConfig(env: ProbeConfigEnv): ProbeConfigResult {
+  if (env.mode !== 'on') return { mode: 'off' };
+  if (env.ownPhones.length === 0) return { error: 'WHATSAPP_CLOUD_OWN_PHONES ausente' };
+  const mirror = env.mirror ?? 'on';
+  return { mode: 'on', mirrorTo: mirror === 'on' ? (env.opsTo ?? null) : null };
+}
+
+/**
+ * `{error}` não carrega `mode` (é a forma mais fiel ao caso — "erro de
+ * configuração", não um terceiro MODO), então o discriminante entre os 3
+ * ramos de `ProbeConfigResult` é o `in`, não um campo comum a todos.
+ *
+ * Exportada porque `index.ts` e `down-notify-start.ts` precisam da MESMA
+ * decisão pra saber se a sonda está ligada — reconstruir a condição em cada
+ * lugar (ex.: só checar `CONNECTION_PROBE_MODE==='on'`) divergiria de
+ * `buildProbeConfig` no dia em que este ganhar uma regra nova.
+ */
+export function probeStarted(r: ProbeConfigResult): { mode: 'on'; mirrorTo: string | null } | null {
+  return 'mode' in r && r.mode === 'on' ? r : null;
+}

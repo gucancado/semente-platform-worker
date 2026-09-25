@@ -78,7 +78,11 @@ export async function getQrCode(deps: EvolutionDeps, instance: string): Promise<
   return { base64: r.base64 ?? r.qrcode?.base64 ?? '', pairingCode: r.pairingCode ?? r.code };
 }
 export async function getConnectionState(deps: EvolutionDeps, instance: string): Promise<'open'|'connecting'|'close'> {
-  const r = await call(deps, 'GET', `/instance/connectionState/${instance}`);
+  // `evo()` (com timeout de 15s), não `call()`: os dois vigias (sistema e sonda)
+  // chamam isto a cada tick, e um socket pendurado deixaria o `loop()` deles
+  // preso em `running=true` pra sempre — mesmo erro/formato de retorno de antes,
+  // só com prazo (review round 1, item 6).
+  const r = await evo(deps, 'GET', `/instance/connectionState/${instance}`);
   return (r.instance?.state ?? r.state ?? 'close') as 'open'|'connecting'|'close';
 }
 /**
@@ -124,7 +128,10 @@ export async function fetchMessages(
   page: number,
   offset = 100
 ): Promise<{ records: any[]; total: number; pages: number }> {
-  const r = await call(deps, 'POST', `/chat/findMessages/${instance}`, { where: {}, page, offset });
+  // `evo()` (timeout 15s), mesma razão de `getConnectionState` acima: os dois
+  // vigias leem o store a cada tick via `fetchLatestMessageTs` (que chama esta
+  // função), e sem prazo um socket pendurado travaria o `loop()` para sempre.
+  const r = await evo(deps, 'POST', `/chat/findMessages/${instance}`, { where: {}, page, offset });
   const m = r?.messages ?? {};
   return { records: Array.isArray(m.records) ? m.records : [], total: m.total ?? 0, pages: m.pages ?? 0 };
 }

@@ -1,11 +1,18 @@
 // tests/whatsapp/probe-start.test.ts
 //
-// Teste PURO de `buildProbeConfig` (down-notify-start.ts) — a decisão de LIGAR
-// a sonda de conexão a partir do config, sem env/zod/rede. Spec
-// 2026-09-25-sonda-conexao-whatsapp-design.md §11.
+// Teste PURO de `buildProbeConfig` — a decisão de LIGAR a sonda de conexão a
+// partir do config, sem env/zod/rede. Spec 2026-09-25-sonda-conexao-whatsapp-
+// design.md §11.
+//
+// Importa de `connection-probe.js`, NÃO de `down-notify-start.js` (que
+// re-exporta a mesma função): `down-notify-start.ts` importa `config.ts`, que
+// faz `EnvSchema.parse(process.env)` no top-level do módulo — importar dali
+// obrigaria este teste puro a rodar com `--env-file` só por causa do import,
+// sem nenhuma dependência real de env (review round 1, item 2). Deve passar
+// com `node --test --import tsx tests/whatsapp/probe-start.test.ts`, sem env-file.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildProbeConfig } from '../../src/whatsapp/down-notify-start.js';
+import { buildProbeConfig } from '../../src/whatsapp/connection-probe.js';
 
 test('mode off não inicia, independente do resto', () => {
   const r = buildProbeConfig({ mode: 'off', ownPhones: [], mirror: 'on', opsTo: '553196039118' });

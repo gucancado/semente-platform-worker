@@ -39,7 +39,7 @@ import { startFirefliesImportCron } from './integrations/fireflies/import-cron.j
 import { startProvisioningReaperCron } from './whatsapp/provisioning-reaper.js';
 import { startGroupSyncCron } from './whatsapp/group-sync-cron.js';
 import { startConnectionAlertSweep } from './whatsapp/connection-alerts.js';
-import { buildProbeConfig, buildProbeEvolution, probeStarted, startDownNotify } from './whatsapp/down-notify-start.js';
+import { startDownNotify } from './whatsapp/down-notify-start.js';
 import { handleProbeReceipt } from './whatsapp/connection-probe-service.js';
 import { setOwnCloudProbeHandler } from './webhook/routes.js';
 import { startPresenceKeepalive } from './whatsapp/presence-keepalive.js';
@@ -237,6 +237,34 @@ async function main() {
   assertWhatsappMediaConfig(config, r2Configured());
   assertMeetingSummaryConfig(config);
 
+  // Aviso de queda ao PRÓPRIO número que caiu, pela Cloud API, com link de
+  // reconexão travado no telefone. Números de workspace só com
+  // CONNECTION_NOTIFY_NUMBERS=on; instância de sistema (saturno) pela vigia de
+  // SYSTEM_INSTANCE_WATCH_JSON, que olha o store da Evolution — `state` sozinho
+  // mente. Ligado ANTES do listen (junto com o handler da sonda logo abaixo):
+  // `startDownNotify` só monta deps e sobe `setInterval`/`setTimeout` — nada
+  // aqui depende do socket estar aberto, então mover pra antes não atrasa
+  // `/health`.
+  const probeStart = startDownNotify(pool, app.log);
+
+  // Sonda de conexão (spec 2026-09-25-sonda-conexao-whatsapp-design.md §3, §11):
+  // liga o RECEBIMENTO da sonda pelo webhook só quando `startDownNotify`
+  // também ligou o loop de envio — MESMA decisão, MESMO objeto de Evolution
+  // (devolvidos por `startDownNotify`, não reconstruídos aqui — review round 1,
+  // item 3). Registrado ANTES de `app.listen`: `setOwnCloudProbeHandler` é
+  // module-level em `webhook/routes.ts`, e o `/webhook` pode receber tráfego
+  // assim que o socket abre — registrar depois deixaria uma janela em que uma
+  // DM de recebimento da sonda chegaria com o handler ainda `null` e seria só
+  // descartada como "own_cloud" sem casar o código (review round 1, item 4).
+  // Com o modo 'off' (ou config inválida) `probeStart` é `null` e o handler
+  // fica `null` — a porta anti-CRM (SEMPRE ligada) segue descartando a DM do
+  // nosso Cloud sem tentar casar código nenhum.
+  if (probeStart) {
+    setOwnCloudProbeHandler((instance, code, key) =>
+      handleProbeReceipt({ pool, log: app.log, evolution: probeStart.probeEvolution }, instance, code, key),
+    );
+  }
+
   await app.listen({ host: '0.0.0.0', port: config.PORT });
   app.log.info({ port: config.PORT }, 'semente-platform-worker up');
 
@@ -286,34 +314,6 @@ async function main() {
   // Sweep de queda de conexão WhatsApp: alerta (painel + WhatsApp Saturno) quando um
   // número cai de 'connected' e fica fora do ar além do debounce. Idempotente por episódio.
   startConnectionAlertSweep(pool, app.log);
-
-  // Aviso de queda ao PRÓPRIO número que caiu, pela Cloud API, com link de
-  // reconexão travado no telefone. Números de workspace só com
-  // CONNECTION_NOTIFY_NUMBERS=on; instância de sistema (saturno) pela vigia de
-  // SYSTEM_INSTANCE_WATCH_JSON, que olha o store da Evolution — `state` sozinho mente.
-  startDownNotify(pool, app.log);
-
-  // Sonda de conexão (spec 2026-09-25-sonda-conexao-whatsapp-design.md §3, §11):
-  // liga o RECEBIMENTO da sonda pelo webhook só quando `startDownNotify` também
-  // ligaria o loop de envio — MESMA decisão (`buildProbeConfig`/`probeStarted`),
-  // pra nunca receber sem nunca enviar (ou o inverso). Com o modo 'off' (ou
-  // WHATSAPP_CLOUD_OWN_PHONES ausente) o handler fica `null` e a porta anti-CRM
-  // (SEMPRE ligada) segue descartando a DM do nosso Cloud sem tentar casar
-  // código nenhum.
-  const probeCfg = probeStarted(
-    buildProbeConfig({
-      mode: config.CONNECTION_PROBE_MODE,
-      ownPhones: config.WHATSAPP_CLOUD_OWN_PHONES,
-      mirror: config.CONNECTION_PROBE_MIRROR,
-      opsTo: config.OPS_NOTIFY_TO,
-    }),
-  );
-  if (probeCfg) {
-    const probeEvolution = buildProbeEvolution(pool);
-    setOwnCloudProbeHandler((instance, code, key) =>
-      handleProbeReceipt({ pool, log: app.log, evolution: probeEvolution }, instance, code, key),
-    );
-  }
 
   // Keep-alive de presença: reafirma `unavailable` nas instâncias conectadas. Sem isso
   // o estado decai no servidor do WhatsApp e o CELULAR DO CLIENTE para de receber push

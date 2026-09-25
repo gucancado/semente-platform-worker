@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createEvolutionInstance, getConnectionState, sendText, ensureEvolutionInstance, setPresenceUnavailable, fetchGroupParticipants, fetchLatestMessageTs } from '../../src/evolution/client.js';
+import { createEvolutionInstance, getConnectionState, sendText, ensureEvolutionInstance, setPresenceUnavailable, fetchGroupParticipants, fetchLatestMessageTs, fetchMessages } from '../../src/evolution/client.js';
 
 function mockFetch(handler: (url: string, init: any) => { status: number; body: any }) {
   return async (url: string, init: any) => {
@@ -355,6 +355,38 @@ test('Todas as chamadas de timeout incluem AbortSignal.timeout', async () => {
     }) as any,
   };
   await markMessageAsRead(deps, 'i1', key);
+  assert.ok(seenInit.signal instanceof AbortSignal);
+});
+
+// Review round 1, item 6: os dois vigias (sistema e sonda) chamam
+// `getConnectionState`/`fetchMessages` (via `fetchLatestMessageTs`) a cada
+// tick — sem timeout um socket pendurado deixava `loop()` preso em
+// `running=true` pra sempre, e nenhum tick seguinte rodaria de novo.
+test('getConnectionState inclui AbortSignal.timeout', async () => {
+  let seenInit: any = null;
+  const deps = {
+    baseUrl: 'https://evo',
+    apiKey: 'k',
+    fetch: (async (url: string, init: any) => {
+      seenInit = init;
+      return { ok: true, status: 200, json: async () => ({ instance: { state: 'open' } }) } as any;
+    }) as any,
+  };
+  assert.equal(await getConnectionState(deps, 'i1'), 'open');
+  assert.ok(seenInit.signal instanceof AbortSignal);
+});
+
+test('fetchMessages inclui AbortSignal.timeout', async () => {
+  let seenInit: any = null;
+  const deps = {
+    baseUrl: 'https://evo',
+    apiKey: 'k',
+    fetch: (async (url: string, init: any) => {
+      seenInit = init;
+      return { ok: true, status: 200, json: async () => ({ messages: { records: [], total: 0, pages: 0 } }) } as any;
+    }) as any,
+  };
+  await fetchMessages(deps, 'i1', 1);
   assert.ok(seenInit.signal instanceof AbortSignal);
 });
 

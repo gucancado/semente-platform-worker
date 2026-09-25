@@ -6,10 +6,15 @@ import { resolveWorkspaceNames } from '../bloquim/workspace-names.js';
 import { listConnectedInstances, updateNumberStatus } from './numbers.js';
 import { makeCloudDownSender, makeOpsCopySender } from './down-notify-sender.js';
 import { makeEvolutionProbe } from './down-notify-probe.js';
-import { parseOffDates } from './business-hours.js';
+import { parseOffDates, type OffDates } from './business-hours.js';
 import type { EvolutionDeps } from '../evolution/client.js';
 import { archiveChat, fetchInstanceOwner, findProbeInStore, markMessageAsRead } from '../evolution/client.js';
 import { listProbeTargets, runProbeTick, type ProbeDeps } from './connection-probe-service.js';
+// buildProbeConfig/probeStarted moram em `connection-probe.ts` (módulo
+// ZERO-IMPORT) pra o teste puro de config não precisar de `--env-file` só
+// porque este arquivo importa `config.ts` — re-exportadas aqui pra quem já
+// importa deste módulo continuar funcionando sem mudar import (review round 1).
+import { buildProbeConfig, probeStarted, type ProbeConfigEnv, type ProbeConfigResult } from './connection-probe.js';
 import {
   runSystemInstanceWatch,
   sweepDownNumbers,
@@ -18,6 +23,8 @@ import {
   type SystemProbe,
   type SystemWatchOpts,
 } from './down-notify-service.js';
+
+export { buildProbeConfig, probeStarted, type ProbeConfigEnv, type ProbeConfigResult };
 
 const LINK_MAX_CLICKS = 10;
 const LINK_TTL_DAYS = 7;
@@ -95,41 +102,6 @@ export function buildSystemWatchOpts(log: DownNotifyLog): SystemWatchOpts {
   };
 }
 
-/**
- * Config da sonda de conexão, resolvida de forma PURA (spec §11): sem env nem
- * rede aqui, para o teste travar as 4 combinações sem precisar do zod nem do
- * processo. `mode:'off'` (ou ausência dele) é "não inicia"; `mode:'on'` sem
- * telefone próprio é erro declarado — nunca deriva um estado "on" quebrado.
- */
-export type ProbeConfigEnv = {
-  mode: 'off' | 'on';
-  ownPhones: string[];
-  mirror?: 'off' | 'on';
-  opsTo?: string;
-};
-export type ProbeConfigResult = { mode: 'off' } | { error: string } | { mode: 'on'; mirrorTo: string | null };
-
-export function buildProbeConfig(env: ProbeConfigEnv): ProbeConfigResult {
-  if (env.mode !== 'on') return { mode: 'off' };
-  if (env.ownPhones.length === 0) return { error: 'WHATSAPP_CLOUD_OWN_PHONES ausente' };
-  const mirror = env.mirror ?? 'on';
-  return { mode: 'on', mirrorTo: mirror === 'on' ? (env.opsTo ?? null) : null };
-}
-
-/**
- * `{error}` não carrega `mode` (é a forma mais fiel ao caso — "erro de
- * configuração", não um terceiro MODO), então o discriminante entre os 3
- * ramos de `ProbeConfigResult` é o `in`, não um campo comum a todos.
- *
- * Exportada porque `index.ts` precisa da MESMA decisão pra saber se liga
- * `setOwnCloudProbeHandler` — reconstruir a condição lá (ex.: só checar
- * `CONNECTION_PROBE_MODE==='on'`) divergiria de `buildProbeConfig` no dia em
- * que este ganhar uma regra nova.
- */
-export function probeStarted(r: ProbeConfigResult): { mode: 'on'; mirrorTo: string | null } | null {
-  return 'mode' in r && r.mode === 'on' ? r : null;
-}
-
 /** `sendProbe` da sonda: SEM fallback de texto livre (spec §11) — fora da janela
  * de 24h o texto seria aceito e recusado depois, poluindo o veredito com um
  * `send_failed` que na verdade nunca tentou o template. */
@@ -141,7 +113,12 @@ function makeSendProbe(phoneNumberId: string): ProbeDeps['sendProbe'] {
         language: OPS_ALERT_TEMPLATE.language,
         ...opsAlertTemplateParams({ titulo, detalhe }),
       });
-      return { ok: r.ok, wamid: r.send_id, detail: r.ok ? undefined : r.detail };
+      // Status HTTP preservado dentro de `detail` (o contrato de ProbeDeps não
+      // tem campo `status` próprio) — sem ele, um 4xx do Cloud (template não
+      // aprovado, número bloqueado) e um erro de rede viravam o mesmo log
+      // `send_failed` sem nada pra distinguir causa de configuração de causa
+      // transitória (review round 1).
+      return { ok: r.ok, wamid: r.send_id, detail: r.ok ? undefined : { status: r.status, detail: r.detail } };
     } catch (err) {
       return { ok: false, wamid: null, detail: (err as Error).message };
     }
@@ -187,19 +164,26 @@ export function buildProbeEvolution(pool: Pool): ProbeDeps['evolution'] {
   };
 }
 
-/** Dependências reais da sonda de conexão (ver `buildProbeEvolution` acima). */
-function buildProbeDeps(pool: Pool, log: DownNotifyLog, phoneNumberId: string, mirrorTo: string | null): ProbeDeps {
-  // Não reusa `buildSystemWatchOpts` aqui: aquela tipa `offDates` como opcional
-  // (o vigia de sistema tolera datas ausentes), e a sonda exige `OffDates`
-  // sempre presente — o `parseOffDates` direto já devolve o `Set` (vazio na
-  // ausência de config), sem o `| undefined` da forma do vigia.
-  const { dates: offDates } = parseOffDates(config.BUSINESS_HOURS_EXTRA_OFF_DATES);
+/**
+ * Dependências reais da sonda de conexão. `evolution` e `offDates` entram por
+ * parâmetro (construídos 1x por `startDownNotify`) — não duplica
+ * `buildProbeEvolution`/`parseOffDates` aqui, pra `index.ts` e o loop do tick
+ * enxergarem exatamente o MESMO objeto (review round 1, item 3).
+ */
+function buildProbeDeps(
+  pool: Pool,
+  log: DownNotifyLog,
+  phoneNumberId: string,
+  mirrorTo: string | null,
+  evolution: ProbeDeps['evolution'],
+  offDates: OffDates,
+): ProbeDeps {
   return {
     pool,
     log,
     now: () => new Date(),
     rand: Math.random,
-    evolution: buildProbeEvolution(pool),
+    evolution,
     sendProbe: makeSendProbe(phoneNumberId),
     sendOps: makeSendOps(phoneNumberId, config.OPS_NOTIFY_TO),
     mirrorTo,
@@ -219,8 +203,14 @@ function buildProbeDeps(pool: Pool, log: DownNotifyLog, phoneNumberId: string, m
 /**
  * Liga os vigias conforme o config. Configuração incompleta NÃO derruba o
  * worker: loga em erro e não inicia — o resto do processo segue.
+ *
+ * Devolve `{ probeEvolution }` quando o loop da SONDA efetivamente subiu (modo
+ * ligado, `WHATSAPP_CLOUD_OWN_PHONES` presente E o Cloud sender resolvido —
+ * `buildDownNotifyDeps` ok), ou `null` caso contrário — é o que `index.ts` usa
+ * pra ligar `setOwnCloudProbeHandler` com a MESMA Evolution do tick, sem
+ * reconstruir a decisão nem o objeto (review round 1, item 3).
  */
-export function startDownNotify(pool: Pool, log: DownNotifyLog): void {
+export function startDownNotify(pool: Pool, log: DownNotifyLog): { probeEvolution: ProbeDeps['evolution'] } | null {
   const numbersOn = config.CONNECTION_NOTIFY_NUMBERS === 'on';
   const targets = config.SYSTEM_INSTANCE_WATCH_JSON;
   const probeCfg = buildProbeConfig({
@@ -231,6 +221,21 @@ export function startDownNotify(pool: Pool, log: DownNotifyLog): void {
   });
   const started = probeStarted(probeCfg);
   const probeOn = started != null;
+  const probeError = 'error' in probeCfg ? probeCfg.error : null;
+
+  // Loga o erro de config da sonda JÁ AQUI, antes de qualquer `return` — na
+  // versão anterior este log vivia só perto do loop, e os dois early-returns
+  // abaixo (nada ligado; `buildDownNotifyDeps` falhou) o engoliam em silêncio
+  // sempre que numbers/system também estavam desligados (review round 1, item 1).
+  if (probeError) {
+    log.error({ reason: probeError }, 'sonda de conexão: NÃO iniciada');
+  }
+
+  // Off-dates parseadas UMA VEZ (com o warn de entrada malformada de sempre) —
+  // o vigia de sistema e a sonda usam o MESMO `Set`, nunca duas leituras/dois
+  // warns pro mesmo `BUSINESS_HOURS_EXTRA_OFF_DATES` (review round 1, item 9).
+  const watchOpts = buildSystemWatchOpts(log);
+  const offDates: OffDates = watchOpts.offDates ?? new Set();
 
   // Lacuna do rollout (ruling do controlador na task 8): com a sonda desligada,
   // `store_stale` do saturno deixou de abrir episódio sozinho — virou só
@@ -244,13 +249,19 @@ export function startDownNotify(pool: Pool, log: DownNotifyLog): void {
   }
 
   if (!numbersOn && targets.length === 0 && !probeOn) {
-    log.info({}, 'down-notify: desligado (CONNECTION_NOTIFY_NUMBERS=off, sem SYSTEM_INSTANCE_WATCH_JSON e sonda de conexão off)');
-    return;
+    // `probeError` é "o operador pediu a sonda e a config está quebrada" —
+    // bem diferente de "off" (não pedida). Dizer "off" nos dois casos faria o
+    // erro logo acima parecer conversa fiada (review round 1, item 1).
+    log.info(
+      {},
+      `down-notify: desligado (CONNECTION_NOTIFY_NUMBERS=off, sem SYSTEM_INSTANCE_WATCH_JSON e sonda de conexão ${probeError ? 'com erro de config (ver log acima)' : 'off'})`,
+    );
+    return null;
   }
   const built = buildDownNotifyDeps(pool, log);
   if ('error' in built) {
     log.error({ reason: built.error }, 'down-notify: NÃO iniciado');
-    return;
+    return null;
   }
   const { deps, phoneNumberId } = built;
 
@@ -259,7 +270,6 @@ export function startDownNotify(pool: Pool, log: DownNotifyLog): void {
   }
   if (targets.length > 0) {
     const probe = buildSystemProbe(pool);
-    const watchOpts = buildSystemWatchOpts(log);
     loop(
       'system',
       config.SYSTEM_INSTANCE_WATCH_INTERVAL_MS,
@@ -267,36 +277,49 @@ export function startDownNotify(pool: Pool, log: DownNotifyLog): void {
       log,
     );
   }
+  let result: { probeEvolution: ProbeDeps['evolution'] } | null = null;
   if (started) {
-    const probeDeps = buildProbeDeps(pool, log, phoneNumberId, started.mirrorTo);
+    const probeEvolution = buildProbeEvolution(pool);
+    const probeDeps = buildProbeDeps(pool, log, phoneNumberId, started.mirrorTo, probeEvolution, offDates);
+    // Deslocado por METADE do intervalo do vigia de sistema (ruling do
+    // controlador, review round 1 item 5): os dois loops usam o MESMO
+    // `SYSTEM_INSTANCE_WATCH_INTERVAL_MS` e, sem o offset, disparariam o 1º
+    // tick juntos (ambos chamam a Evolution imediatamente no boot) e depois
+    // em lockstep a cada intervalo — uma rajada evitável contra a mesma API.
     loop(
       'probe',
       config.SYSTEM_INSTANCE_WATCH_INTERVAL_MS,
       async () => runProbeTick(probeDeps, await listProbeTargets(pool, config.SYSTEM_INSTANCE_WATCH_JSON)),
       log,
+      Math.floor(config.SYSTEM_INSTANCE_WATCH_INTERVAL_MS / 2),
     );
-  } else if ('error' in probeCfg) {
-    log.error({ reason: probeCfg.error }, 'sonda de conexão: NÃO iniciada');
+    result = { probeEvolution };
   }
   log.info(
     {
       numbers: numbersOn,
       systemTargets: targets.map((t) => t.instance),
-      extraOffDates: parseOffDates(config.BUSINESS_HOURS_EXTRA_OFF_DATES).dates.size,
+      extraOffDates: offDates.size,
       sender: phoneNumberId,
       template: config.CONNECTION_NOTIFY_TEMPLATE_NAME ?? null,
       // Visível no boot: sem isto, "o dono não recebeu a cópia" vira caça ao
       // env sem nenhum sinal de que ele estava ausente o tempo todo.
       opsCopy: config.OPS_NOTIFY_TO ? 'on' : 'off (sem OPS_NOTIFY_TO)',
-      probe: started ? 'on' : 'off',
+      probe: started ? 'on' : probeError ? 'error' : 'off',
       mirrorTo: started ? started.mirrorTo : null,
     },
     'down-notify iniciado',
   );
+  return result;
 }
 
-/** setInterval + flag de sobreposição (padrão do repo) + primeiro tick imediato. */
-function loop(name: string, intervalMs: number, fn: () => Promise<unknown>, log: DownNotifyLog): void {
+/**
+ * setInterval + flag de sobreposição (padrão do repo) + primeiro tick.
+ * `initialDelayMs` (default 0 = imediato) adia só o PRIMEIRO tick — os
+ * seguintes continuam a cada `intervalMs` a partir dele (usado pra sonda e
+ * vigia de sistema não rajarem a Evolution no mesmo instante — ver acima).
+ */
+function loop(name: string, intervalMs: number, fn: () => Promise<unknown>, log: DownNotifyLog, initialDelayMs = 0): void {
   let running = false;
   const tick = async () => {
     if (running) return;
@@ -309,6 +332,13 @@ function loop(name: string, intervalMs: number, fn: () => Promise<unknown>, log:
       running = false;
     }
   };
-  setInterval(tick, intervalMs);
-  void tick();
+  if (initialDelayMs > 0) {
+    setTimeout(() => {
+      void tick();
+      setInterval(tick, intervalMs);
+    }, initialDelayMs);
+  } else {
+    setInterval(tick, intervalMs);
+    void tick();
+  }
 }
