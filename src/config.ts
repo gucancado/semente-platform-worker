@@ -166,6 +166,13 @@ const EnvSchema = z.object({
   // Destino do aviso: E.164 sem '+' (ex.: 553196039118).
   OPS_NOTIFY_TO: z.string().optional(),
 
+  // Telefones E.164 dos NOSSOS números Cloud (vírgula). A porta anti-CRM do
+  // /webhook usa SEMPRE; a sonda de conexão exige. Ex.: +553190858510
+  WHATSAPP_CLOUD_OWN_PHONES: z
+    .string()
+    .optional()
+    .transform((s) => (s ?? '').split(',').map((x) => x.replace(/\D+/g, '')).filter(Boolean)),
+
   // ── Vigia de instância de SISTEMA (ex.: saturno, fora de whatsapp_numbers por contrato) ──
   // JSON: [{"instance":"saturno","expected_phone":"+553195950748","label":"Monitor de grupos"}]
   // Opcional por alvo: "traffic":"always" (padrão "business_hours" — ver SystemWatchSchema).
