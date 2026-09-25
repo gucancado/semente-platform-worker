@@ -332,3 +332,84 @@ export async function takenCodes(pool: Pool, instance: string): Promise<Set<stri
   );
   return new Set(rows.map((r) => r.code as string));
 }
+
+/**
+ * Abre o episódio de queda de um NÚMERO confirmado pela sonda (`instance_outages`,
+ * `kind='number'`, `started_at_source='probe'`, `detected_by='probe'`, `reason`=gatilho
+ * que levou à sonda). Ver spec §7 "Números de atendimento".
+ *
+ * `started_at` é o mais cedo entre o início estimado (última mensagem de tráfego
+ * real do store, se o chamador souber) e o envio da 1ª sonda — nunca no futuro
+ * (`LEAST(..., NOW())`): início estimado adiantado violaria `ended_at >= started_at`
+ * no fechamento (mesma proteção de `recordSystemHealth`).
+ *
+ * `ON CONFLICT (instance) WHERE ended_at IS NULL DO NOTHING`: a 2ª sonda do mesmo
+ * par (`repeated` → `down`) não abre um segundo episódio, e um episódio `webhook`
+ * já aberto (número caiu por transição de estado antes de a sonda concluir)
+ * também bloqueia — a instância já está documentada como fora do ar.
+ */
+export async function openNumberProbeEpisode(
+  pool: Pool,
+  p: { instance: string; numberId: number; startedAt: Date | null; firstSentAt: Date; trigger: Trigger },
+): Promise<boolean> {
+  const { rowCount } = await pool.query(
+    `INSERT INTO instance_outages (instance, kind, number_id, started_at, started_at_source, reason, detected_by)
+     VALUES ($1, 'number', $2,
+             LEAST(COALESCE($3::timestamptz, $4::timestamptz), $4::timestamptz, NOW()),
+             'probe', $5, 'probe')
+     ON CONFLICT (instance) WHERE ended_at IS NULL DO NOTHING`,
+    [p.instance, p.numberId, p.startedAt, p.firstSentAt, p.trigger],
+  );
+  return rowCount === 1;
+}
+
+/**
+ * Fecha o episódio ABERTO de fonte `probe` da instância — nunca um episódio
+ * `webhook` (aquele segue as regras de `updateNumberStatus`/`closeOpenOutage`).
+ * `ended_at = GREATEST(NOW(), started_at)` protege o CHECK `ended_at >= started_at`
+ * do mesmo jeito que `closeOpenOutage` em `numbers.ts`.
+ *
+ * Se o episódio fechado for de NÚMERO (`kind='number'`), zera `down_notified_at`/
+ * `down_notify_count` do número na MESMA instrução (CTE) — atômico com o
+ * fechamento, como todo fechamento de episódio de número (spec §7).
+ *
+ * ⚠️ Task 8 estende aqui o equivalente para `kind='system'` (hoje só número tem
+ * contagem de aviso a zerar nesta tabela; o aviso de sistema vive em
+ * `system_instance_health`, zerado por outro caminho).
+ */
+export async function closeProbeEpisode(pool: Pool, instance: string): Promise<boolean> {
+  const { rows } = await pool.query(
+    `WITH closed AS (
+       UPDATE instance_outages
+          SET ended_at = GREATEST(NOW(), started_at), updated_at = NOW()
+        WHERE instance = $1 AND ended_at IS NULL AND started_at_source = 'probe'
+        RETURNING kind, number_id),
+     zeroed AS (
+       UPDATE whatsapp_numbers wn
+          SET down_notified_at = NULL, down_notify_count = 0
+         FROM closed
+        WHERE closed.kind = 'number' AND wn.id = closed.number_id
+        RETURNING wn.id)
+     SELECT count(*)::int AS n FROM closed`,
+    [instance],
+  );
+  return Number(rows[0]?.n ?? 0) > 0;
+}
+
+/**
+ * Episódio `probe` aberto da instância, se houver. Usado pelo lado sistema
+ * (Task 8) para decidir a transição de `planEpisode` quando a fonte da queda
+ * é a sonda, não o estado da Evolution.
+ */
+export async function openProbeEpisodeOf(
+  pool: Pool,
+  instance: string,
+): Promise<{ startedAt: Date; kind: 'number' | 'system' } | null> {
+  const { rows } = await pool.query(
+    `SELECT started_at, kind FROM instance_outages
+      WHERE instance = $1 AND ended_at IS NULL AND started_at_source = 'probe'
+      LIMIT 1`,
+    [instance],
+  );
+  return rows[0] ? { startedAt: rows[0].started_at, kind: rows[0].kind } : null;
+}

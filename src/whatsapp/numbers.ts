@@ -235,11 +235,20 @@ export async function claimNumberByPhone(
  * Fecha o episódio aberto desta instância, se houver. Idempotente.
  * Aceita `Pool` ou `PoolClient` (`Pick<Pool, 'query'>`) — dentro de
  * `claimNumberByPhone` precisa rodar na MESMA transação do `client`.
+ *
+ * `ended_at = GREATEST(NOW(), started_at)` protege o CHECK `ended_at >=
+ * started_at` (mesma proteção de `closeProbeEpisode`). Todo fechamento de
+ * episódio de NÚMERO zera `down_notified_at`/`down_notify_count` — feito na
+ * MESMA instrução (CTE) para ser atômico com o fechamento (spec §7).
  */
 export async function closeOpenOutage(pool: Pick<Pool, 'query'>, instance: string): Promise<void> {
   await pool.query(
-    `UPDATE instance_outages SET ended_at = NOW(), updated_at = NOW()
-      WHERE instance = $1 AND ended_at IS NULL`,
+    `WITH closed AS (
+       UPDATE instance_outages SET ended_at = GREATEST(NOW(), started_at), updated_at = NOW()
+        WHERE instance = $1 AND ended_at IS NULL
+        RETURNING number_id)
+     UPDATE whatsapp_numbers SET down_notified_at = NULL, down_notify_count = 0
+      WHERE id IN (SELECT number_id FROM closed WHERE number_id IS NOT NULL)`,
     [instance],
   );
 }

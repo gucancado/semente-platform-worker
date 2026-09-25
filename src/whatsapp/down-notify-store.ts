@@ -23,17 +23,24 @@ export type DownNumberRow = NotifyVersion & {
   downSince: Date;
 };
 
-/** Números fora do ar com telefone conhecido — sem telefone não há para quem avisar. */
+/**
+ * Números fora do ar com telefone conhecido — sem telefone não há para quem
+ * avisar. Inclui o "zumbi": `status='connected'` (a Evolution/webhook nunca
+ * viu queda) mas com episódio `probe` aberto (a sonda PROVOU que a sessão
+ * morreu por dentro — spec §7). `downSince` = `started_at` do episódio aberto
+ * quando houver (fonte `webhook` ou `probe`), senão `disconnected_since`.
+ */
 export async function listDownNumbers(pool: Pool): Promise<DownNumberRow[]> {
   const { rows } = await pool.query(
-    `SELECT id, workspace_id, evolution_instance, phone, label,
-            disconnected_since, down_notified_at, down_notify_count
-       FROM whatsapp_numbers
-      WHERE status <> 'connected'
-        AND removed_at IS NULL
-        AND disconnected_since IS NOT NULL
-        AND phone IS NOT NULL
-      ORDER BY id`,
+    `SELECT wn.id, wn.workspace_id, wn.evolution_instance, wn.phone, wn.label,
+            COALESCE(o.started_at, wn.disconnected_since) AS down_since,
+            wn.down_notified_at, wn.down_notify_count
+       FROM whatsapp_numbers wn
+       LEFT JOIN instance_outages o ON o.instance = wn.evolution_instance AND o.ended_at IS NULL
+      WHERE wn.removed_at IS NULL AND wn.phone IS NOT NULL
+        AND ( (wn.status <> 'connected' AND wn.disconnected_since IS NOT NULL)
+              OR o.started_at_source = 'probe' )
+      ORDER BY wn.id`,
   );
   return rows.map((r) => ({
     id: Number(r.id),
@@ -41,17 +48,26 @@ export async function listDownNumbers(pool: Pool): Promise<DownNumberRow[]> {
     instance: r.evolution_instance,
     phone: r.phone,
     label: r.label,
-    downSince: r.disconnected_since,
+    downSince: r.down_since,
     lastNotifiedAt: r.down_notified_at ?? null,
     notifyCount: Number(r.down_notify_count),
   }));
 }
 
+/**
+ * Reivindicação otimista do aviso. Além do `status <> 'connected'` de sempre,
+ * aceita o zumbi: número `connected` com episódio `probe` aberto — a mesma
+ * condição de `listDownNumbers`.
+ */
 export async function claimNumberNotification(pool: Pool, id: number, prev: NotifyVersion): Promise<boolean> {
   const { rowCount } = await pool.query(
-    `UPDATE whatsapp_numbers
-        SET down_notified_at = NOW(), down_notify_count = down_notify_count + 1
-      WHERE id = $1 AND status <> 'connected' AND down_notify_count = $2`,
+    `UPDATE whatsapp_numbers wn
+        SET down_notified_at = NOW(), down_notify_count = wn.down_notify_count + 1
+      WHERE wn.id = $1 AND wn.down_notify_count = $2
+        AND ( wn.status <> 'connected'
+              OR EXISTS (SELECT 1 FROM instance_outages o
+                          WHERE o.instance = wn.evolution_instance AND o.ended_at IS NULL
+                            AND o.started_at_source = 'probe') )`,
     [id, prev.notifyCount],
   );
   return rowCount === 1;
