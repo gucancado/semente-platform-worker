@@ -10,12 +10,14 @@
 import { test, beforeEach, after } from 'node:test';
 import assert from 'node:assert/strict';
 import Fastify from 'fastify';
+import type { Pool } from 'pg';
 import { pool } from '../../src/db.js';
 import { registerProvisionRoutes } from '../../src/whatsapp/provision-routes.js';
 import type { EvolutionDeps } from '../../src/evolution/client.js';
 import { createReconnectLink, getProvisionLink, generateLinkToken } from '../../src/whatsapp/provision-links.js';
+import { updateNumberStatus } from '../../src/whatsapp/numbers.js';
 
-function buildApp(opts: { state?: 'open' | 'close'; logoutFails?: boolean; webhookFails?: boolean } = {}) {
+function buildApp(opts: { state?: 'open' | 'close'; logoutFails?: boolean; logoutStatus?: number; webhookFails?: boolean } = {}) {
   const state = opts.state ?? 'open';
   const calls: string[] = [];
   const evolution: EvolutionDeps = {
@@ -26,7 +28,7 @@ function buildApp(opts: { state?: 'open' | 'close'; logoutFails?: boolean; webho
         return { ok: true, status: 200, json: async () => ({ instance: { state } }) } as any;
       }
       if (/\/instance\/logout\//.test(url)) {
-        if (opts.logoutFails) return { ok: false, status: 500, json: async () => ({}) } as any;
+        if (opts.logoutFails) return { ok: false, status: opts.logoutStatus ?? 500, json: async () => ({}) } as any;
         return { ok: true, status: 200, json: async () => ({}) } as any;
       }
       if (/\/webhook\/set\//.test(url) && opts.webhookFails) return { ok: false, status: 500, json: async () => ({}) } as any;
@@ -38,6 +40,44 @@ function buildApp(opts: { state?: 'open' | 'close'; logoutFails?: boolean; webho
   registerProvisionRoutes(app, { pool, evolution, panelToken: 'test-panel', webhook: { url: 'https://wk/webhook', secret: 'sek' } });
   return { app, calls };
 }
+
+// Variante com estado da Evolution MUTÁVEL após o app já montado — para o caso
+// "2ª chamada, sessão já caiu de verdade (close), sem novo logout".
+function buildAppMutableState() {
+  let state: 'open' | 'close' = 'open';
+  const calls: string[] = [];
+  const evolution: EvolutionDeps = {
+    baseUrl: 'http://mock', apiKey: 'k',
+    fetch: (async (url: string, init?: any) => {
+      calls.push(`${init?.method ?? 'GET'} ${url}`);
+      if (/\/instance\/connectionState\//.test(url)) {
+        return { ok: true, status: 200, json: async () => ({ instance: { state } }) } as any;
+      }
+      if (/\/instance\/logout\//.test(url)) return { ok: true, status: 200, json: async () => ({}) } as any;
+      if (/\/instance\/connect\//.test(url)) return { ok: true, status: 200, json: async () => ({ base64: 'data:image/png;base64,QR', pairingCode: 'ABCD1234' }) } as any;
+      return { ok: true, status: 200, json: async () => ({}) } as any;
+    }) as any,
+  };
+  const app = Fastify();
+  registerProvisionRoutes(app, { pool, evolution, panelToken: 'test-panel', webhook: { url: 'https://wk/webhook', secret: 'sek' } });
+  return { app, calls, setState: (s: 'open' | 'close') => { state = s; } };
+}
+
+// Pool que erra numa query específica (a de `openProbeEpisodeOf`) e delega o
+// resto ao pool real — para provar que uma falha de BANCO no GET não sai
+// rotulada 'evolution_unavailable'.
+function poolFailingOnProbeQuery(): Pool {
+  return {
+    query: (text: any, params?: any) => {
+      const sql = typeof text === 'string' ? text : text?.text ?? '';
+      if (/FROM instance_outages/.test(sql) && /started_at_source = 'probe'/.test(sql)) {
+        return Promise.reject(new Error('boom-db'));
+      }
+      return pool.query(text, params);
+    },
+  } as unknown as Pool;
+}
+
 const H = { 'x-panel-token': 'test-panel', 'x-acting-user': 'u1' };
 
 async function mkReconnect(instance = 'saturno', maxClicks = 10) {
@@ -103,6 +143,86 @@ test('POST com open + probe: falha no logout → 502 evolution_unavailable, sem 
   assert.equal(link?.clicksUsed, 0);
 });
 
+test('POST zumbi marca whatsapp_numbers.disconnected; a reconexão real que chegar depois fecha o episódio probe', async () => {
+  // Simula o caso descrito na review: status ficou 'connected' (o webhook de
+  // 'close' do logout se perdeu). Sem a marcação síncrona, a reconexão real
+  // chegaria com old_status='connected' de novo e updateNumberStatus não
+  // fecharia o episódio probe (só fecha quando old_status ≠ 'connected').
+  await pool.query(
+    `INSERT INTO whatsapp_numbers (workspace_id, phone, evolution_instance, label, status)
+     VALUES ('ws-1', '+553195950748', 'saturno', 'Saturno', 'connected')`,
+  );
+  const { app } = buildApp({ state: 'open' });
+  const token = await mkReconnect();
+  await mkZombieEpisode('saturno');
+
+  const res = await app.inject({ method: 'POST', url: `/admin/whatsapp/link/${token}/reconnect`, headers: H });
+  assert.equal(res.statusCode, 200);
+
+  const { rows: afterLogout } = await pool.query(`SELECT status FROM whatsapp_numbers WHERE evolution_instance='saturno'`);
+  assert.equal(afterLogout[0].status, 'disconnected');
+
+  // Reconexão real, mais tarde (o que o webhook `connection.update` faria).
+  await updateNumberStatus(pool, 'saturno', { status: 'connected', phone: '+553195950748' });
+
+  const { rows: outage } = await pool.query(
+    `SELECT ended_at FROM instance_outages WHERE instance='saturno' AND started_at_source='probe'`,
+  );
+  assert.equal(outage.length, 1);
+  assert.ok(outage[0].ended_at != null, 'episódio probe deveria estar fechado após a reconexão real');
+});
+
+test('POST zumbi + logout 404 (instância sumiu na Evolution) → instance_not_found, mesmo mapeamento do state check', async () => {
+  const { app, calls } = buildApp({ state: 'open', logoutFails: true, logoutStatus: 404 });
+  const token = await mkReconnect();
+  await mkZombieEpisode('saturno');
+
+  const res = await app.inject({ method: 'POST', url: `/admin/whatsapp/link/${token}/reconnect`, headers: H });
+
+  assert.equal(res.statusCode, 404);
+  assert.equal(res.json().error, 'instance_not_found');
+  assert.ok(!calls.some((c) => c.includes('/webhook/set/')), calls.join(' | '));
+  const link = await getProvisionLink(pool, token);
+  assert.equal(link?.status, 'active');
+  assert.equal(link?.clicksUsed, 0);
+});
+
+test('POST open + episódio de OUTRA fonte (webhook, não probe) NÃO é zumbi: comportamento atual', async () => {
+  const { app, calls } = buildApp({ state: 'open' });
+  const token = await mkReconnect();
+  await pool.query(
+    `INSERT INTO instance_outages (instance, kind, number_id, started_at, started_at_source, reason, detected_by)
+     VALUES ('saturno', 'system', NULL, NOW() - interval '5 minutes', 'webhook', 'connection_update', 'webhook')`,
+  );
+
+  const res = await app.inject({ method: 'POST', url: `/admin/whatsapp/link/${token}/reconnect`, headers: H });
+
+  assert.equal(res.json().state, 'connected');
+  assert.ok(!calls.some((c) => c.includes('/instance/logout/')), calls.join(' | '));
+  const link = await getProvisionLink(pool, token);
+  assert.equal(link?.status, 'consumed');
+});
+
+test('POST: 2ª chamada já com a sessão realmente close (sem novo logout) — fluxo normal de QR', async () => {
+  const { app, calls, setState } = buildAppMutableState();
+  const token = await mkReconnect();
+  await mkZombieEpisode('saturno');
+
+  setState('open');
+  const first = await app.inject({ method: 'POST', url: `/admin/whatsapp/link/${token}/reconnect`, headers: H });
+  assert.equal(first.statusCode, 200);
+
+  calls.length = 0;
+  setState('close'); // agora a Evolution já reflete o logout do humano
+  const second = await app.inject({ method: 'POST', url: `/admin/whatsapp/link/${token}/reconnect`, headers: H });
+
+  assert.equal(second.statusCode, 200);
+  assert.equal(second.json().instance, 'saturno');
+  assert.ok(!calls.some((c) => c.includes('/instance/logout/')), calls.join(' | ')); // não repete o logout
+  const link = await getProvisionLink(pool, token);
+  assert.equal(link?.clicksUsed, 2); // 1ª (zumbi) + 2ª (normal) contam igual
+});
+
 test('POST com open SEM episódio probe: comportamento atual — consome o link, sem gastar clique', async () => {
   const { app } = buildApp({ state: 'open' });
   const token = await mkReconnect();
@@ -142,4 +262,19 @@ test('GET com open SEM episódio probe: comportamento atual — marca consumed/c
   assert.equal(res.json().state, 'connected');
   const link = await getProvisionLink(pool, token);
   assert.equal(link?.status, 'consumed');
+});
+
+test('GET com falha de BANCO ao consultar episódio de sonda → 500 internal_error (NUNCA evolution_unavailable)', async () => {
+  const evolution: EvolutionDeps = {
+    baseUrl: 'http://mock', apiKey: 'k',
+    fetch: (async () => ({ ok: true, status: 200, json: async () => ({ instance: { state: 'open' } }) })) as any,
+  };
+  const app = Fastify();
+  registerProvisionRoutes(app, { pool: poolFailingOnProbeQuery(), evolution, panelToken: 'test-panel', webhook: { url: 'https://wk/webhook', secret: 'sek' } });
+  const token = await mkReconnect();
+
+  const res = await app.inject({ method: 'GET', url: `/admin/whatsapp/link/${token}/reconnect/saturno`, headers: H });
+
+  assert.equal(res.statusCode, 500);
+  assert.equal(res.json().error, 'internal_error');
 });

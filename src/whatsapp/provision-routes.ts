@@ -2,7 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import type { Pool } from 'pg';
 import { randomBytes } from 'node:crypto';
 import { config } from '../config.js';
-import { getNumber, renameNumberLabel, getNumberByInstance, setNumberLifecycle, normalizePhone } from './numbers.js';
+import { getNumber, renameNumberLabel, getNumberByInstance, setNumberLifecycle, normalizePhone, updateNumberStatus } from './numbers.js';
 import { createProvisioning, getProvisioning, deleteProvisioning } from './provisioning.js';
 import { createProvisionLink, createReconnectLink, getProvisionLink, computeLinkState, incrementLinkClick, refundLinkClick, markLinkConsumed, generateLinkToken } from './provision-links.js';
 import { createEvolutionInstance, ensureEvolutionInstance, getQrCode, getConnectionState, setInstanceWebhook, logoutInstance, deleteInstance, type EvolutionDeps } from '../evolution/client.js';
@@ -274,9 +274,20 @@ export function registerProvisionRoutes(app: FastifyInstance, deps: { pool: Pool
       if (await openProbeEpisodeOf(deps.pool, link.targetInstance)) {
         try {
           await logoutInstance(deps.evolution, link.targetInstance);
-        } catch {
+        } catch (e) {
+          if (isEvolution404(e)) return reply.code(404).send({ error: 'instance_not_found' });
           return reply.code(502).send({ error: 'evolution_unavailable' });
         }
+        // A Evolution só reescreve o estado no PRÓXIMO webhook de connection.update —
+        // se o 'close' dele se perder (webhook reafirmado só embaixo; socket morto no
+        // exato instante do logout), o status em whatsapp_numbers segue 'connected' e
+        // updateNumberStatus só fecha um episódio quando old_status ≠ 'connected': a
+        // reconexão real chegaria com old_status='connected' de novo e o episódio
+        // probe (aberto acima) NUNCA fecharia. Marcar aqui, síncrono com o logout que
+        // o humano acabou de pedir, fecha essa janela. No-op para instância de sistema
+        // sem row em whatsapp_numbers (updateNumberStatus não acha o que atualizar).
+        await updateNumberStatus(deps.pool, link.targetInstance, { status: 'disconnected' });
+        req.log.warn({ instance: link.targetInstance }, 'reconnect-link: sessão zumbi derrubada (logout iniciado pelo humano ao abrir o link)');
       } else {
         await markLinkConsumed(deps.pool, token, null);
         return reply.send({ state: 'connected' });
@@ -317,10 +328,20 @@ export function registerProvisionRoutes(app: FastifyInstance, deps: { pool: Pool
     // active e exhausted seguem: o clique é gasto no POST, o GET serve a sessão
     // em andamento (paridade deliberada com o GET do provisionamento — o 10º QR vale).
 
+    // Falha aqui é do BANCO, não da Evolution — fora do try abaixo para não sair
+    // rotulada 'evolution_unavailable' quando o problema é outro.
+    let isZombie: boolean;
+    try {
+      isZombie = (await openProbeEpisodeOf(deps.pool, instance)) != null;
+    } catch (e) {
+      req.log.error({ err: (e as Error).message, instance }, 'reconnect-link: falha ao consultar episódio de sonda');
+      return reply.code(500).send({ error: 'internal_error' });
+    }
+
     try {
       // Estado open só consome quando não há episódio `probe` aberto (zumbi) —
       // havendo, segue para o QR (a Evolution mente, a sonda já provou).
-      if ((await getConnectionState(deps.evolution, instance)) === 'open' && !(await openProbeEpisodeOf(deps.pool, instance))) {
+      if ((await getConnectionState(deps.evolution, instance)) === 'open' && !isZombie) {
         await markLinkConsumed(deps.pool, token, null);
         return reply.send({ state: 'connected' });
       }
