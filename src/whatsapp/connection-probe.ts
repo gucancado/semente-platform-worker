@@ -36,7 +36,8 @@ export function inProbeSendWindow(now: Date): boolean {
 }
 
 export function probeTexts(name: string | null, phone: string, code: string): { titulo: string; detalhe: string } {
-  const quem = name ? `${name.replace(/\s+/g, ' ').trim()} (${phone})` : phone;
+  const n = name?.replace(/\s+/g, ' ').trim();
+  const quem = n ? `${n} (${phone})` : phone;
   return { titulo: `Teste de conexão do WhatsApp ${quem}`, detalhe: `Código ${code}. Não é preciso responder.` };
 }
 
@@ -67,10 +68,20 @@ export function decideTrigger(i: {
   }
   if (i.history.primaryCount24h >= PROBE_MAX_PRIMARY_24H) return null;
 
+  // Peer ahead logic: only return 'store_stale' if lag is significant (>= staleMs).
+  // If lag < staleMs, fall through to quiet check because in general silence, most instances
+  // have a peer slightly ahead (max over all others), making silent-candidate detection impossible.
   const peerAhead = i.peerStoreTs && (!i.ownStoreTs || i.peerStoreTs > i.ownStoreTs);
   if (peerAhead) {
-    const lag = i.ownStoreTs ? i.businessElapsedMs(i.ownStoreTs, i.peerStoreTs!) : Infinity;
-    return lag >= i.staleMs ? 'store_stale' : null;
+    if (!i.ownStoreTs) {
+      // Peer has data, we don't: peer is definitely ahead
+      return 'store_stale';
+    }
+    const lag = i.businessElapsedMs(i.ownStoreTs, i.peerStoreTs!);
+    if (lag >= i.staleMs) {
+      return 'store_stale';
+    }
+    // lag < staleMs: fall through to quiet evaluation
   }
   const quietFor = i.ownStoreTs ? i.now.getTime() - i.ownStoreTs.getTime() : Infinity;
   if (quietFor < PROBE_QUIET_MS) return null;

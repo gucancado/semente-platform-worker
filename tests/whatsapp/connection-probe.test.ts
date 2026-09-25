@@ -33,6 +33,8 @@ test('textos da sonda', () => {
     detalhe: 'Código K7Q2. Não é preciso responder.',
   });
   assert.equal(probeTexts(null, '+55', 'K7Q2').titulo, 'Teste de conexão do WhatsApp +55');
+  // Whitespace-only name normalizes to phone only
+  assert.equal(probeTexts('   ', '+55', 'K7Q2').titulo, 'Teste de conexão do WhatsApp +55');
 });
 
 test('gatilho store_stale e quiet', () => {
@@ -41,6 +43,42 @@ test('gatilho store_stale e quiet', () => {
   assert.equal(decideTrigger({ ...base, ownStoreTs: new Date(now.getTime() - 13 * H), peerStoreTs: null }), 'quiet');
   assert.equal(decideTrigger({ ...base, ownStoreTs: new Date(now.getTime() - 11 * H), peerStoreTs: null }), null);
   assert.equal(decideTrigger({ ...base, ownStoreTs: new Date(now.getTime() - 2 * H), peerStoreTs: now }), null);
+});
+
+test('peer lag pequeno (< staleMs) permite quiet (silencio geral alcancavel)', () => {
+  // own 13h ago, peer 12.5h ago (lag 0.5h < 6h staleMs) → should evaluate quiet and return 'quiet'
+  assert.equal(
+    decideTrigger({
+      ...base,
+      ownStoreTs: new Date(now.getTime() - 13 * H),
+      peerStoreTs: new Date(now.getTime() - 12.5 * H),
+    }),
+    'quiet'
+  );
+  // ownStoreTs null with peer present → 'store_stale' (peer has data, we don't)
+  assert.equal(decideTrigger({ ...base, ownStoreTs: null, peerStoreTs: now }), 'store_stale');
+  // ownStoreTs null and no peer → 'quiet' (general silence)
+  assert.equal(decideTrigger({ ...base, ownStoreTs: null, peerStoreTs: null }), 'quiet');
+  // businessElapsedMs returns 0 (lag always 0): own 10h / peer now → NOT 'store_stale', returns null (own is 10h old < 12h PROBE_QUIET_MS)
+  assert.equal(
+    decideTrigger({
+      ...base,
+      ownStoreTs: new Date(now.getTime() - 10 * H),
+      peerStoreTs: now,
+      businessElapsedMs: () => 0,
+    }),
+    null
+  );
+  // own 13h / peer now with businessElapsedMs = () => 0 → 'quiet'
+  assert.equal(
+    decideTrigger({
+      ...base,
+      ownStoreTs: new Date(now.getTime() - 13 * H),
+      peerStoreTs: now,
+      businessElapsedMs: () => 0,
+    }),
+    'quiet'
+  );
 });
 
 test('bloqueios', () => {
