@@ -15,7 +15,13 @@ import { mkdtemp, writeFile, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-export type Remuxed = { bytes: Buffer; durationS: number | null };
+/**
+ * `startS`: onde o áudio começa na linha do tempo ORIGINAL da gravação. É 0 no
+ * arquivo inteiro; na gravação reparada (o bot perdeu o 1º pedaço) é o tempo que
+ * sumiu, e a saída do remux passa a contar do zero a partir dali. O player soma
+ * esse deslocamento pra achar cada fala no áudio.
+ */
+export type Remuxed = { bytes: Buffer; durationS: number | null; startS: number | null };
 
 export async function remuxWebm(input: Buffer, ffmpegPath = 'ffmpeg', ffprobePath = 'ffprobe'): Promise<Remuxed> {
   const dir = await mkdtemp(join(tmpdir(), 'meeting-audio-'));
@@ -23,6 +29,7 @@ export async function remuxWebm(input: Buffer, ffmpegPath = 'ffmpeg', ffprobePat
   const outPath = join(dir, 'out.webm');
   try {
     await writeFile(inPath, input);
+    const startS = await probeFormat(inPath, 'start_time', ffprobePath);
     await new Promise<void>((resolve, reject) => {
       const p = spawn(ffmpegPath, ['-hide_banner', '-loglevel', 'error', '-y', '-i', inPath, '-c', 'copy', outPath]);
       let stderr = '';
@@ -38,17 +45,17 @@ export async function remuxWebm(input: Buffer, ffmpegPath = 'ffmpeg', ffprobePat
     });
     const out = await readFile(outPath);
     if (out.length === 0) throw new Error('ffmpeg gerou arquivo vazio');
-    return { bytes: out, durationS: await probeDurationS(outPath, ffprobePath) };
+    return { bytes: out, durationS: await probeFormat(outPath, 'duration', ffprobePath), startS };
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
 }
 
-/** Duração do arquivo reescrito, em segundos. `null` quando o ffprobe não consegue
- *  ler — o chamador trata como áudio inválido. */
-async function probeDurationS(path: string, ffprobePath: string): Promise<number | null> {
+/** Campo de formato do ffprobe em segundos (`duration`, `start_time`). `null` quando
+ *  o ffprobe não consegue ler — o chamador trata como áudio inválido. */
+async function probeFormat(path: string, field: 'duration' | 'start_time', ffprobePath: string): Promise<number | null> {
   return new Promise((resolve) => {
-    const p = spawn(ffprobePath, ['-v', 'error', '-show_entries', 'format=duration', '-of', 'csv=p=0', path]);
+    const p = spawn(ffprobePath, ['-v', 'error', '-show_entries', `format=${field}`, '-of', 'csv=p=0', path]);
     let out = '';
     p.stdout.on('data', (d) => { out += String(d); });
     p.on('error', () => resolve(null));
@@ -57,4 +64,17 @@ async function probeDurationS(path: string, ffprobePath: string): Promise<number
       resolve(code === 0 && Number.isFinite(v) ? v : null);
     });
   });
+}
+
+/** Só o início na linha do tempo original (`start_time`), sem remux. Usado pra
+ *  preencher `audio_start_ms` de áudio já guardado a partir do arquivo original. */
+export async function probeStartS(input: Buffer, ffprobePath = 'ffprobe'): Promise<number | null> {
+  const dir = await mkdtemp(join(tmpdir(), 'meeting-audio-'));
+  try {
+    const p = join(dir, 'in.webm');
+    await writeFile(p, input);
+    return await probeFormat(p, 'start_time', ffprobePath);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 }

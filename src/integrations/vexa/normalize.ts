@@ -108,6 +108,12 @@ export function vexaMeetingToEpisodeInput(m: VexaMeeting, rawR2Key: string | nul
       meet_code: m.native_meeting_id,
       vexa_meeting_id: m.id,
       speaker_counts: speakerCounts,
+      // Os turnos contam a partir da 1ª fala; o áudio do bot, a partir da entrada na
+      // sala, que coincide com start_time (medido <1s em 2026-09-25). Sem este campo
+      // o player não sabe onde fica cada fala dentro do áudio. Varia 0,3s a 33s.
+      ...(startDate && firstSegment
+        ? { first_segment_offset_ms: Math.max(0, Math.round(firstStart * 1000 - startDate.getTime())) }
+        : {}),
     },
     raw_r2_key: rawR2Key,
     audio_r2_key: null,

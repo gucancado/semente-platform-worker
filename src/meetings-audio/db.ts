@@ -47,11 +47,12 @@ export async function findEpisodeForVexaMeeting(
 
 /** Grava a chave só se ainda não houver uma: execuções concorrentes (poller e
  *  backfill) não sobrescrevem o que a outra já registrou. */
-export async function setEpisodeAudioKey(pool: Pool, episodeId: number, key: string): Promise<boolean> {
+export async function setEpisodeAudioKey(pool: Pool, episodeId: number, key: string, audioStartMs = 0): Promise<boolean> {
   const r = await pool.query(
-    `UPDATE episodes SET audio_r2_key = $2, updated_at = now()
+    `UPDATE episodes SET audio_r2_key = $2, updated_at = now(),
+            metadata = metadata || jsonb_build_object('audio_start_ms', $3::int)
       WHERE id = $1 AND audio_r2_key IS NULL`,
-    [episodeId, key],
+    [episodeId, key, audioStartMs],
   );
   return (r.rowCount ?? 0) > 0;
 }

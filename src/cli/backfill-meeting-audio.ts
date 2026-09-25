@@ -49,7 +49,7 @@ async function main(): Promise<void> {
         {
           remux: (b) => remuxWebm(b),
           put: (key, body, ct) => putAndVerify(key, body, ct),
-          setKey: (episodeId, key) => setEpisodeAudioKey(pool, episodeId, key),
+          setKey: (episodeId, key, startMs) => setEpisodeAudioKey(pool, episodeId, key, startMs),
         },
         { episodeId: ep.episodeId, vexaMeetingId: vexaId, bytes: await readFile(join(dir, name)), episodeDurationS: ep.durationS },
       );

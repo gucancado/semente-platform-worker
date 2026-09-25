@@ -21,7 +21,7 @@ export function startMeetingsAudioPoller(log: AudioLogger & { error: (o: unknown
     vexa,
     remux: (b: Buffer) => remuxWebm(b),
     put: (key: string, body: Buffer, ct: string) => putAndVerify(key, body, ct),
-    setKey: (episodeId: number, key: string) => setEpisodeAudioKey(pool, episodeId, key),
+    setKey: (episodeId: number, key: string, startMs: number) => setEpisodeAudioKey(pool, episodeId, key, startMs),
     listPending: () => listPendingAudio(pool),
     log,
   };

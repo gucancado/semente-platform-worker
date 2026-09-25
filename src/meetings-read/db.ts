@@ -146,6 +146,11 @@ export type MeetingDigestView = {
   summary: string | null; summary_points: string[] | null; summary_generated_at: Date | null;
   /** Há arquivo de áudio no R2. O painel mostra o player só com `true`. */
   has_audio: boolean;
+  /** Onde fica o tempo 0 dos turnos dentro do áudio: posição no áudio =
+   *  (started_at_ms + audio_offset_ms) / 1000. Soma o atraso da 1ª fala em relação
+   *  à entrada do bot e desconta o trecho perdido nas gravações reparadas. 0 quando
+   *  não se sabe (Fireflies: turnos e áudio já partem do mesmo ponto). */
+  audio_offset_ms: number;
 };
 
 /** `summary_points` é jsonb: o driver devolve o que estiver gravado, e uma row
@@ -157,6 +162,12 @@ function coercePoints(v: unknown): string[] | null {
   return out.length ? out : null;
 }
 
+export function audioOffsetMs(metadata: unknown): number {
+  const m = (metadata ?? {}) as Record<string, unknown>;
+  const n = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : Number(v ?? 0) || 0);
+  return Math.round(n(m.first_segment_offset_ms) - n(m.audio_start_ms));
+}
+
 function mapDigestView(row: any): MeetingDigestView {
   return {
     id: Number(row.id), title: row.title, occurred_at: row.occurred_at,
@@ -165,6 +176,7 @@ function mapDigestView(row: any): MeetingDigestView {
     summary_points: coercePoints(row.summary_points),
     summary_generated_at: row.summary_generated_at ?? null,
     has_audio: row.audio_r2_key != null,
+    audio_offset_ms: audioOffsetMs(row.metadata),
   };
 }
 
@@ -174,7 +186,7 @@ export async function getMeetingDigest(
 ): Promise<MeetingDigestView | null> {
   const { rows } = await pool.query(
     `SELECT id, title, occurred_at, duration_seconds, participants, workspace_id,
-            summary, summary_points, summary_generated_at, audio_r2_key
+            summary, summary_points, summary_generated_at, audio_r2_key, metadata
      FROM episodes WHERE id=$1 AND fonte='reuniao'`, [a.episodeId]);
   const row = rows[0];
   // Mesma revalidação de tenant do transcript: episódio de outro workspace → null.
@@ -196,7 +208,7 @@ export async function getMeetingTranscript(
 ): Promise<MeetingTranscript | null> {
   const ep = await pool.query(
     `SELECT id, title, occurred_at, duration_seconds, participants, workspace_id,
-            summary, summary_points, summary_generated_at, audio_r2_key
+            summary, summary_points, summary_generated_at, audio_r2_key, metadata
      FROM episodes WHERE id=$1 AND fonte='reuniao'`, [a.episodeId]);
   const row = ep.rows[0];
   // Revalidação de tenant: episódio inexistente OU de outro workspace → null (404 na rota).

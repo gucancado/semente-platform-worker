@@ -200,3 +200,39 @@ test('archiveFromVexa: áudio curto → too_short', async () => {
   );
   assert.equal(out, 'too_short');
 });
+
+import { audioOffsetMs } from '../../src/meetings-read/db.js';
+import { vexaMeetingToEpisodeInput } from '../../src/integrations/vexa/normalize.js';
+
+test('audioOffsetMs: atraso da 1ª fala menos o trecho perdido', () => {
+  assert.equal(audioOffsetMs({ first_segment_offset_ms: 33300 }), 33300);
+  assert.equal(audioOffsetMs({ first_segment_offset_ms: 7000, audio_start_ms: 14408 }), -7408);
+  assert.equal(audioOffsetMs({}), 0);          // Fireflies: turnos e áudio partem juntos
+  assert.equal(audioOffsetMs(null), 0);
+  assert.equal(audioOffsetMs({ first_segment_offset_ms: '1200' }), 1200);
+});
+
+test('importação grava first_segment_offset_ms = 1ª fala − início da reunião', () => {
+  const ep = vexaMeetingToEpisodeInput({
+    id: 480, platform: 'google_meet', native_meeting_id: 'abc-defg-hij', status: 'completed',
+    start_time: '2026-09-23T17:46:17.978', end_time: '2026-09-23T18:12:00',
+    segments: [
+      { start: Date.parse('2026-09-23T17:46:51.300Z') / 1000, end: Date.parse('2026-09-23T17:46:55Z') / 1000, text: 'oi', language: 'pt', speaker: 'A' },
+    ],
+  } as never, null);
+  assert.equal((ep.metadata as Record<string, unknown>).first_segment_offset_ms, 33322);
+  assert.equal(ep.turns![0].started_at_ms, 0);
+});
+
+test('storeEpisodeAudio repassa onde o áudio começa na gravação original', async () => {
+  let got: number | null = null;
+  await storeEpisodeAudio(
+    {
+      remux: async (b) => ({ bytes: b, durationS: 900, startS: 14.408 }),
+      put: async () => {},
+      setKey: async (_id, _k, startMs) => { got = startMs; return true; },
+    },
+    { episodeId: 1, vexaMeetingId: 2, bytes: Buffer.from('1a45dfa3', 'hex'), episodeDurationS: 964 },
+  );
+  assert.equal(got, 14408);
+});

@@ -13,9 +13,9 @@ export type AudioLogger = {
 };
 
 export type StoreAudioDeps = {
-  remux: (b: Buffer) => Promise<{ bytes: Buffer; durationS: number | null }>;
+  remux: (b: Buffer) => Promise<{ bytes: Buffer; durationS: number | null; startS?: number | null }>;
   put: (key: string, body: Buffer, contentType: string) => Promise<void>;
-  setKey: (episodeId: number, key: string) => Promise<boolean>;
+  setKey: (episodeId: number, key: string, audioStartMs: number) => Promise<boolean>;
 };
 
 export type ArchiveAudioDeps = StoreAudioDeps & {
@@ -33,13 +33,14 @@ export async function storeEpisodeAudio(
   a: { episodeId: number; vexaMeetingId: number; bytes: Buffer; episodeDurationS: number | null },
 ): Promise<{ key: string; bytes: number; recorded: boolean; repaired: boolean; tooShort?: boolean; durationS: number | null }> {
   const { bytes: whole, repaired } = repairHeaderlessWebm(a.bytes);
-  const { bytes: fixed, durationS } = await deps.remux(whole);
+  const { bytes: fixed, durationS, startS } = await deps.remux(whole);
   const key = audioKeyFor(a.vexaMeetingId);
   if (!audioCoversEpisode(durationS, a.episodeDurationS)) {
     return { key, bytes: fixed.length, recorded: false, repaired, tooShort: true, durationS };
   }
   await deps.put(key, fixed, 'audio/webm');
-  const recorded = await deps.setKey(a.episodeId, key);
+  const audioStartMs = Math.max(0, Math.round((startS ?? 0) * 1000));
+  const recorded = await deps.setKey(a.episodeId, key, audioStartMs);
   return { key, bytes: fixed.length, recorded, repaired, durationS };
 }
 
