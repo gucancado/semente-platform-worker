@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   pickAudioRecording, audioKeyFor, parseRecordingFilename, audioDownloadName, AUDIO_URL_TTL_S,
-  repairHeaderlessWebm, WEBM_OPUS_INIT_HEX, audioCoversEpisode,
+  repairHeaderlessWebm, WEBM_OPUS_INIT_HEX, audioCoversEpisode, firstSaneClusterAt,
 } from '../../src/meetings-audio/core.js';
 import { archiveFromVexa, runAudioBatch, storeEpisodeAudio } from '../../src/meetings-audio/service.js';
 
@@ -75,7 +75,7 @@ test('storeEpisodeAudio: gravação sem cabeçalho chega reparada ao remux', asy
   let seen: Buffer | null = null;
   const r = await storeEpisodeAudio(
     { remux: async (b) => { seen = b; return { bytes: b, durationS: 600 }; }, put: async () => {}, setKey: async () => true },
-    { episodeId: 1, vexaMeetingId: 2, bytes: Buffer.from('8c81', 'hex'), episodeDurationS: 600 },
+    { episodeId: 1, vexaMeetingId: 2, bytes: Buffer.from('8c81' + cluster(1000), 'hex'), episodeDurationS: 600 },
   );
   assert.equal(r.repaired, true);
   assert.ok(seen!.subarray(0, 4).equals(Buffer.from('1a45dfa3', 'hex')));
@@ -113,7 +113,7 @@ test('runAudioBatch: lista a Vexa uma vez por ciclo e isola falhas por reunião'
     ],
     vexa: {
       listRecordings: async () => { lists++; return [rec(100, 10), rec(200, 20)]; },
-      downloadRecordingAudio: async (id) => { if (id === 100) throw new Error('500'); return Buffer.from('x'); },
+      downloadRecordingAudio: async (id) => { if (id === 100) throw new Error('500'); return Buffer.from('1a45dfa3', 'hex'); },
     },
   });
   assert.equal(lists, 1);
@@ -139,23 +139,31 @@ test('repairHeaderlessWebm: arquivo com cabeçalho passa intacto', () => {
   assert.equal(r.bytes, ok);
 });
 
-test('repairHeaderlessWebm: começo no tamanho do bloco recebe cabeçalho, cluster em 0 e o a3 perdido', () => {
-  // É assim que 41 das 46 gravações começam: "8c 81 ..." logo depois do a3 cortado.
-  const bad = Buffer.from('8c813887' + '80ff03fffe', 'hex');
+// Cluster sintético: ID + tamanho desconhecido + Timecode (e7, 4 bytes) + um SimpleBlock mínimo.
+const cluster = (tcMs: number) =>
+  '1f43b675' + '01ffffffffffffff' + 'e784' + tcMs.toString(16).padStart(8, '0') + 'a38c81000080ff03fffefffefffe';
+
+test('repairHeaderlessWebm: começo com zeros (caso 245) recomeça no 1º cluster', () => {
+  const bad = Buffer.from('8c813848' + '00'.repeat(40) + cluster(135346) + cluster(150406), 'hex');
   const r = repairHeaderlessWebm(bad);
   assert.equal(r.repaired, true);
-  const expected = WEBM_OPUS_INIT_HEX + '1f43b67501ffffffffffffffe78100' + 'a3' + bad.toString('hex');
-  assert.equal(r.bytes.toString('hex'), expected);
+  assert.equal(r.bytes.toString('hex'), WEBM_OPUS_INIT_HEX + cluster(135346) + cluster(150406));
 });
 
-test('repairHeaderlessWebm: começo exato num bloco não duplica o a3', () => {
-  const r = repairHeaderlessWebm(Buffer.from('a38c81', 'hex'));
-  assert.ok(r.bytes.toString('hex').endsWith('1f43b67501ffffffffffffffe78100a38c81'));
+test('repairHeaderlessWebm: fim da reunião gravado no começo (caso 234) é descartado', () => {
+  // 1º cluster marcado em 2.226.525 ms, o seguinte em 240.702 ms: o 1º está fora de lugar.
+  const bad = Buffer.from('8c81' + cluster(2226525) + 'ab'.repeat(20) + cluster(240702) + cluster(255760), 'hex');
+  const r = repairHeaderlessWebm(bad);
+  assert.equal(r.bytes.toString('hex'), WEBM_OPUS_INIT_HEX + cluster(240702) + cluster(255760));
 });
 
-test('repairHeaderlessWebm: começo num cluster recebe só o cabeçalho', () => {
-  const r = repairHeaderlessWebm(Buffer.from('1f43b67501ff', 'hex'));
-  assert.equal(r.bytes.toString('hex'), WEBM_OPUS_INIT_HEX + '1f43b67501ff');
+test('firstSaneClusterAt devolve o timecode de onde o áudio passa a começar', () => {
+  const b = Buffer.from('8c81' + cluster(2226525) + cluster(240702) + cluster(255760), 'hex');
+  assert.equal(firstSaneClusterAt(b)?.timecodeMs, 240702);
+});
+
+test('repairHeaderlessWebm: sem cluster legível lança em vez de guardar lixo', () => {
+  assert.throws(() => repairHeaderlessWebm(Buffer.from('8c81' + '00'.repeat(30), 'hex')));
 });
 
 test('WEBM_OPUS_INIT_HEX é um cabeçalho webm Opus completo', () => {

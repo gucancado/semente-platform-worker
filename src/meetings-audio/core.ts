@@ -51,31 +51,73 @@ export const WEBM_OPUS_INIT_HEX =
 
 const EBML_MAGIC = Buffer.from('1a45dfa3', 'hex');
 const CLUSTER_ID = Buffer.from('1f43b675', 'hex');
-/** Cluster de tamanho desconhecido com Timecode 0: é exatamente como o gravador
- *  abre o primeiro cluster de toda gravação. */
-const CLUSTER_AT_ZERO = Buffer.from('1f43b67501ffffffffffffffe78100', 'hex');
-const SIMPLEBLOCK_ID = 0xa3;
+
+/** Lê um inteiro de tamanho variável do EBML. `null` se o byte não inicia um. */
+function readVint(b: Buffer, i: number): { value: number; length: number } | null {
+  if (i >= b.length) return null;
+  const first = b[i]!;
+  for (let len = 1; len <= 8; len++) {
+    if (first & (0x80 >> (len - 1))) {
+      if (i + len > b.length) return null;
+      let v = first & (0xff >> len);
+      for (let k = 1; k < len; k++) v = v * 256 + b[i + k]!;
+      return { value: v, length: len };
+    }
+  }
+  return null;
+}
+
+/** Timecode (ms) do cluster que começa em `pos`, ou `null` se não for legível. */
+function clusterTimecode(b: Buffer, pos: number): number | null {
+  const size = readVint(b, pos + 4);
+  if (!size) return null;
+  const i = pos + 4 + size.length;
+  if (b[i] !== 0xe7) return null;
+  const n = readVint(b, i + 1);
+  if (!n || n.value < 1 || n.value > 8) return null;
+  const at = i + 1 + n.length;
+  if (at + n.value > b.length) return null;
+  let v = 0;
+  for (let k = 0; k < n.value; k++) v = v * 256 + b[at + k]!;
+  return v;
+}
 
 /**
- * Repara gravação sem cabeçalho. Medido em 2026-09-24: 41 de 46 gravações do bot
- * chegam sem o PRIMEIRO pedaço de 15s, que é o único com o cabeçalho do arquivo.
- * O corte cai logo depois do byte de ID do bloco de áudio (`a3`), então o
- * arquivo começa no tamanho do bloco (`8c 81 …`) — até o ffprobe o confunde com
- * AMR. Os bytes seguintes ainda pertencem ao primeiro cluster (Timecode 0), que
- * pode durar minutos antes do próximo marcador de cluster.
- *
- * Reparo: cabeçalho + cluster em 0 + o `a3` perdido + os bytes originais. Assim
- * nada é descartado além do pedaço que o bot já perdeu (~14s do início). Pular
- * até o próximo cluster perderia mais de 2 min na gravação medida.
+ * Posição do primeiro cluster a partir do qual os timecodes AVANÇAM. Numa
+ * gravação atingida, o começo do arquivo é o pedaço do FIM da reunião gravado
+ * por cima (medido: 1º cluster em 2.226.525 ms, o seguinte em 240.702 ms). Tudo
+ * antes do primeiro cluster são é descartado.
+ */
+export function firstSaneClusterAt(b: Buffer): { pos: number; timecodeMs: number } | null {
+  const found: Array<{ pos: number; tc: number }> = [];
+  let pos = b.indexOf(CLUSTER_ID);
+  while (pos !== -1 && found.length < 64) {
+    const tc = clusterTimecode(b, pos);
+    if (tc != null) found.push({ pos, tc });
+    pos = b.indexOf(CLUSTER_ID, pos + 4);
+  }
+  for (let k = 0; k < found.length; k++) {
+    const cur = found[k]!;
+    const next = found[k + 1];
+    if (!next || next.tc >= cur.tc) return { pos: cur.pos, timecodeMs: cur.tc };
+  }
+  return null;
+}
+
+/**
+ * Repara gravação atingida pelo 2º master do bot (antes do patch de 24/09 no
+ * capture-bridge): o arquivo perdeu o cabeçalho e começa com o pedaço final da
+ * reunião, às vezes seguido de zeros. Reparo: cabeçalho Opus do gravador +
+ * arquivo a partir do primeiro cluster com timecodes em ordem. O áudio passa a
+ * começar ali (o `start_time` medido pelo remux vira `audio_start_ms`), e o que
+ * vinha antes era irrecuperável: zeros, ou fim da reunião fora de lugar.
  */
 export function repairHeaderlessWebm(bytes: Buffer): { bytes: Buffer; repaired: boolean } {
   if (bytes.subarray(0, 4).equals(EBML_MAGIC)) return { bytes, repaired: false };
   const head = Buffer.from(WEBM_OPUS_INIT_HEX, 'hex');
-  if (bytes.subarray(0, 4).equals(CLUSTER_ID)) return { bytes: Buffer.concat([head, bytes]), repaired: true };
-  const prefix = bytes[0] === SIMPLEBLOCK_ID
-    ? Buffer.concat([head, CLUSTER_AT_ZERO])
-    : Buffer.concat([head, CLUSTER_AT_ZERO, Buffer.from([SIMPLEBLOCK_ID])]);
-  return { bytes: Buffer.concat([prefix, bytes]), repaired: true };
+  const c = firstSaneClusterAt(bytes);
+  if (!c) throw new Error('gravação sem cluster legível: nada a recuperar');
+  return { bytes: Buffer.concat([head, bytes.subarray(c.pos)]), repaired: true };
 }
 
 /**
@@ -83,8 +125,8 @@ export function repairHeaderlessWebm(bytes: Buffer): { bytes: Buffer; repaired: 
  * 2º arquivo só com o último pedaço (~3 KB) no MESMO caminho do arquivo completo e
  * é esse que chega à Vexa. Guardar faria o player aparecer tocando 1 segundo de
  * uma reunião de 40 min. Referência é a duração do episódio (tempo de fala), que
- * é sempre menor que o tempo do bot na sala; metade dá folga aos ~2 min que o bot
- * perde no início das gravações reparadas.
+ * é sempre menor que o tempo do bot na sala; metade dá folga aos minutos que se
+ * perdem no início das gravações reparadas.
  */
 export const MIN_AUDIO_COVERAGE = 0.5;
 
