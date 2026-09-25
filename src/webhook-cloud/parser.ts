@@ -210,6 +210,32 @@ export function verifyHmacSignature(rawBody: Buffer | string, signatureHeader: s
   return timingSafeEqual(Buffer.from(expectedHex, 'hex'), Buffer.from(computedHex, 'hex'));
 }
 
+export type CloudStatusEvent = { id: string; status: string; errors: unknown[] };
+
+/**
+ * Extrai os `statuses[]` crus de um payload do Cloud webhook — mesma
+ * navegação de `summarizeCloudPayload`, mas devolvendo o `id` (wamid)
+ * COMPLETO e os `errors` sem normalizar. Usado pela sonda de conexão
+ * (spec §9) para casar por `wamid` e gravar `cloud_status`/`cloud_error`
+ * em `connection_probes`. Nunca lança — payload malformado devolve [].
+ */
+export function collectCloudStatuses(raw: unknown): CloudStatusEvent[] {
+  const body = (raw && typeof raw === 'object' ? raw : {}) as any;
+  const entries: any[] = Array.isArray(body.entry) ? body.entry : [];
+  const out: CloudStatusEvent[] = [];
+  for (const entry of entries) {
+    for (const change of Array.isArray(entry?.changes) ? entry.changes : []) {
+      const value = change?.value ?? {};
+      for (const s of Array.isArray(value?.statuses) ? value.statuses : []) {
+        if (typeof s?.id === 'string' && typeof s?.status === 'string') {
+          out.push({ id: s.id, status: s.status, errors: Array.isArray(s?.errors) ? s.errors : [] });
+        }
+      }
+    }
+  }
+  return out;
+}
+
 export type CloudPayloadSummary = {
   object: string | null;
   changes: Array<{

@@ -5,12 +5,14 @@ import {
   getAgentProjectConfig,
   insertMessage,
   logWebhook,
+  pool,
 } from '../db.js';
 import { computeScheduledAt } from '../triggers/quiet-hours.js';
-import { parseCloudPayload, verifyHmacSignature, summarizeCloudPayload } from './parser.js';
+import { parseCloudPayload, verifyHmacSignature, summarizeCloudPayload, collectCloudStatuses } from './parser.js';
 import { parseCommand, dispatchCommand } from '../commands/registry.js';
 import { resolveByWhatsapp } from '../commands/identity.js';
 import { sendCloudText } from './send.js';
+import { recordCloudStatuses } from '../whatsapp/connection-probe-store.js';
 
 /**
  * Rotas do webhook WhatsApp Cloud API (Meta).
@@ -88,6 +90,20 @@ export async function registerWebhookCloudRoutes(app: FastifyInstance) {
       { agent: string; project: string }
     >;
     const parsed = parseCloudPayload(req.body, numberMap);
+
+    // Status de entrega (sent/delivered/read/failed) da sonda de conexão
+    // (spec §9). Roda sempre — inclusive quando o payload TAMBÉM traz
+    // mensagens parseadas — e nunca derruba o webhook: `wamid` desconhecido
+    // (mensagem normal, não é a sonda) é só log, como já era antes de existir
+    // a sonda.
+    const statuses = collectCloudStatuses(req.body);
+    if (statuses.length > 0) {
+      try {
+        await recordCloudStatuses(pool, statuses);
+      } catch (err) {
+        req.log.warn({ err: (err as Error).message }, 'cloud webhook: gravar status da sonda falhou');
+      }
+    }
 
     if (parsed.length === 0) {
       // Pode ser status de entrega, ack, atualização de conta ou formato que o
