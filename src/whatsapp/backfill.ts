@@ -5,6 +5,7 @@ import { extractMessageText } from '../webhook/evolution.js';
 import { getNumber } from './numbers.js';
 import { logAccess } from './access-log.js';
 import { setLeadStatus as realSetLeadStatus, LeadCascadeGanhoError } from './thread-meta.js';
+import { isFromOwnCloudRecord } from './own-cloud.js';
 
 export type BackfillResult = { scanned: number; inserted: number; updated: number; skippedNoText: number; pages: number; reachedCutoff: boolean };
 
@@ -17,12 +18,19 @@ export async function backfillNumber(
   pool: Pool,
   deps: EvolutionDeps,
   numberId: number,
-  opts: { sinceTs: number; maxPages: number; offset?: number; log?: (m: string) => void }
+  opts: { sinceTs: number; maxPages: number; offset?: number; log?: (m: string) => void; ownPhones?: string[] }
 ): Promise<BackfillResult> {
   const num = await getNumber(pool, numberId);
   if (!num) return { scanned: 0, inserted: 0, updated: 0, skippedNoText: 0, pages: 0, reachedCutoff: false };
   const offset = opts.offset ?? 100;
   const log = opts.log ?? (() => {});
+  // `ownPhones` via opts (default []), não `config` — este módulo importa só tipos
+  // de 'pg' + módulos puros de propósito (não carrega env do servidor, ver
+  // tests/whatsapp/backfill-fragments-canonical.test.ts). Sem a lista, a checagem
+  // por telefone de isFromOwnCloudRecord nunca casa, mas templateId/marcador da
+  // sonda/isOwnDownNotice continuam pulando o registro. Quem chama passa
+  // `config.WHATSAPP_CLOUD_OWN_PHONES`.
+  const ownPhones = opts.ownPhones ?? [];
   let scanned = 0, inserted = 0, updated = 0, skippedNoText = 0, page = 1, reachedCutoff = false;
 
   for (; page <= opts.maxPages; page++) {
@@ -35,6 +43,9 @@ export async function backfillNumber(
       const rawJid: string | undefined = m?.key?.remoteJid;
       const eventId: string | undefined = m?.key?.id;
       if (!rawJid || !eventId) continue;
+      // Porta anti-CRM: DM do nosso número Cloud (aviso de queda, cópia, sonda)
+      // nunca é conversa de lead — mesma exclusão do /webhook (ver own-cloud.ts).
+      if (isFromOwnCloudRecord(m, ownPhones)) continue;
       const jid = canonicalJid(rawJid, m?.key?.remoteJidAlt);
       const text = extractMessageText(m?.message);
       if (!text) { skippedNoText++; continue; }

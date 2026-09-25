@@ -131,6 +131,8 @@ export async function fetchMessages(
 
 /** Registros lidos quando há filtro. O vigia pula no máximo 6 avisos por episódio. */
 const SKIP_SCAN_PAGE = 20;
+/** Sondas + avisos podem ocupar o topo do store INTEIRO de um número quieto. */
+const SKIP_SCAN_MAX_PAGES = 5;
 
 /**
  * Instante da mensagem mais recente no store da Evolution desta instância.
@@ -143,13 +145,23 @@ const SKIP_SCAN_PAGE = 20;
 export async function fetchLatestMessageTs(
   deps: EvolutionDeps,
   instance: string,
-  opts?: { skip?: (record: unknown) => boolean },
+  opts?: { skip?: (record: unknown) => boolean; maxPages?: number },
 ): Promise<Date | null> {
-  // Sem filtro basta o registro do topo. Com filtro a página precisa ser larga o
-  // bastante para passar POR CIMA do que será pulado — o `where` da Evolution só
-  // tem igualdade (sem negação), então o descarte é feito aqui, numa chamada só.
-  const { records } = await fetchMessages(deps, instance, 1, opts?.skip ? SKIP_SCAN_PAGE : 1);
-  return latestTrafficTs(records, opts?.skip);
+  // Sem filtro basta o registro do topo — uma chamada.
+  if (!opts?.skip) {
+    const { records } = await fetchMessages(deps, instance, 1, 1);
+    return latestTrafficTs(records);
+  }
+  // Sondas, avisos e cópias do nosso número podem ocupar o topo do store
+  // inteiro de um número quieto: pagina até achar tráfego real.
+  const maxPages = opts.maxPages ?? SKIP_SCAN_MAX_PAGES;
+  for (let page = 1; page <= maxPages; page++) {
+    const { records } = await fetchMessages(deps, instance, page, SKIP_SCAN_PAGE);
+    if (records.length === 0) return null;
+    const ts = latestTrafficTs(records, opts.skip);
+    if (ts) return ts;
+  }
+  return null;
 }
 
 /**

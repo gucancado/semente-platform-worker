@@ -1,6 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import type { Pool } from 'pg';
 import { randomBytes } from 'node:crypto';
+import { config } from '../config.js';
 import { getNumber, renameNumberLabel, getNumberByInstance, setNumberLifecycle, normalizePhone } from './numbers.js';
 import { createProvisioning, getProvisioning, deleteProvisioning } from './provisioning.js';
 import { createProvisionLink, createReconnectLink, getProvisionLink, computeLinkState, incrementLinkClick, refundLinkClick, markLinkConsumed, generateLinkToken } from './provision-links.js';
@@ -383,7 +384,9 @@ export function registerProvisionRoutes(app: FastifyInstance, deps: { pool: Pool
     const maxPages = Number(req.body?.maxPages ?? 200);
     const sinceTs = Math.floor(Date.now() / 1000) - days * 86400;
     // Background fire-and-forget — pode demorar (muitas páginas). Idempotente (dedup), pode re-disparar.
-    backfillNumber(deps.pool, deps.evolution, n.id, { sinceTs, maxPages, log: (m) => req.log.info(m) })
+    backfillNumber(deps.pool, deps.evolution, n.id, {
+      sinceTs, maxPages, log: (m) => req.log.info(m), ownPhones: config.WHATSAPP_CLOUD_OWN_PHONES,
+    })
       .catch((err) => req.log.error({ err: (err as Error).message }, '[backfill] falhou'));
     return reply.send({ schema: 'whatsapp_v1', context: tenantContext(n), started: true, numberId: n.id, days, maxPages, sinceTs });
   });

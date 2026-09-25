@@ -1,4 +1,5 @@
 import { sameWhatsappNumber } from './down-notify-ops-copy.js';
+import { isOwnDownNotice } from './down-notify.js';
 
 /**
  * Mensagem mandada pelo NOSSO número Cloud (aviso de queda, cópia, sonda) a uma
@@ -41,7 +42,9 @@ export function ownCloudText(message: unknown): string | null {
 
 function templateIdOf(message: unknown): string | null {
   const m = unwrap(message as any);
-  const id = m?.templateMessage?.templateId ?? m?.templateMessage?.hydratedTemplate?.templateId;
+  const id = m?.templateMessage?.templateId
+    ?? m?.templateMessage?.hydratedTemplate?.templateId
+    ?? m?.templateMessage?.hydratedFourRowTemplate?.templateId;
   return typeof id === 'string' ? id : null;
 }
 
@@ -58,6 +61,12 @@ function jidDigits(jid: unknown): string | null {
 /**
  * Registro cru da Evolution (`{key, message}`, do webhook `data` ou do store).
  * Só DM recebida conta — grupo e `fromMe` nunca.
+ *
+ * ⚠️ O aviso de queda (`isOwnDownNotice`) entra como regra própria, além das
+ * três da `remoteJidAlt`/`templateId`/marcador da sonda: o Baileys pode
+ * entregar o aviso (ou a cópia dele) como `conversation`/`extendedTextMessage`
+ * puro numa DM em LID sem `remoteJidAlt` — aí nem o telefone nem o templateId
+ * aparecem, e só o CONTEÚDO (link ou frase fixa) prova a origem.
  */
 export function isFromOwnCloudRecord(record: unknown, ownPhones: string[]): boolean {
   const r = record as { key?: { remoteJid?: unknown; remoteJidAlt?: unknown; fromMe?: unknown }; message?: unknown } | null;
@@ -68,5 +77,6 @@ export function isFromOwnCloudRecord(record: unknown, ownPhones: string[]): bool
   if (sender && ownPhones.some((p) => sameWhatsappNumber(p, sender))) return true;
   const tid = templateIdOf(r?.message);
   if (tid && OWN_TEMPLATE_IDS.includes(tid)) return true;
+  if (isOwnDownNotice(record)) return true;
   return extractProbeCode(ownCloudText(r?.message)) != null;
 }

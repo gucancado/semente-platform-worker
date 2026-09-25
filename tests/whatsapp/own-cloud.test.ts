@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   OWN_TEMPLATE_IDS, extractProbeCode, isFromOwnCloudRecord, ownCloudText, parseOwnPhones,
 } from '../../src/whatsapp/own-cloud.js';
+import { renderConnectionDownText } from '../../src/webhook-cloud/templates.js';
 
 const OWN = parseOwnPhones('+553190858510');
 const probeMsg = (templateId = '1896879847947648', text =
@@ -46,6 +47,29 @@ test('LID sem alt e template desconhecido: reconhece pelo marcador da sonda', ()
 
 test('9º dígito: 5531990858510 também é nosso', () => {
   const rec = { key: { remoteJid: '5531990858510@s.whatsapp.net', fromMe: false }, message: { conversation: 'x' } };
+  assert.equal(isFromOwnCloudRecord(rec, OWN), true);
+});
+
+test('LID sem alt: aviso de queda entregue como texto plano (conversation) também é nosso', () => {
+  // Medido: o Baileys pode entregar o aviso (ou a cópia ao operador) como
+  // conversation/extendedTextMessage puro numa DM em LID sem remoteJidAlt —
+  // escapando das outras 3 regras (telefone, templateId, marcador da sonda).
+  // Só o CONTEÚDO (isOwnDownNotice) prova a origem nesse caso.
+  const noticeText = renderConnectionDownText({
+    name: 'Monitor de grupos',
+    phone: '+553195950748',
+    downSince: new Date('2026-09-19T12:03:00-03:00'),
+    token: 'o4MEzz_exemploDeToken',
+  });
+  const rec = { key: { remoteJid: '216578842964141@lid', fromMe: false }, message: { conversation: noticeText } };
+  assert.equal(isFromOwnCloudRecord(rec, OWN), true);
+});
+
+test('LID sem alt: reconhece templateId em hydratedFourRowTemplate (variante do template)', () => {
+  const rec = {
+    key: { remoteJid: '216578842964141@lid', fromMe: false },
+    message: { templateMessage: { hydratedFourRowTemplate: { templateId: '1620869592995276' } } },
+  };
   assert.equal(isFromOwnCloudRecord(rec, OWN), true);
 });
 

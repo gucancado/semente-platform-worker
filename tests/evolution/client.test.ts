@@ -172,6 +172,30 @@ test('fetchLatestMessageTs com store vazio ou timestamp ilegível devolve null',
   assert.equal(await fetchLatestMessageTs(junk, 'i'), null);
 });
 
+// Sonda: sondas + avisos podem ocupar o TOPO do store inteiro de um número
+// quieto (mais de 20 registros no topo) — precisa paginar por cima delas.
+test('fetchLatestMessageTs com `skip` pagina até achar tráfego real quando a 1ª página inteira é pulada', async () => {
+  const page1 = Array.from({ length: 20 }, (_, i) => ({ key: { id: `aviso-${i}` }, messageTimestamp: 1789900000 - i }));
+  const deps = { baseUrl: 'https://evo', apiKey: 'k', fetch: mockFetch((_url, init) => {
+    const body = JSON.parse(init.body);
+    if (body.page === 1) return { status: 200, body: { messages: { records: page1 } } };
+    return { status: 200, body: { messages: { records: [{ key: { id: 'real' }, messageTimestamp: 1790000000 }] } } };
+  }) };
+  const ts = await fetchLatestMessageTs(deps, 'saturno', { skip: (r: any) => String(r?.key?.id).startsWith('aviso') });
+  assert.equal(ts!.getTime(), 1790000000 * 1000);
+});
+
+test('fetchLatestMessageTs com `skip`: 5 páginas todas puladas devolve null (não fica preso)', async () => {
+  let calls = 0;
+  const deps = { baseUrl: 'https://evo', apiKey: 'k', fetch: mockFetch(() => {
+    calls++;
+    return { status: 200, body: { messages: { records: [{ key: { id: 'aviso' }, messageTimestamp: 1789900000 }] } } };
+  }) };
+  const ts = await fetchLatestMessageTs(deps, 'saturno', { skip: (r: any) => String(r?.key?.id).startsWith('aviso') });
+  assert.equal(ts, null);
+  assert.equal(calls, 5);
+});
+
 // Task 5: Chamadas Evolution com timeout (ler, arquivar, dono, busca no store)
 import { markMessageAsRead, archiveChat, fetchInstanceOwner, findProbeInStore, type MessageKey } from '../../src/evolution/client.js';
 

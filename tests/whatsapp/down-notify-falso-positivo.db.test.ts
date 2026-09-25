@@ -82,7 +82,7 @@ function world(init: { stores: Record<string, Rec[]>; states?: Record<string, st
     link: { maxClicks: 10, ttlDays: 7 },
     log: { info() {}, warn() {}, error() {} },
   };
-  const watch = { ...deps, probe: makeEvolutionProbe({ baseUrl: 'http://evo', apiKey: 'k', fetch }, async () => ['ws-peer']), staleMs: 6 * H, intervalMs: TICK };
+  const watch = { ...deps, probe: makeEvolutionProbe({ baseUrl: 'http://evo', apiKey: 'k', fetch }, async () => ['ws-peer'], []), staleMs: 6 * H, intervalMs: TICK };
   return {
     sent,
     stores,

@@ -19,6 +19,14 @@ import { agentsToTrigger, quarantineUnknownInstance } from '../whatsapp/reaction
 import { detectAndTagSource } from '../whatsapp/source-signals.js';
 import { mediaIngestPlan, mediaMessageText } from '../whatsapp/media-policy.js';
 import { insertWhatsappMediaJob } from '../whatsapp/media-jobs.js';
+import { extractProbeCode, isFromOwnCloudRecord, ownCloudText } from '../whatsapp/own-cloud.js';
+
+type ProbeKey = { id: string; remoteJid: string; fromMe: boolean };
+let ownCloudProbeHandler: ((instance: string, code: string, key: ProbeKey) => Promise<void>) | null = null;
+/** Ligado pelo boot (sonda de conexão). null = só descarta. */
+export function setOwnCloudProbeHandler(fn: typeof ownCloudProbeHandler): void {
+  ownCloudProbeHandler = fn;
+}
 
 /**
  * Gate puro de ingestão de áudio (number-path, só DM). `off` ou grupo ou sem
@@ -53,6 +61,27 @@ export async function registerWebhookRoutes(app: FastifyInstance) {
     const msg = parseEvolutionPayload(req.body);
     if (!msg) {
       return { ignored: true, reason: 'parse-failed-or-irrelevant' };
+    }
+
+    // Porta anti-CRM (SEMPRE ligada): DM do nosso número Cloud — aviso de queda,
+    // cópia ou sonda de conexão — nunca é conversa de lead. Sai antes do
+    // resolveIngest: sem webhook_logs, messages, gatilho nem IA.
+    const rawData = (req.body as any)?.data;
+    if (!msg.isGroup && !msg.fromMe && isFromOwnCloudRecord(rawData, config.WHATSAPP_CLOUD_OWN_PHONES)) {
+      const code = extractProbeCode(ownCloudText(rawData?.message));
+      if (code && ownCloudProbeHandler) {
+        try {
+          await ownCloudProbeHandler(msg.instance, code, {
+            id: String(rawData?.key?.id ?? ''),
+            remoteJid: String(rawData?.key?.remoteJid ?? ''),
+            fromMe: false,
+          });
+        } catch (err) {
+          req.log.warn({ instance: msg.instance, err: (err as Error).message }, 'sonda: registrar recebimento falhou');
+        }
+      }
+      req.log.info({ instance: msg.instance, probe: code != null }, 'webhook: mensagem do nosso número Cloud — fora do CRM');
+      return { ignored: true, reason: 'own_cloud' };
     }
 
     // Áudio (number-path, só DM): decide se captura (placeholder + job) e se

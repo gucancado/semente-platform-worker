@@ -67,6 +67,7 @@ export function buildSystemProbe(pool: Pool): SystemProbe {
   return makeEvolutionProbe(
     { baseUrl: config.EVOLUTION_API_URL, apiKey: config.EVOLUTION_API_KEY },
     () => listConnectedInstances(pool),
+    config.WHATSAPP_CLOUD_OWN_PHONES,
   );
 }
 
