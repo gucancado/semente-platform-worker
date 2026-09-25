@@ -1,3 +1,5 @@
+import { extractProbeCode, ownCloudText } from '../whatsapp/own-cloud.js';
+
 export type EvolutionDeps = { baseUrl: string; apiKey: string; fetch?: typeof fetch };
 
 async function call(deps: EvolutionDeps, method: string, path: string, body?: unknown): Promise<any> {
@@ -9,6 +11,20 @@ async function call(deps: EvolutionDeps, method: string, path: string, body?: un
   } as any);
   if (!res.ok) throw new Error(`Evolution ${method} ${path} → ${res.status}`);
   return res.json();
+}
+
+const EVO_TIMEOUT_MS = 15_000;
+
+async function evo(deps: EvolutionDeps, method: string, path: string, body?: unknown): Promise<any> {
+  const f = deps.fetch ?? fetch;
+  const res = await f(`${deps.baseUrl}${path}`, {
+    method,
+    headers: { apikey: deps.apiKey, 'Content-Type': 'application/json' },
+    body: body ? JSON.stringify(body) : undefined,
+    signal: AbortSignal.timeout(EVO_TIMEOUT_MS),
+  } as any);
+  if (!res.ok) throw new Error(`Evolution ${method} ${path} → ${res.status}`);
+  return res.json().catch(() => ({}));
 }
 
 // Eventos que o worker precisa por instância. CONNECTION_UPDATE/QRCODE p/ status,
@@ -317,4 +333,40 @@ export async function fetchGroupParticipants(
   if (!res.ok) throw new Error(`Evolution fetchGroupParticipants ${instance} → ${res.status}`);
   const r: any = await res.json();
   return parseParticipants(r?.participants);
+}
+
+export type MessageKey = { id: string; remoteJid: string; fromMe: boolean };
+
+export async function markMessageAsRead(deps: EvolutionDeps, instance: string, key: MessageKey): Promise<void> {
+  await evo(deps, 'POST', `/chat/markMessageAsRead/${instance}`, { readMessages: [key] });
+}
+
+export async function archiveChat(deps: EvolutionDeps, instance: string, key: MessageKey): Promise<void> {
+  await evo(deps, 'POST', `/chat/archiveChat/${instance}`, { lastMessage: { key }, chat: key.remoteJid, archive: true });
+}
+
+export async function fetchInstanceOwner(deps: EvolutionDeps, instance: string): Promise<string | null> {
+  const r = await evo(deps, 'GET', `/instance/fetchInstances?instanceName=${encodeURIComponent(instance)}`);
+  const row = Array.isArray(r) ? r[0] : r;
+  const jid = row?.ownerJid ?? row?.instance?.owner ?? null;
+  if (typeof jid !== 'string') return null;
+  const d = (jid.split('@')[0] ?? '').split(':')[0]?.replace(/\D+/g, '') ?? '';
+  return d || null;
+}
+
+const PROBE_SCAN_PAGE = 50;
+const PROBE_SCAN_MAX_PAGES = 5;
+
+export async function findProbeInStore(deps: EvolutionDeps, instance: string, code: string, sinceSec: number): Promise<boolean> {
+  for (let page = 1; page <= PROBE_SCAN_MAX_PAGES; page++) {
+    const r = await evo(deps, 'POST', `/chat/findMessages/${instance}`, { where: {}, page, offset: PROBE_SCAN_PAGE });
+    const records: any[] = Array.isArray(r?.messages?.records) ? r.messages.records : [];
+    if (records.length === 0) return false;
+    for (const rec of records) {
+      const ts = Number(rec?.messageTimestamp ?? 0);
+      if (ts && ts < sinceSec) return false;
+      if (extractProbeCode(ownCloudText(rec?.message)) === code) return true;
+    }
+  }
+  return false;
 }

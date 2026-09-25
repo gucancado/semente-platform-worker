@@ -171,3 +171,112 @@ test('fetchLatestMessageTs com store vazio ou timestamp ilegível devolve null',
   const junk = { baseUrl: 'https://evo', apiKey: 'k', fetch: mockFetch(() => ({ status: 200, body: { messages: { records: [{ messageTimestamp: { low: 1, high: 0 } }] } } })) };
   assert.equal(await fetchLatestMessageTs(junk, 'i'), null);
 });
+
+// Task 5: Chamadas Evolution com timeout (ler, arquivar, dono, busca no store)
+import { markMessageAsRead, archiveChat, fetchInstanceOwner, findProbeInStore, type MessageKey } from '../../src/evolution/client.js';
+
+test('markMessageAsRead faz POST /chat/markMessageAsRead/i1 com {readMessages:[key]}', async () => {
+  let seen: any = null;
+  const key: MessageKey = { id: 'msg-1', remoteJid: '+551199999999@s.whatsapp.net', fromMe: false };
+  const deps = { baseUrl: 'https://evo', apiKey: 'k', fetch: mockFetch((url, init) => { seen = { url, init }; return { status: 200, body: {} }; }) };
+  await markMessageAsRead(deps, 'i1', key);
+  assert.match(seen.url, /\/chat\/markMessageAsRead\/i1$/);
+  assert.equal(seen.init.method, 'POST');
+  const body = JSON.parse(seen.init.body);
+  assert.deepEqual(body.readMessages, [key]);
+});
+
+test('archiveChat faz POST /chat/archiveChat/i1 com {lastMessage:{key}, chat:key.remoteJid, archive:true}', async () => {
+  let seen: any = null;
+  const key: MessageKey = { id: 'msg-2', remoteJid: '+551199999999@s.whatsapp.net', fromMe: false };
+  const deps = { baseUrl: 'https://evo', apiKey: 'k', fetch: mockFetch((url, init) => { seen = { url, init }; return { status: 200, body: {} }; }) };
+  await archiveChat(deps, 'i1', key);
+  assert.match(seen.url, /\/chat\/archiveChat\/i1$/);
+  assert.equal(seen.init.method, 'POST');
+  const body = JSON.parse(seen.init.body);
+  assert.deepEqual(body, { lastMessage: { key }, chat: key.remoteJid, archive: true });
+});
+
+test('fetchInstanceOwner extrai dígitos do ownerJid', async () => {
+  const deps = { baseUrl: 'https://evo', apiKey: 'k', fetch: mockFetch(() => ({ status: 200, body: [{ ownerJid: '553171070896@s.whatsapp.net' }] })) };
+  const owner = await fetchInstanceOwner(deps, 'i1');
+  assert.equal(owner, '553171070896');
+});
+
+test('fetchInstanceOwner devolve null se ownerJid não está presente', async () => {
+  const deps = { baseUrl: 'https://evo', apiKey: 'k', fetch: mockFetch(() => ({ status: 200, body: [{}] })) };
+  const owner = await fetchInstanceOwner(deps, 'i1');
+  assert.equal(owner, null);
+});
+
+test('findProbeInStore acha o código na 2ª página', async () => {
+  let pagesSeen: number[] = [];
+  const deps = {
+    baseUrl: 'https://evo',
+    apiKey: 'k',
+    fetch: mockFetch((url, init) => {
+      const body = JSON.parse(init.body);
+      pagesSeen.push(body.page);
+      if (body.page === 1) {
+        return {
+          status: 200,
+          body: {
+            messages: {
+              records: [
+                { messageTimestamp: 1700000000, message: { conversation: 'old' } },
+              ],
+            },
+          },
+        };
+      } else if (body.page === 2) {
+        return {
+          status: 200,
+          body: {
+            messages: {
+              records: [
+                { messageTimestamp: 1700100000, message: { conversation: 'Teste de conexão do WhatsApp probe. Código AB2C.' } },
+              ],
+            },
+          },
+        };
+      }
+      return { status: 200, body: { messages: { records: [] } } };
+    }),
+  };
+  const found = await findProbeInStore(deps, 'i1', 'AB2C', 1699999000);
+  assert.equal(found, true);
+  assert.ok(pagesSeen.includes(1));
+  assert.ok(pagesSeen.includes(2));
+});
+
+test('findProbeInStore para quando messageTimestamp < sinceSec', async () => {
+  let pagesSeen: number[] = [];
+  const deps = {
+    baseUrl: 'https://evo',
+    apiKey: 'k',
+    fetch: mockFetch((url, init) => {
+      const body = JSON.parse(init.body);
+      pagesSeen.push(body.page);
+      return {
+        status: 200,
+        body: {
+          messages: {
+            records: [{ messageTimestamp: 1700000000, message: { conversation: 'old' } }],
+          },
+        },
+      };
+    }),
+  };
+  const found = await findProbeInStore(deps, 'i1', 'AB2C', 1700100000);
+  assert.equal(found, false);
+  assert.deepEqual(pagesSeen, [1]);
+});
+
+test('Chamadas com status >= 400 lançam Error com status', async () => {
+  const key: MessageKey = { id: 'msg-3', remoteJid: '+551199999999@s.whatsapp.net', fromMe: false };
+  const deps = { baseUrl: 'https://evo', apiKey: 'k', fetch: mockFetch(() => ({ status: 401, body: {} })) };
+  await assert.rejects(() => markMessageAsRead(deps, 'i1', key), /401/);
+  await assert.rejects(() => archiveChat(deps, 'i1', key), /401/);
+  await assert.rejects(() => fetchInstanceOwner(deps, 'i1'), /401/);
+  await assert.rejects(() => findProbeInStore(deps, 'i1', 'XXXX', 0), /401/);
+});
