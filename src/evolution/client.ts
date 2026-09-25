@@ -15,7 +15,7 @@ async function call(deps: EvolutionDeps, method: string, path: string, body?: un
 
 const EVO_TIMEOUT_MS = 15_000;
 
-async function evo(deps: EvolutionDeps, method: string, path: string, body?: unknown): Promise<any> {
+async function evo(deps: EvolutionDeps, method: string, path: string, body?: unknown, opts?: { discardBody?: boolean }): Promise<any> {
   const f = deps.fetch ?? fetch;
   const res = await f(`${deps.baseUrl}${path}`, {
     method,
@@ -24,7 +24,8 @@ async function evo(deps: EvolutionDeps, method: string, path: string, body?: unk
     signal: AbortSignal.timeout(EVO_TIMEOUT_MS),
   } as any);
   if (!res.ok) throw new Error(`Evolution ${method} ${path} → ${res.status}`);
-  return res.json().catch(() => ({}));
+  if (opts?.discardBody) return res.json().catch(() => ({}));
+  return res.json();
 }
 
 // Eventos que o worker precisa por instância. CONNECTION_UPDATE/QRCODE p/ status,
@@ -338,11 +339,11 @@ export async function fetchGroupParticipants(
 export type MessageKey = { id: string; remoteJid: string; fromMe: boolean };
 
 export async function markMessageAsRead(deps: EvolutionDeps, instance: string, key: MessageKey): Promise<void> {
-  await evo(deps, 'POST', `/chat/markMessageAsRead/${instance}`, { readMessages: [key] });
+  await evo(deps, 'POST', `/chat/markMessageAsRead/${instance}`, { readMessages: [key] }, { discardBody: true });
 }
 
 export async function archiveChat(deps: EvolutionDeps, instance: string, key: MessageKey): Promise<void> {
-  await evo(deps, 'POST', `/chat/archiveChat/${instance}`, { lastMessage: { key }, chat: key.remoteJid, archive: true });
+  await evo(deps, 'POST', `/chat/archiveChat/${instance}`, { lastMessage: { key }, chat: key.remoteJid, archive: true }, { discardBody: true });
 }
 
 export async function fetchInstanceOwner(deps: EvolutionDeps, instance: string): Promise<string | null> {
@@ -363,10 +364,13 @@ export async function findProbeInStore(deps: EvolutionDeps, instance: string, co
     const records: any[] = Array.isArray(r?.messages?.records) ? r.messages.records : [];
     if (records.length === 0) return false;
     for (const rec of records) {
+      // Check code match BEFORE the stop condition, so probe's own record isn't skipped by ts skew
+      if (extractProbeCode(ownCloudText(rec?.message)) === code) return true;
       const ts = Number(rec?.messageTimestamp ?? 0);
       if (ts && ts < sinceSec) return false;
-      if (extractProbeCode(ownCloudText(rec?.message)) === code) return true;
     }
+    // Stop early if fewer than 50 records returned (incomplete page = end of store)
+    if (records.length < PROBE_SCAN_PAGE) return false;
   }
   return false;
 }

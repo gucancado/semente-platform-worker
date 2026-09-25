@@ -218,13 +218,15 @@ test('findProbeInStore acha o código na 2ª página', async () => {
       const body = JSON.parse(init.body);
       pagesSeen.push(body.page);
       if (body.page === 1) {
+        // Full page of non-matching records (50 = PROBE_SCAN_PAGE)
         return {
           status: 200,
           body: {
             messages: {
-              records: [
-                { messageTimestamp: 1700000000, message: { conversation: 'old' } },
-              ],
+              records: Array.from({ length: 50 }, (_, i) => ({
+                messageTimestamp: 1700000000 + i,
+                message: { conversation: `msg ${i}` },
+              })),
             },
           },
         };
@@ -279,4 +281,108 @@ test('Chamadas com status >= 400 lançam Error com status', async () => {
   await assert.rejects(() => archiveChat(deps, 'i1', key), /401/);
   await assert.rejects(() => fetchInstanceOwner(deps, 'i1'), /401/);
   await assert.rejects(() => findProbeInStore(deps, 'i1', 'XXXX', 0), /401/);
+});
+
+test('findProbeInStore com 200 non-JSON body rejeita (não discard)', async () => {
+  const deps = {
+    baseUrl: 'https://evo',
+    apiKey: 'k',
+    fetch: (async (url: string, init: any) => {
+      return { ok: true, status: 200, json: async () => { throw new Error('invalid json'); } } as any;
+    }) as any,
+  };
+  await assert.rejects(() => findProbeInStore(deps, 'i1', 'AB2C', 0), /invalid json/);
+});
+
+test('findProbeInStore: matching record com timestamp < sinceSec ainda retorna true (checa antes de parar)', async () => {
+  const deps = {
+    baseUrl: 'https://evo',
+    apiKey: 'k',
+    fetch: mockFetch((url, init) => {
+      const body = JSON.parse(init.body);
+      if (body.page === 1) {
+        return {
+          status: 200,
+          body: {
+            messages: {
+              records: [
+                { messageTimestamp: 1699999000, message: { conversation: 'Teste de conexão do WhatsApp probe. Código XY5Z.' } },
+              ],
+            },
+          },
+        };
+      }
+      return { status: 200, body: { messages: { records: [] } } };
+    }),
+  };
+  const found = await findProbeInStore(deps, 'i1', 'XY5Z', 1700100000);
+  assert.equal(found, true);
+});
+
+test('Todas as chamadas de timeout incluem AbortSignal.timeout', async () => {
+  let seenInit: any = null;
+  const key: MessageKey = { id: 'msg-4', remoteJid: '+551199999999@s.whatsapp.net', fromMe: false };
+  const deps = {
+    baseUrl: 'https://evo',
+    apiKey: 'k',
+    fetch: (async (url: string, init: any) => {
+      seenInit = init;
+      return { ok: true, status: 200, json: async () => ({}) } as any;
+    }) as any,
+  };
+  await markMessageAsRead(deps, 'i1', key);
+  assert.ok(seenInit.signal instanceof AbortSignal);
+});
+
+test('findProbeInStore pede offset: 50 (PROBE_SCAN_PAGE)', async () => {
+  let seenBody: any = null;
+  const deps = {
+    baseUrl: 'https://evo',
+    apiKey: 'k',
+    fetch: mockFetch((url, init) => {
+      seenBody = JSON.parse(init.body);
+      return { status: 200, body: { messages: { records: [] } } };
+    }),
+  };
+  await findProbeInStore(deps, 'i1', 'AB2C', 0);
+  assert.equal(seenBody.offset, 50);
+});
+
+test('findProbeInStore para após 5 páginas mesmo com todas cheias e sem match', async () => {
+  let pageCount = 0;
+  const deps = {
+    baseUrl: 'https://evo',
+    apiKey: 'k',
+    fetch: mockFetch((url, init) => {
+      const body = JSON.parse(init.body);
+      pageCount = Math.max(pageCount, body.page);
+      const records = Array.from({ length: 50 }, (_, i) => ({
+        messageTimestamp: 1700000000 + i,
+        message: { conversation: `msg ${i}` },
+      }));
+      return { status: 200, body: { messages: { records } } };
+    }),
+  };
+  const found = await findProbeInStore(deps, 'i1', 'NOMATCH', 0);
+  assert.equal(found, false);
+  assert.equal(pageCount, 5);
+});
+
+test('findProbeInStore para cedo se página tem < 50 records (fim da loja)', async () => {
+  let pageCount = 0;
+  const deps = {
+    baseUrl: 'https://evo',
+    apiKey: 'k',
+    fetch: mockFetch((url, init) => {
+      const body = JSON.parse(init.body);
+      pageCount = Math.max(pageCount, body.page);
+      if (body.page === 1) {
+        return { status: 200, body: { messages: { records: Array.from({ length: 49 }, (_, i) => ({ messageTimestamp: 1700000000 + i, message: {} })) } } };
+      }
+      return { status: 200, body: { messages: { records: [] } } };
+    }),
+  };
+  const found = await findProbeInStore(deps, 'i1', 'NOMATCH', 0);
+  assert.equal(found, false);
+  assert.equal(pageCount, 1);
 });
