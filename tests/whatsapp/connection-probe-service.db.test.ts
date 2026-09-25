@@ -52,6 +52,10 @@ type World = {
   store: Record<string, Date | null>;
   owner: Record<string, string | null>;
   storeSeen: Record<string, boolean>;
+  /** Instâncias cujo findMessages responde 404 (sumiram da Evolution). */
+  gone?: Set<string>;
+  /** Chamado dentro de latestStoreTs (simula corrida com o webhook). */
+  onStore?: (i: string) => Promise<void>;
 };
 
 function harness(w: World, opts: { now?: Date } = {}) {
@@ -77,10 +81,14 @@ function harness(w: World, opts: { now?: Date } = {}) {
         if (!s || s === '404') throw new Error(`Evolution GET /instance/connectionState/${i} → 404`);
         return s;
       },
-      latestStoreTs: async (i) => w.store[i] ?? null,
+      latestStoreTs: async (i) => {
+        if (w.onStore) await w.onStore(i);
+        return w.store[i] ?? null;
+      },
       owner: async (i) => w.owner[i] ?? null,
       findProbe: async (i, code, sinceSec) => {
         calls.findProbe.push({ i, code, sinceSec });
+        if (w.gone?.has(i)) throw new Error(`Evolution POST /chat/findMessages/${i} → 404`);
         return w.storeSeen[i] ?? false;
       },
       markRead: async (i, key) => {
@@ -364,18 +372,31 @@ test('reconciliação: estado close com status connected → updateNumberStatus(
   assert.equal(h.calls.errors.length, 0);
 });
 
-test('silêncio geral: 4 de 6 alvos quiet → nenhuma sonda quiet e 1 aviso operacional (não repete no tick seguinte)', async () => {
+test('silêncio geral: 4 de 6 alvos quiet → nenhuma sonda quiet; aviso operacional só a partir das 12h de SP e 1 por 24h', async () => {
+  // Terça 20:00: 13h de relógio antes de quarta 09:00, zero expediente até o par das 08:59.
+  const QUIET_EARLY = sp('2026-09-22T20:00:00');
   const w: World = { state: {}, store: {}, owner: {}, storeSeen: {} };
   for (let i = 1; i <= 6; i++) {
     const inst = `i-${i}`;
     const phone = `+55319000000${i}0`;
     await seed(inst, phone);
     w.state[inst] = 'open';
-    w.store[inst] = i <= 4 ? QUIET : RECENT;
+    w.store[inst] = i <= 4 ? QUIET_EARLY : sp('2026-09-23T08:59:00');
     w.owner[inst] = phone.slice(1);
   }
   const targets = await listProbeTargets(pool, []);
-  const h = harness(w);
+  const clock: { now?: Date } = { now: sp('2026-09-23T09:00:00') };
+  const h = harness(w, clock);
+
+  // 09:00: silêncio geral detectado, quiet suspensas, mas SEM aviso (é só a noite).
+  await runProbeTick(h.deps, targets);
+  assert.equal(h.calls.sendProbe.length, 0);
+  assert.equal((await probes()).length, 0);
+  assert.equal(h.calls.sendOps.length, 0, 'antes das 12h não avisa');
+
+  // 12:00: continua silêncio geral → 1 aviso.
+  clock.now = NOON;
+  for (let i = 5; i <= 6; i++) w.store[`i-${i}`] = RECENT;
   await runProbeTick(h.deps, targets);
   assert.equal(h.calls.sendProbe.length, 0);
   assert.equal((await probes()).length, 0);
@@ -412,4 +433,157 @@ test('saturno: down da 2ª sonda abre o episódio de sistema com down_source=pro
   assert.notEqual(hh[0].down_since, null);
   const { rows: out } = await pool.query(`SELECT kind, started_at_source FROM instance_outages WHERE instance = 'saturno' AND ended_at IS NULL`);
   assert.deepEqual(out, [{ kind: 'system', started_at_source: 'probe' }]);
+});
+
+test('corrida: recebimento durante a abertura do down não deixa episódio aberto', async () => {
+  const { w, targets } = await zombieWorld();
+  const h = harness(w);
+  await runProbeTick(h.deps, targets);
+  let rows = await probes();
+  await age(6);
+  await delivered(rows[0].wamid);
+  await runProbeTick(h.deps, targets);
+  rows = await probes();
+  assert.equal(rows.length, 2);
+  await age(6);
+  await delivered(rows[1].wamid);
+
+  // O webhook entrega a 2ª sonda enquanto o tick lê o store para abrir a queda.
+  const childCode = rows[1].code;
+  w.onStore = async (i) => {
+    if (i !== 'i-zumbi') return;
+    w.onStore = undefined;
+    await handleProbeReceipt(h.deps, 'i-zumbi', childCode, keyOf('RACE'));
+  };
+  await runProbeTick(h.deps, targets);
+  const { rows: out } = await pool.query(`SELECT ended_at FROM instance_outages WHERE instance = 'i-zumbi'`);
+  assert.ok(out.every((o) => o.ended_at != null), 'nenhum episódio aberto');
+  assert.deepEqual(await listDownNumbers(pool), []);
+});
+
+test('down contrariado: tráfego real no store DEPOIS do 1º envio → veredito down sem episódio', async () => {
+  const { w, targets } = await zombieWorld();
+  const h = harness(w);
+  await runProbeTick(h.deps, targets);
+  let rows = await probes();
+  await age(6);
+  await delivered(rows[0].wamid);
+  await runProbeTick(h.deps, targets);
+  rows = await probes();
+  await age(6);
+  await delivered(rows[1].wamid);
+  // Relógio local ~40s atrás do banco; a 1ª saiu há ~12 min pelo banco: Date.now() é depois dela.
+  w.store['i-zumbi'] = new Date();
+  await runProbeTick(h.deps, targets);
+  rows = await probes();
+  assert.equal(rows[1].verdict, 'down');
+  const { rows: out } = await pool.query(`SELECT * FROM instance_outages`);
+  assert.equal(out.length, 0);
+  assert.deepEqual(await listDownNumbers(pool), []);
+});
+
+test('episódio probe de número fecha por tráfego real no store posterior ao início', async () => {
+  const { w, targets } = await zombieWorld();
+  const h = harness(w);
+  await driveToDown(h, targets);
+  assert.deepEqual((await listDownNumbers(pool)).map((d) => d.instance), ['i-zumbi']);
+
+  // Mesmo store: nada muda.
+  await runProbeTick(h.deps, targets);
+  assert.deepEqual((await listDownNumbers(pool)).map((d) => d.instance), ['i-zumbi']);
+
+  // Mensagem real nova (depois do início = STALE): fecha.
+  w.store['i-zumbi'] = sp('2026-09-23T11:58:00');
+  await runProbeTick(h.deps, targets);
+  const { rows: out } = await pool.query(`SELECT ended_at FROM instance_outages WHERE instance = 'i-zumbi'`);
+  assert.equal(out.length, 1);
+  assert.notEqual(out[0].ended_at, null);
+  assert.deepEqual(await listDownNumbers(pool), []);
+});
+
+test('sonda aberta de instância que sumiu (findMessages 404) → inconclusive, sem episódio nem aviso; erro transitório só pula', async () => {
+  const { w, targets } = await zombieWorld();
+  const h = harness(w);
+  await runProbeTick(h.deps, targets);
+  const [p] = await probes();
+  await age(6);
+  await delivered(p.wamid);
+  w.state = {}; // a instância também some do connectionState
+
+  // Transitório: pula o tick, sonda segue aberta.
+  const flaky = harness(w);
+  flaky.deps.evolution.findProbe = async () => {
+    throw new Error('Evolution POST /chat/findMessages/i-zumbi → 500');
+  };
+  await runProbeTick(flaky.deps, targets);
+  assert.equal((await probes())[0].verdict, null);
+
+  w.gone = new Set(['i-zumbi']);
+  await runProbeTick(h.deps, targets);
+  const rows = await probes();
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].verdict, 'inconclusive');
+  assert.equal((await pool.query(`SELECT * FROM instance_outages`)).rows.length, 0);
+  assert.equal(h.calls.sendOps.length, 0);
+});
+
+test('pipeline_broken / send_failed / inconclusive não abrem episódio nem entram em listDownNumbers', async () => {
+  const nums = [
+    await seed('i-pipe', '+5531955550000'),
+    await seed('i-fail', '+5531966660000'),
+    await seed('i-inc', '+5531977770000'),
+  ];
+  const mk = async (n: (typeof nums)[number], code: string, parentId: number | null) =>
+    (await createProbe(pool, {
+      instance: n.evolutionInstance, kind: 'number', numberId: n.id, phone: n.phone!, label: null,
+      trigger: 'store_stale', code, parentId,
+    }))!;
+  // pipeline_broken: 2ª sonda que está no store.
+  const mom = await mk(nums[0], 'MMMM', null);
+  await markProbeSent(pool, mom.id, { wamid: 'w.mom', mirrorWamid: null, sendError: null });
+  await setVerdict(pool, mom.id, 'repeated');
+  const kid = await mk(nums[0], 'KKKK', mom.id);
+  await markProbeSent(pool, kid.id, { wamid: 'w.kid', mirrorWamid: null, sendError: null });
+  // send_failed: Cloud devolveu failed.
+  const f = await mk(nums[1], 'FFFF', null);
+  await markProbeSent(pool, f.id, { wamid: 'w.fail', mirrorWamid: null, sendError: null });
+  await recordCloudStatuses(pool, [{ id: 'w.fail', status: 'failed', errors: [{ code: 131026 }] }]);
+  // inconclusive: nada em 30 min.
+  const inc = await mk(nums[2], 'IIII', null);
+  await markProbeSent(pool, inc.id, { wamid: 'w.inc', mirrorWamid: null, sendError: null });
+  await age(31);
+
+  const w: World = { state: {}, store: {}, owner: {}, storeSeen: { 'i-pipe': true } };
+  const h = harness(w);
+  const t = await runProbeTick(h.deps, await listProbeTargets(pool, []));
+  assert.deepEqual(t.verdicts, { pipeline_broken: 1, send_failed: 1, inconclusive: 1 });
+  assert.equal((await pool.query(`SELECT * FROM instance_outages`)).rows.length, 0);
+  assert.deepEqual(await listDownNumbers(pool), []);
+  assert.equal(h.calls.sendOps.length, 2, 'pipeline_broken e send_failed avisam; 1 inconclusive não');
+});
+
+test('espelho dispensado quando o alvo já é o número do operador', async () => {
+  await seed('i-op', '+' + MIRROR);
+  await seed('i-par', '+5531922220000');
+  const w: World = {
+    state: { 'i-op': 'open', 'i-par': 'open' },
+    store: { 'i-op': STALE, 'i-par': RECENT },
+    owner: { 'i-op': MIRROR, 'i-par': '5531922220000' },
+    storeSeen: {},
+  };
+  const h = harness(w);
+  const t = await runProbeTick(h.deps, await listProbeTargets(pool, []));
+  assert.equal(t.sent, 1);
+  assert.equal(h.calls.sendProbe.length, 1);
+  const [row] = await probes();
+  assert.equal(row.mirror_wamid, null);
+});
+
+test('reconciliação: estado open com status disconnected → updateNumberStatus(connected)', async () => {
+  await seed('i-voltou', '+5531988880000');
+  await pool.query(`UPDATE whatsapp_numbers SET status = 'disconnected' WHERE evolution_instance = 'i-voltou'`);
+  const w: World = { state: { 'i-voltou': 'open' }, store: { 'i-voltou': RECENT }, owner: {}, storeSeen: {} };
+  const h = harness(w);
+  await runProbeTick(h.deps, await listProbeTargets(pool, []));
+  assert.deepEqual(h.calls.updateNumberStatus, [{ i: 'i-voltou', s: 'connected' }]);
 });

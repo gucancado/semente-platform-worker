@@ -21,6 +21,7 @@ import {
   listOpenProbes,
   markProbeSent,
   openNumberProbeEpisode,
+  openProbeEpisodeOf,
   probeHistory,
   recordProbeReceipt,
   setVerdict,
@@ -50,8 +51,13 @@ import { sameWhatsappNumber } from './down-notify-ops-copy.js';
  * Decisões desta camada (ver task-9-report):
  *  - FORA da janela nenhum envio, nem a 2ª sonda de um `repeated`: a 1ª fica `repeated`
  *    e o par recomeça no dia seguinte. Avisos OPERACIONAIS (ao operador) saem a qualquer hora.
- *  - Silêncio geral: 1 aviso por 24h por PROCESSO (memória em `ProbeMemo`); rolling
+ *  - Silêncio geral: sondas `quiet` suspensas a qualquer hora; o aviso ao operador só a
+ *    partir das 12h de SP, 1 por 24h por PROCESSO (memória em `ProbeMemo`); rolling
  *    deploy pode mandar 2.
+ *  - Episódio `probe` de NÚMERO fecha por tráfego real no store posterior ao início
+ *    (passo 2, em qualquer hora); o de sistema fecha em `recordSystemHealth`.
+ *  - `down` com tráfego real posterior ao 1º envio NÃO abre episódio (scan limitado do
+ *    store pode dar falso "fora"); findProbe 404 → `inconclusive`, sem aviso.
  *  - 3 `inconclusive` seguidos: avisa só quando a contagem é EXATAMENTE 3.
  */
 
@@ -102,6 +108,10 @@ export type ProbeDeps = {
   /** Opcional (adicionado): memória do silêncio geral; ausente = singleton do processo. */
   memo?: ProbeMemo;
 };
+
+const GENERAL_SILENCE_NOTICE_HOUR = 12;
+const SP_HOUR_FMT = new Intl.DateTimeFormat('en-GB', { timeZone: 'America/Sao_Paulo', hour: '2-digit', hourCycle: 'h23' });
+const spHour = (d: Date) => Number(SP_HOUR_FMT.format(d));
 
 /** Margem de relógio (Evolution × banco) na parada da varredura do store. */
 const STORE_SCAN_SKEW_SEC = 120;
@@ -272,7 +282,23 @@ async function evaluateProbe(
   let storeSeen = false;
   if (!received && p.ageMs >= PROBE_WAIT_MS && p.sentAt && p.cloudStatus !== 'failed') {
     const sinceSec = Math.floor(new Date(p.sentAt).getTime() / 1000) - STORE_SCAN_SKEW_SEC;
-    storeSeen = await deps.evolution.findProbe(p.instance, p.code, sinceSec);
+    try {
+      storeSeen = await deps.evolution.findProbe(p.instance, p.code, sinceSec);
+    } catch (err) {
+      // Instância sumiu da Evolution (404): a sonda nunca terá desfecho — encerra
+      // como `inconclusive`, sem episódio nem aviso. Erro transitório: relança e o
+      // tick só pula esta sonda (tenta de novo no próximo).
+      if (!is404(err)) throw err;
+      const r = await setVerdict(deps.pool, p.id, 'inconclusive');
+      if (r === 'set') {
+        tally('inconclusive');
+        deps.log.info({ instance: p.instance, code: p.code }, 'sonda: instância inexistente na Evolution — inconclusive');
+      } else if (r === 'received') {
+        tally('alive');
+        await closeProbeEpisode(deps.pool, p.instance);
+      }
+      return 0;
+    }
   }
   const v = decideVerdict({
     isRepeat: p.parentId != null,
@@ -311,6 +337,16 @@ async function evaluateProbe(
     case 'down': {
       const startedAt = await storeTsOrNull(deps, p.instance);
       const firstSentAt = await firstSentAtOf(deps, p);
+      if (startedAt && startedAt.getTime() > firstSentAt.getTime()) {
+        // A sessão teve tráfego REAL depois de a 1ª sonda sair: está viva. O "fora do
+        // store" provavelmente veio da varredura limitada (250 registros). Veredito fica
+        // `down` (registro), mas sem episódio — nenhum aviso ao cliente.
+        deps.log.warn(
+          { instance: p.instance, startedAt, firstSentAt },
+          'sonda: down contrariado por tráfego real posterior ao envio — episódio NÃO aberto',
+        );
+        return 0;
+      }
       if (p.kind === 'system') {
         const st = t.systemTarget ?? { instance: p.instance, expectedPhone: p.phone, label: p.label };
         await openSystemProbeEpisode(deps.pool, st, startedAt, firstSentAt, p.trigger);
@@ -324,6 +360,22 @@ async function evaluateProbe(
         });
       } else {
         deps.log.warn({ instance: p.instance }, 'sonda: down de número sem number_id — episódio não aberto');
+        return 0;
+      }
+      // Corrida: o recebimento (desta sonda ou da mãe) pode ter caído entre o
+      // `setVerdict('down')` e a abertura acima — o handler do webhook viu `down`,
+      // chamou closeProbeEpisode quando ainda não havia episódio, e o abrimos depois.
+      // Relê do BANCO, depois do commit da abertura: recebida → fecha. Recebimento
+      // posterior a esta leitura já encontra o episódio aberto e o fecha sozinho.
+      const { rows: rec } = await deps.pool.query(
+        `SELECT EXISTS (SELECT 1 FROM connection_probes
+                         WHERE id IN ($1, $2) AND received_at IS NOT NULL) AS received`,
+        [p.id, p.parentId ?? p.id],
+      );
+      if (rec[0]?.received === true) {
+        await closeProbeEpisode(deps.pool, p.instance);
+        deps.log.info({ instance: p.instance }, 'sonda: recebida durante a abertura da queda — episódio fechado');
+        return 0;
       }
       deps.log.info({ instance: p.instance, trigger: p.trigger }, 'sonda: queda confirmada');
       return 0;
@@ -386,22 +438,51 @@ export async function runProbeTick(
     }
   }
 
-  // 2. Estado Evolution + reconciliação (números).
+  // 2. Estado Evolution + reconciliação (números) + fechamento do episódio `probe`
+  //    de número por tráfego real (spec §7).
   const openTargets: ProbeTarget[] = [];
+  /** Store lido neste tick (reusado pelos gatilhos — uma leitura por instância). */
+  const storeCache = new Map<string, Date | null>();
   for (const t of targets) {
+    let state: 'open' | 'connecting' | 'close';
     try {
-      const state = await deps.evolution.connectionState(t.instance);
-      if (t.kind === 'number') {
-        const r = reconcileStatus(state, t.status ?? '');
-        if (r) {
-          await deps.updateNumberStatus(t.instance, r);
-          deps.log.info({ instance: t.instance, state, from: t.status, to: r }, 'sonda: status reconciliado com a Evolution');
-        }
-      }
-      if (state === 'open') openTargets.push(t);
+      state = await deps.evolution.connectionState(t.instance);
     } catch (err) {
       if (is404(err)) deps.log.debug?.({ instance: t.instance }, 'sonda: instância inexistente na Evolution — ignorada');
       else deps.log.warn({ instance: t.instance, err: errMsg(err) }, 'sonda: estado da instância falhou');
+      continue;
+    }
+    if (t.kind === 'number') {
+      const r = reconcileStatus(state, t.status ?? '');
+      if (r) {
+        try {
+          await deps.updateNumberStatus(t.instance, r);
+          deps.log.info({ instance: t.instance, state, from: t.status, to: r }, 'sonda: status reconciliado com a Evolution');
+        } catch (err) {
+          deps.log.warn({ instance: t.instance, to: r, err: errMsg(err) }, 'sonda: reconciliação do status falhou (updateNumberStatus)');
+        }
+      }
+    }
+    if (state !== 'open') continue;
+    openTargets.push(t);
+    if (t.kind !== 'number') continue; // sistema: fecha por tráfego em recordSystemHealth
+    try {
+      if (!(await openProbeEpisodeOf(deps.pool, t.instance))) continue;
+      const ts = await deps.evolution.latestStoreTs(t.instance);
+      storeCache.set(t.instance, ts);
+      if (!ts) continue;
+      // Comparado no SQL: started_at pode ter µs e não pode passar pelo JS.
+      const { rows } = await deps.pool.query(
+        `SELECT EXISTS (SELECT 1 FROM instance_outages
+                         WHERE instance = $1 AND ended_at IS NULL AND started_at_source = 'probe'
+                           AND started_at < $2::timestamptz) AS traffic`,
+        [t.instance, ts],
+      );
+      if (rows[0]?.traffic === true && (await closeProbeEpisode(deps.pool, t.instance))) {
+        deps.log.info({ instance: t.instance, storeTs: ts }, 'sonda: tráfego real depois da queda — episódio probe fechado');
+      }
+    } catch (err) {
+      deps.log.warn({ instance: t.instance, err: errMsg(err) }, 'sonda: checagem de tráfego do episódio falhou');
     }
   }
 
@@ -411,7 +492,10 @@ export async function runProbeTick(
   const storeTs = new Map<string, Date | null>();
   for (const t of openTargets) {
     try {
-      storeTs.set(t.instance, await deps.evolution.latestStoreTs(t.instance));
+      storeTs.set(
+        t.instance,
+        storeCache.has(t.instance) ? storeCache.get(t.instance)! : await deps.evolution.latestStoreTs(t.instance),
+      );
     } catch (err) {
       deps.log.warn({ instance: t.instance, err: errMsg(err) }, 'sonda: leitura do store falhou — sem gatilho');
     }
@@ -481,7 +565,9 @@ export async function runProbeTick(
   }
 
   const { send, generalSilence } = pickCandidates(cands, openTargets.length);
-  if (generalSilence) {
+  // Sondas `quiet` ficam suspensas a qualquer hora; o AVISO só a partir das 12h de SP:
+  // 12h de relógio sem tráfego às 08h é só a noite (ruling §5).
+  if (generalSilence && spHour(now) >= GENERAL_SILENCE_NOTICE_HOUR) {
     const last = memo.generalSilenceAt;
     if (last == null || now.getTime() - last >= PROBE_COOLDOWN_MS) {
       memo.generalSilenceAt = now.getTime();
