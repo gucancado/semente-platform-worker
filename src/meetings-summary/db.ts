@@ -120,6 +120,10 @@ export async function loadEpisodeForSummary(episodeId: number): Promise<EpisodeF
   };
 }
 
+function jsonOrNull(v: unknown): string | null {
+  return v == null ? null : JSON.stringify(v);
+}
+
 /**
  * Grava o digest e conclui o job NA MESMA TRANSAÇÃO, condicionado à revisão.
  *
@@ -141,9 +145,14 @@ export async function finishSummaryJob(a: {
     const upd = await client.query(
       `UPDATE episodes
           SET summary = $2, summary_points = $3, summary_model = $4,
+              summary_decisions = $6, summary_actions = $7, summary_open_questions = $8,
               summary_generated_at = NOW(), updated_at = NOW()
         WHERE id = $1 AND revision = $5`,
-      [a.episodeId, a.digest.summary, JSON.stringify(a.digest.points), a.model, a.revision],
+      [
+        a.episodeId, a.digest.summary, JSON.stringify(a.digest.points), a.model, a.revision,
+        // null fica SQL NULL (não o jsonb 'null'): "modelo não trouxe" ≠ "trouxe vazio".
+        jsonOrNull(a.digest.decisions), jsonOrNull(a.digest.actions), jsonOrNull(a.digest.openQuestions),
+      ],
     );
     if (upd.rowCount === 0) {
       await client.query('ROLLBACK');

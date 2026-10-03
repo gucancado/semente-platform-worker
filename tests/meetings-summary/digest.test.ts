@@ -11,7 +11,7 @@ import { APIError, APIConnectionError } from 'openai';
 
 import {
   flattenTurns, parseDigest, buildSummaryPrompt,
-  MAX_POINTS, MAX_SUMMARY_CHARS,
+  MAX_POINTS, MAX_SUMMARY_CHARS, MAX_ACTIONS, MAX_DECISIONS, MAX_OPEN_QUESTIONS,
 } from '../../src/meetings-summary/prompt.js';
 import { classifySummaryError, SYSTEMIC_MAX_AGE_H } from '../../src/meetings-summary/error-class.js';
 import { summaryCost, isReasoningModel } from '../../src/meetings-summary/provider.js';
@@ -208,4 +208,101 @@ test('isReasoningModel', () => {
   assert.equal(isReasoningModel('gpt-5-mini'), true);
   assert.equal(isReasoningModel('o4-mini'), true);
   assert.equal(isReasoningModel('gpt-4o-mini'), false);
+});
+
+// ── digest estruturado (mig 069) ────────────────────────────────────────────
+test('parseDigest: decisões/ações/pendências válidas', () => {
+  const r = parseDigest(JSON.stringify({
+    resumo: 'Revisão de campanhas de outubro com pausa do Meta e novo orçamento',
+    pontos: ['Campanha Meta de outubro foi pausada por CPA alto'],
+    decisoes: ['Pausar a campanha Meta de outubro'],
+    acoes: [
+      { o_que: 'Enviar relatório de setembro ao cliente', responsavel: 'Lucas', prazo: 'até sexta' },
+      { o_que: 'Refazer criativos do carrossel', responsavel: null, prazo: null },
+    ],
+    pendencias: ['Cliente vai confirmar o orçamento de novembro?'],
+  }));
+  assert.equal(r.outcome, 'ok');
+  assert.deepEqual(r.digest.decisions, ['Pausar a campanha Meta de outubro']);
+  assert.deepEqual(r.digest.actions, [
+    { what: 'Enviar relatório de setembro ao cliente', owner: 'Lucas', due: 'até sexta' },
+    { what: 'Refazer criativos do carrossel', owner: null, due: null },
+  ]);
+  assert.deepEqual(r.digest.openQuestions, ['Cliente vai confirmar o orçamento de novembro?']);
+});
+
+test('parseDigest: chaves novas ausentes viram null (digest à moda antiga segue ok)', () => {
+  const r = parseDigest('{"resumo": "Resumo com tamanho suficiente", "pontos": []}');
+  assert.equal(r.outcome, 'ok');
+  assert.equal(r.digest.decisions, null);
+  assert.equal(r.digest.actions, null);
+  assert.equal(r.digest.openQuestions, null);
+});
+
+test('parseDigest: chave nova presente e vazia é [] (≠ null)', () => {
+  const r = parseDigest('{"resumo": "Resumo com tamanho suficiente", "pontos": [], "decisoes": [], "acoes": [], "pendencias": []}');
+  assert.deepEqual(r.digest.decisions, []);
+  assert.deepEqual(r.digest.actions, []);
+  assert.deepEqual(r.digest.openQuestions, []);
+});
+
+test('parseDigest: campo novo no tipo errado não derruba resumo nem pontos', () => {
+  const r = parseDigest(JSON.stringify({
+    resumo: 'Resumo com tamanho suficiente', pontos: ['Ponto suficientemente longo para valer'],
+    decisoes: 'não é lista', acoes: { o_que: 'x' }, pendencias: 3,
+  }));
+  assert.equal(r.outcome, 'ok');
+  assert.equal(r.digest.summary, 'Resumo com tamanho suficiente');
+  assert.equal(r.digest.points.length, 1);
+  assert.equal(r.digest.decisions, null);
+  assert.equal(r.digest.actions, null);
+  assert.equal(r.digest.openQuestions, null);
+});
+
+test('parseDigest: responsável/prazo placeholder viram null, nunca nome inventado', () => {
+  const r = parseDigest(JSON.stringify({
+    resumo: '', pontos: [],
+    acoes: [
+      { o_que: 'Ajustar a landing page de vendas', responsavel: 'a definir', prazo: 'não definido' },
+      { o_que: 'Criar públicos semelhantes no Meta', responsavel: 'N/A', prazo: '' },
+      { o_que: 'Revisar orçamento do Google Ads', responsavel: 42, prazo: ['sexta'] },
+    ],
+  }));
+  assert.equal(r.outcome, 'ok', 'ações sozinhas já são conteúdo');
+  for (const a of r.digest.actions!) {
+    assert.equal(a.owner, null);
+    assert.equal(a.due, null);
+  }
+});
+
+test('parseDigest: ação sem o_que é descartada sem derrubar as outras; dedup e teto', () => {
+  const acoes = [
+    { responsavel: 'Ana' },
+    'texto solto',
+    { o_que: 'Enviar proposta revisada ao cliente', responsavel: 'Ana', prazo: null },
+    { o_que: 'enviar proposta revisada ao cliente.', responsavel: 'Ana', prazo: null },
+    ...Array.from({ length: 20 }, (_, i) => ({ o_que: `Tarefa número ${i} bem descrita`, responsavel: null, prazo: null })),
+  ];
+  const r = parseDigest(JSON.stringify({ resumo: '', pontos: [], acoes }));
+  assert.equal(r.digest.actions![0]!.what, 'Enviar proposta revisada ao cliente');
+  assert.notEqual(r.digest.actions![1]!.what.toLowerCase(), 'enviar proposta revisada ao cliente.', 'duplicata removida');
+  assert.equal(r.digest.actions!.length, MAX_ACTIONS);
+});
+
+test('parseDigest: tetos de decisões e pendências', () => {
+  const many = (p: string) => Array.from({ length: 20 }, (_, i) => `${p} número ${i} com texto`);
+  const r = parseDigest(JSON.stringify({ resumo: '', pontos: [], decisoes: many('Decisão'), pendencias: many('Pendência') }));
+  assert.equal(r.digest.decisions!.length, MAX_DECISIONS);
+  assert.equal(r.digest.openQuestions!.length, MAX_OPEN_QUESTIONS);
+});
+
+test('parseDigest: tudo vazio continua "empty"; {"decisoes": 1} sozinho é parse_error', () => {
+  assert.equal(parseDigest('{"resumo": "", "pontos": [], "decisoes": [], "acoes": [], "pendencias": []}').outcome, 'empty');
+  assert.equal(parseDigest('{"decisoes": 1}').outcome, 'parse_error');
+});
+
+test('buildSummaryPrompt pede as chaves novas e proíbe inventar responsável/prazo', () => {
+  const { system } = buildSummaryPrompt({ title: 'T', durationSeconds: 60, participants: [], turns: turns(1) });
+  for (const k of ['"decisoes"', '"acoes"', '"o_que"', '"responsavel"', '"prazo"', '"pendencias"']) assert.ok(system.includes(k), k);
+  assert.match(system, /null/);
 });

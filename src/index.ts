@@ -216,7 +216,7 @@ async function main() {
   assertMeetingsReadConfig(config, config.MEETINGS_READ_ENABLED);
   if (config.MEETINGS_READ_ENABLED) {
     await app.register(async (scope) => {
-      registerMeetingsReadRoutes(scope, { pool, panelToken: config.PANEL_TOKEN });
+      registerMeetingsReadRoutes(scope, { pool, panelToken: config.PANEL_TOKEN, admissionTimeoutMin: config.MEETINGS_ADMISSION_TIMEOUT_MIN });
     });
     app.log.info('meetings-read: rotas registradas');
   } else {

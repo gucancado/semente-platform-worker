@@ -4,6 +4,7 @@ import type { CollectedMeetingRow } from './db.js';
 import { updateCollectedMeeting, listQueuedMeetings, countActiveCollections } from './db.js';
 import { vexaMeetingToEpisodeInput, episodeHasEnoughContent } from '../integrations/vexa/normalize.js';
 import type { insertEpisodeWithTurns } from '../episodes/db.js';
+import { appendStatusLog, silentRoomDetail, truncateDetail, vexaFailedDetail } from './diagnostics.js';
 
 export type MeetingsCollectDeps = {
   pool: Pool;
@@ -53,7 +54,11 @@ export async function promoteQueuedMeetings(deps: MeetingsCollectDeps): Promise<
         await updateCollectedMeeting(deps.pool, row.id, { status: 'collecting', vexaMeetingId: meeting.id, startedAt: deps.now() });
         promoted++;
       } catch (err) {
-        await updateCollectedMeeting(deps.pool, row.id, { status: 'failed', failureReason: 'vexa_send_failed' });
+        // A mensagem já traz HTTP status + corpo (VexaClient.req) — é o que separa
+        // "outro bot já na sala" de Vexa fora do ar.
+        await updateCollectedMeeting(deps.pool, row.id, {
+          status: 'failed', failureReason: 'vexa_send_failed', failureDetail: truncateDetail((err as Error).message),
+        });
         deps.log?.warn?.({ id: row.id, err: (err as Error).message }, 'meetings-collect: sendBot falhou na promoção');
       }
     }
@@ -86,6 +91,7 @@ export async function importCollectedMeeting(
     // já é a evidência, e um objeto no R2 sem episódio é lixo órfão.
     await updateCollectedMeeting(deps.pool, row.id, {
       status: 'failed', failureReason: 'silent_room', vexaMeetingId: meeting.id,
+      failureDetail: truncateDetail(`abaixo do piso de fala: ${input.turns.length} turnos; ultimo_status_vexa=${meeting.status}`),
     });
     deps.log?.info?.(
       { id: row.id, turns: input.turns.length },
@@ -103,6 +109,30 @@ export async function importCollectedMeeting(
   });
 }
 
+/**
+ * Grava o status do Vexa visto neste tick; na MUDANÇA, anexa à trilha e loga.
+ * Escrita própria (e não pega carona no update de cada ramo) porque o ramo
+ * `completed` importa por outro caminho e o ramo de progresso nem sempre escreve —
+ * o custo é 1 UPDATE por coleta ativa por minuto (≤ VEXA_MAX_CONCURRENT rows).
+ * O poller é o único escritor de status_log, então ler-mexer-gravar não corre.
+ */
+async function recordVexaStatus(deps: MeetingsCollectDeps, row: CollectedMeetingRow, meeting: VexaMeeting): Promise<void> {
+  const at = deps.now();
+  const status = typeof meeting.status === 'string' ? meeting.status : 'desconhecido';
+  const segments = meeting.segments?.length ?? 0;
+  const changed = row.vexa_status !== status;
+  await updateCollectedMeeting(deps.pool, row.id, {
+    vexaStatus: status, vexaStatusAt: at,
+    ...(changed ? { statusLog: appendStatusLog(row.status_log, { at: at.toISOString(), status, segments }) } : {}),
+  });
+  if (changed) {
+    deps.log?.info?.(
+      { id: row.id, meet_code: row.meet_code, de: row.vexa_status ?? null, para: status, segments },
+      'meetings-collect: status vexa mudou',
+    );
+  }
+}
+
 export async function processCollectedMeeting(deps: MeetingsCollectDeps, row: CollectedMeetingRow): Promise<void> {
   let meeting: VexaMeeting;
   try {
@@ -112,13 +142,17 @@ export async function processCollectedMeeting(deps: MeetingsCollectDeps, row: Co
     return;
   }
 
+  await recordVexaStatus(deps, row, meeting);
+
   const now = deps.now().getTime();
   const lastSeg = lastSegmentDate(meeting);
   const hasSegments = (meeting.segments?.length ?? 0) > 0;
 
   if (meeting.status === 'failed') {
     await deps.vexa.stopBot(row.meet_code).catch(() => {});
-    await updateCollectedMeeting(deps.pool, row.id, { status: 'failed', failureReason: 'vexa_failed', vexaMeetingId: meeting.id });
+    await updateCollectedMeeting(deps.pool, row.id, {
+      status: 'failed', failureReason: 'vexa_failed', vexaMeetingId: meeting.id, failureDetail: vexaFailedDetail(meeting),
+    });
     return;
   }
 
@@ -153,7 +187,10 @@ export async function processCollectedMeeting(deps: MeetingsCollectDeps, row: Co
   const waitedMs = now - new Date(row.started_at ?? row.created_at).getTime();
   if (waitedMs > deps.admissionTimeoutMin * 60_000) {
     await deps.vexa.stopBot(row.meet_code).catch(() => {});
-    await updateCollectedMeeting(deps.pool, row.id, { status: 'failed', failureReason: 'silent_room', vexaMeetingId: meeting.id });
+    await updateCollectedMeeting(deps.pool, row.id, {
+      status: 'failed', failureReason: 'silent_room', vexaMeetingId: meeting.id,
+      failureDetail: silentRoomDetail(meeting.status ?? null, waitedMs),
+    });
     return;
   }
   await updateCollectedMeeting(deps.pool, row.id, { vexaMeetingId: meeting.id });

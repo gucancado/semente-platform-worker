@@ -73,6 +73,44 @@ export async function listMeetings(
   return rows.map(mapMeetingListRow);
 }
 
+/** Coleta que falhou SEM gerar episódio — invisível no LIST_SQL (dirigido por
+ *  episodes). Sem isto a reunião some sem rastro: nem na lista, nem com motivo. */
+export type FailedCollectionRow = {
+  collected_id: string;
+  meet_code: string;
+  title: string | null;
+  status: 'failed' | 'canceled';
+  failure_reason: string | null;
+  failure_detail: string | null;
+  vexa_status: string | null;
+  requested_at: Date;
+  started_at: Date | null;
+  ended_at: Date;
+};
+
+// Período sobre created_at (= instante do PEDIDO), com a mesma fronteira de dia
+// BRT do LIST_SQL. ended_at = updated_at: a última escrita numa row terminal é a
+// que a marcou failed/canceled.
+const FAILED_SQL = `
+  SELECT id AS collected_id, meet_code, title, status, failure_reason, failure_detail,
+         vexa_status, created_at AS requested_at, started_at, updated_at AS ended_at
+  FROM collected_meetings
+  WHERE workspace_id = $1 AND episode_id IS NULL AND status IN ('failed','canceled')
+    AND ($2::date IS NULL OR created_at >= ($2::date)::timestamp AT TIME ZONE 'America/Sao_Paulo')
+    AND ($3::date IS NULL OR created_at <  ($3::date + 1)::timestamp AT TIME ZONE 'America/Sao_Paulo')
+  ORDER BY created_at DESC
+  LIMIT $4`;
+
+export async function listFailedCollections(
+  pool: Pool,
+  a: { workspaceId: string; since?: string | null; until?: string | null; limit?: number },
+): Promise<FailedCollectionRow[]> {
+  const { rows } = await pool.query<FailedCollectionRow>(FAILED_SQL, [
+    a.workspaceId, a.since ?? null, a.until ?? null, a.limit ?? 200,
+  ]);
+  return rows;
+}
+
 export type MeetingsStats = {
   total: number;
   total_seconds: number;
@@ -144,6 +182,12 @@ export type MeetingDigestView = {
   id: number; title: string | null; occurred_at: Date; duration_seconds: number | null;
   participants: Array<{ name: string; email: string | null }>;
   summary: string | null; summary_points: string[] | null; summary_generated_at: Date | null;
+  /** Digest estruturado (mig 069). null = digest antigo ou o modelo não trouxe;
+   *  [] = trouxe vazio. Diferente de summary_points, vazio NÃO vira null: o MCP
+   *  distingue "não houve decisão" de "não sei". */
+  summary_decisions: string[] | null;
+  summary_actions: Array<{ what: string; owner: string | null; due: string | null }> | null;
+  summary_open_questions: string[] | null;
   /** Há arquivo de áudio no R2. O painel mostra o player só com `true`. */
   has_audio: boolean;
   /** Onde fica o tempo 0 dos turnos dentro do áudio: posição no áudio =
@@ -162,19 +206,35 @@ function coercePoints(v: unknown): string[] | null {
   return out.length ? out : null;
 }
 
+function coerceList(v: unknown): string[] | null {
+  if (!Array.isArray(v)) return null;
+  return v.filter((x): x is string => typeof x === 'string' && x.trim().length > 0);
+}
+
+function coerceActions(v: unknown): MeetingDigestView['summary_actions'] {
+  if (!Array.isArray(v)) return null;
+  const s = (x: unknown) => (typeof x === 'string' && x.trim() ? x : null);
+  return v
+    .filter((a): a is Record<string, unknown> => !!a && typeof a === 'object' && typeof (a as any).what === 'string')
+    .map((a) => ({ what: a.what as string, owner: s(a.owner), due: s(a.due) }));
+}
+
 export function audioOffsetMs(metadata: unknown): number {
   const m = (metadata ?? {}) as Record<string, unknown>;
   const n = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : Number(v ?? 0) || 0);
   return Math.round(n(m.first_segment_offset_ms) - n(m.audio_start_ms));
 }
 
-function mapDigestView(row: any): MeetingDigestView {
+export function mapDigestView(row: any): MeetingDigestView {
   return {
     id: Number(row.id), title: row.title, occurred_at: row.occurred_at,
     duration_seconds: row.duration_seconds, participants: row.participants ?? [],
     summary: row.summary ?? null,
     summary_points: coercePoints(row.summary_points),
     summary_generated_at: row.summary_generated_at ?? null,
+    summary_decisions: coerceList(row.summary_decisions),
+    summary_actions: coerceActions(row.summary_actions),
+    summary_open_questions: coerceList(row.summary_open_questions),
     has_audio: row.audio_r2_key != null,
     audio_offset_ms: audioOffsetMs(row.metadata),
   };
@@ -186,7 +246,8 @@ export async function getMeetingDigest(
 ): Promise<MeetingDigestView | null> {
   const { rows } = await pool.query(
     `SELECT id, title, occurred_at, duration_seconds, participants, workspace_id,
-            summary, summary_points, summary_generated_at, audio_r2_key, metadata
+            summary, summary_points, summary_generated_at, audio_r2_key, metadata,
+            summary_decisions, summary_actions, summary_open_questions
      FROM episodes WHERE id=$1 AND fonte='reuniao'`, [a.episodeId]);
   const row = rows[0];
   // Mesma revalidação de tenant do transcript: episódio de outro workspace → null.
@@ -208,7 +269,8 @@ export async function getMeetingTranscript(
 ): Promise<MeetingTranscript | null> {
   const ep = await pool.query(
     `SELECT id, title, occurred_at, duration_seconds, participants, workspace_id,
-            summary, summary_points, summary_generated_at, audio_r2_key, metadata
+            summary, summary_points, summary_generated_at, audio_r2_key, metadata,
+            summary_decisions, summary_actions, summary_open_questions
      FROM episodes WHERE id=$1 AND fonte='reuniao'`, [a.episodeId]);
   const row = ep.rows[0];
   // Revalidação de tenant: episódio inexistente OU de outro workspace → null (404 na rota).

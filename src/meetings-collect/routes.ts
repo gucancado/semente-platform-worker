@@ -3,8 +3,9 @@ import type { Pool } from 'pg';
 import { requirePanelToken } from '../whatsapp/provision-routes.js';
 import type { MeetingsCollectDeps } from './service.js';
 import { importCollectedMeeting, promoteQueuedMeetings } from './service.js';
+import { planCollectReuse } from './reuse.js';
 import {
-  createCollectedMeeting, getCollectedMeeting,
+  createOrReuseCollectedMeeting, getCollectedMeeting,
   updateCollectedMeeting, isEpisodeFrozen, reattributeEpisode,
 } from './db.js';
 
@@ -36,12 +37,21 @@ export function registerMeetingsCollectRoutes(
 
     // Nasce `queued`; a fila de slots decide se sobe agora (collecting), espera, ou
     // falha (vexa_send_failed). O status real vem da re-leitura, não é assumido.
-    const row = await createCollectedMeeting(deps.pool, {
-      meetCode, workspaceId, requestedBy: req.actingUser ?? 'unknown', title, queueExpiresAt,
-    });
+    // Sala que já tem coleta ativa (qualquer workspace) é REAPROVEITADA: o Vexa
+    // recusaria o 2º bot e o pedido novo morreria em vexa_send_failed (reuse.ts).
+    const { row, reused } = await createOrReuseCollectedMeeting(
+      deps.pool,
+      { meetCode, workspaceId, requestedBy: req.actingUser ?? 'unknown', title, queueExpiresAt },
+      (existing) => planCollectReuse(
+        existing, { workspaceId, title, queueExpiresAt }, deps.collectDeps.now(), deps.collectDeps.queueMaxWaitMin,
+      ),
+    );
     await promoteQueuedMeetings(deps.collectDeps);
     const updated = await getCollectedMeeting(deps.pool, row.id);
-    return reply.send({ schema: 'meetings_v1', id: row.id, status: updated!.status, meet_code: meetCode });
+    return reply.send({
+      schema: 'meetings_v1', id: row.id, status: updated!.status, meet_code: meetCode,
+      ...(reused ? { reused: true } : {}),
+    });
   });
 
   app.get('/meetings-collect/:id', { preHandler: auth }, async (req: any, reply) => {

@@ -99,3 +99,53 @@ test('PATCH attribution muda workspace quando não congelado', async () => {
   const check = await pool.query('SELECT workspace_id FROM episodes WHERE id=$1', [ep.id]);
   assert.equal(check.rows[0].workspace_id, 'ws-2');
 });
+
+// ── pedido duplicado (mig 069): o Vexa recusa 2º bot na mesma sala ──────────
+test('POST na mesma sala com coleta ativa reaproveita (qualquer workspace)', async () => {
+  let sends = 0;
+  const app = buildApp({ sendBot: async (code: string) => { sends++; return { id: 901, native_meeting_id: code, status: 'joining', start_time: null, end_time: null, segments: [] }; } });
+  const a = await app.inject({ method: 'POST', url: '/meetings-collect', headers: H, payload: { meetCode: 'abc-defg-hij', workspaceId: 'ws-1' } });
+  const b = await app.inject({ method: 'POST', url: '/meetings-collect', headers: H, payload: { meetCode: 'abc-defg-hij', workspaceId: 'ws-2', title: 'Agendada' } });
+  assert.equal(b.json().id, a.json().id);
+  assert.equal(b.json().reused, true);
+  assert.equal(a.json().reused, undefined);
+  assert.equal(sends, 1, 'um bot só');
+  const row = await getCollectedMeeting(pool, a.json().id);
+  assert.equal(row!.workspace_id, 'ws-1', 'não move a reunião de quem pediu primeiro');
+  assert.equal(row!.title, 'Agendada', 'preenche título vazio');
+});
+
+test('POST não reaproveita coleta terminal', async () => {
+  const app = buildApp();
+  const old = await createCollectedMeeting(pool, { meetCode: 'abc-defg-hij', workspaceId: null, requestedBy: 'x' });
+  await updateCollectedMeeting(pool, old.id, { status: 'failed', failureReason: 'silent_room' });
+  const r = await app.inject({ method: 'POST', url: '/meetings-collect', headers: H, payload: { meetCode: 'abc-defg-hij' } });
+  assert.notEqual(r.json().id, old.id);
+  assert.equal(r.json().reused, undefined);
+});
+
+test('POST duplicado estende a expiração da fila', async () => {
+  const app = buildApp();
+  const busy = await createCollectedMeeting(pool, { meetCode: 'aaa-bbbb-ccc', workspaceId: null, requestedBy: 'x' });
+  await updateCollectedMeeting(pool, busy.id, { status: 'collecting' }); // ocupa o único slot
+  const t1 = new Date(Date.now() + 30 * 60_000); const t2 = new Date(Date.now() + 200 * 60_000);
+  const a = await app.inject({ method: 'POST', url: '/meetings-collect', headers: H, payload: { meetCode: 'abc-defg-hij', expiresAt: t1.toISOString() } });
+  assert.equal(a.json().status, 'queued');
+  const b = await app.inject({ method: 'POST', url: '/meetings-collect', headers: H, payload: { meetCode: 'abc-defg-hij', expiresAt: t2.toISOString() } });
+  assert.equal(b.json().reused, true);
+  const row = await getCollectedMeeting(pool, a.json().id);
+  assert.equal(row!.queue_expires_at!.getTime(), t2.getTime());
+});
+
+test('POST duplicado em coleta collecting move a âncora de admissão pra agora', async () => {
+  const app = buildApp();
+  const old = await createCollectedMeeting(pool, { meetCode: 'abc-defg-hij', workspaceId: null, requestedBy: 'x' });
+  const past = new Date(Date.now() - 15 * 60_000);
+  await updateCollectedMeeting(pool, old.id, { status: 'collecting', startedAt: past });
+  const before = Date.now();
+  const r = await app.inject({ method: 'POST', url: '/meetings-collect', headers: H, payload: { meetCode: 'abc-defg-hij' } });
+  assert.equal(r.json().id, old.id);
+  assert.equal(r.json().status, 'collecting');
+  const row = await getCollectedMeeting(pool, old.id);
+  assert.ok(row!.started_at!.getTime() >= before - 1000, 'âncora andou pra agora');
+});

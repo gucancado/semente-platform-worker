@@ -2,7 +2,8 @@ import type { FastifyInstance } from 'fastify';
 import type { Pool } from 'pg';
 import type { MeetingDigestView } from './db.js';
 import { requirePanelToken } from '../whatsapp/provision-routes.js';
-import { listMeetings, getMeetingsStats, getMeetingTranscript, getMeetingDigest } from './db.js';
+import { listMeetings, getMeetingsStats, getMeetingTranscript, getMeetingDigest, listFailedCollections } from './db.js';
+import { failureLabel } from './failure-label.js';
 import { getEpisodeAudio } from '../meetings-audio/db.js';
 import { AUDIO_URL_TTL_S, audioDownloadName } from '../meetings-audio/core.js';
 import { presignGet } from '../integrations/r2.js';
@@ -14,7 +15,8 @@ import { presignGet } from '../integrations/r2.js';
  */
 export function registerMeetingsReadRoutes(
   app: FastifyInstance,
-  deps: { pool: Pool; panelToken: string },
+  // admissionTimeoutMin entra no rótulo do silent_room (o número está na frase).
+  deps: { pool: Pool; panelToken: string; admissionTimeoutMin?: number },
 ): void {
   const auth = requirePanelToken(deps.panelToken);
 
@@ -22,9 +24,14 @@ export function registerMeetingsReadRoutes(
     const workspaceId = req.query?.workspace_id as string | undefined;
     if (!workspaceId) return reply.code(400).send({ error: 'workspace_id_required' });
     const limit = req.query?.limit ? Math.min(Number(req.query.limit), 500) : 200;
-    const meetings = await listMeetings(deps.pool, {
-      workspaceId, since: req.query?.since ?? null, until: req.query?.until ?? null, limit,
-    });
+    const since = req.query?.since ?? null;
+    const until = req.query?.until ?? null;
+    const includeFailed = req.query?.include_failed === '1' || req.query?.include_failed === 'true';
+    const [meetings, failed] = await Promise.all([
+      listMeetings(deps.pool, { workspaceId, since, until, limit }),
+      includeFailed ? listFailedCollections(deps.pool, { workspaceId, since, until, limit }) : Promise.resolve(null),
+    ]);
+    const timeout = { admissionTimeoutMin: deps.admissionTimeoutMin ?? 10 };
     return reply.send({
       schema: 'meetings_read_v1',
       meetings: meetings.map((m) => ({
@@ -34,6 +41,18 @@ export function registerMeetingsReadRoutes(
         duration_seconds: m.duration_seconds, participants: m.participants,
         summary: m.summary, speakers: m.speakers,
       })),
+      // Chave só existe com include_failed: consumidor antigo não vê mudança.
+      ...(failed ? {
+        failed: failed.map((f) => ({
+          collected_id: f.collected_id, meet_code: f.meet_code, title: f.title,
+          status: f.status, failure_reason: f.failure_reason,
+          failure_label: failureLabel(f.failure_reason, timeout),
+          failure_detail: f.failure_detail, vexa_status: f.vexa_status,
+          requested_at: new Date(f.requested_at).toISOString(),
+          started_at: f.started_at ? new Date(f.started_at).toISOString() : null,
+          ended_at: new Date(f.ended_at).toISOString(),
+        })),
+      } : {}),
     });
   });
 
