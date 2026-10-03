@@ -101,18 +101,27 @@ test('PATCH attribution muda workspace quando não congelado', async () => {
 });
 
 // ── pedido duplicado (mig 069): o Vexa recusa 2º bot na mesma sala ──────────
-test('POST na mesma sala com coleta ativa reaproveita (qualquer workspace)', async () => {
+test('POST na mesma sala e mesmo workspace com coleta ativa reaproveita', async () => {
   let sends = 0;
   const app = buildApp({ sendBot: async (code: string) => { sends++; return { id: 901, native_meeting_id: code, status: 'joining', start_time: null, end_time: null, segments: [] }; } });
   const a = await app.inject({ method: 'POST', url: '/meetings-collect', headers: H, payload: { meetCode: 'abc-defg-hij', workspaceId: 'ws-1' } });
-  const b = await app.inject({ method: 'POST', url: '/meetings-collect', headers: H, payload: { meetCode: 'abc-defg-hij', workspaceId: 'ws-2', title: 'Agendada' } });
+  const b = await app.inject({ method: 'POST', url: '/meetings-collect', headers: H, payload: { meetCode: 'abc-defg-hij', workspaceId: 'ws-1', title: 'Agendada' } });
   assert.equal(b.json().id, a.json().id);
   assert.equal(b.json().reused, true);
   assert.equal(a.json().reused, undefined);
   assert.equal(sends, 1, 'um bot só');
   const row = await getCollectedMeeting(pool, a.json().id);
-  assert.equal(row!.workspace_id, 'ws-1', 'não move a reunião de quem pediu primeiro');
   assert.equal(row!.title, 'Agendada', 'preenche título vazio');
+});
+
+test('POST na mesma sala de OUTRO workspace não reaproveita (isolamento de tenant)', async () => {
+  const app = buildApp();
+  const a = await app.inject({ method: 'POST', url: '/meetings-collect', headers: H, payload: { meetCode: 'abc-defg-hij', workspaceId: 'ws-1' } });
+  const b = await app.inject({ method: 'POST', url: '/meetings-collect', headers: H, payload: { meetCode: 'abc-defg-hij', workspaceId: 'ws-2' } });
+  assert.notEqual(b.json().id, a.json().id);
+  assert.equal(b.json().reused, undefined);
+  const row = await getCollectedMeeting(pool, a.json().id);
+  assert.equal(row!.workspace_id, 'ws-1');
 });
 
 test('POST não reaproveita coleta terminal', async () => {

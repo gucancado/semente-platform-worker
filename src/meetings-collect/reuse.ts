@@ -35,8 +35,8 @@ export function planCollectReuse(
     const anchor = existing.started_at ? new Date(existing.started_at).getTime() : -Infinity;
     if (now.getTime() > anchor) patch.startedAt = now;
   }
-  // Só preenche o que está vazio: a row pode ser de outro workspace (o Vexa é por
-  // sala), e sobrescrever moveria a reunião de quem pediu primeiro.
+  // Só preenche o que está vazio (a busca já restringe ao mesmo workspace ou a
+  // row sem workspace): nunca sobrescreve o que quem pediu primeiro gravou.
   if (existing.title == null && incoming.title) patch.title = incoming.title;
   if (existing.workspace_id == null && incoming.workspaceId) patch.workspaceId = incoming.workspaceId;
   return patch;

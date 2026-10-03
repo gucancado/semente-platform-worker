@@ -55,8 +55,11 @@ export async function createCollectedMeeting(
 
 /**
  * Cria a coleta OU reaproveita a ativa (queued|collecting|stopping) com o mesmo
- * meet_code, de qualquer workspace — o Vexa é por sala e recusa 2º bot nela (ver
- * reuse.ts). Transação com advisory lock por meet_code: dois POSTs simultâneos
+ * meet_code DO MESMO workspace (ou ainda sem workspace) — o Vexa é por sala e
+ * recusa 2º bot nela (ver reuse.ts). Sala de OUTRO workspace não é reaproveitada:
+ * o Bloquim do 2º cliente passaria a sincronizar status/participantes de uma
+ * reunião que pertence ao 1º. Esse caso segue caindo em vexa_send_failed.
+ * Transação com advisory lock por meet_code: dois POSTs simultâneos
  * para a mesma sala serializam aqui, e o segundo enxerga a row do primeiro em vez
  * de criar outra. O FOR UPDATE segura a row contra o poller no meio do caminho
  * (que pode estar marcando-a terminal); se ele ganhar, o SELECT não a vê e cria nova.
@@ -73,8 +76,9 @@ export async function createOrReuseCollectedMeeting(
     const found = await client.query<CollectedMeetingRow>(
       `SELECT ${COLS} FROM collected_meetings
         WHERE meet_code = $1 AND status IN ('queued','collecting','stopping')
+          AND (workspace_id IS NULL OR workspace_id IS NOT DISTINCT FROM $2)
         ORDER BY created_at ASC LIMIT 1 FOR UPDATE`,
-      [a.meetCode],
+      [a.meetCode, a.workspaceId],
     );
     if (found.rows[0]) {
       const existing = mapCollectedMeetingRow(found.rows[0]);
