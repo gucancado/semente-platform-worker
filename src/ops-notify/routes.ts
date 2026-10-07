@@ -1,11 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import { timingSafeEqual } from 'node:crypto';
-import type { CloudSendResult, CloudTemplateMessage } from '../webhook-cloud/send.js';
-import {
-  OPS_ALERT_TEMPLATE,
-  opsAlertTemplateParams,
-  renderOpsAlertText,
-} from '../webhook-cloud/templates.js';
+import type { Urgency } from './queue.js';
 
 /**
  * POST /ops-notify — aviso de OPERAÇÃO do painel (beeads-central-de-dados).
@@ -21,11 +16,13 @@ import {
  * mexer em AGENT_TOKENS_JSON, cujo parse malformado derruba o boot) nem
  * PANEL_TOKEN (alargaria o poder de um token que vive no app web).
  *
- * Envio: template primeiro — é o único que chega fora da janela de 24h, e
- * ninguém conversa com o número Cloud. Se ele falhar (o template está PENDING na
- * Meta enquanto isto é escrito), cai no texto livre com o MESMO corpo
- * renderizado: custa uma chamada e é a única chance de entrega no período de
- * aprovação. Mesmo padrão do aviso de queda (down-notify-sender.ts).
+ * Envio: desde 2026-10-07 a rota NÃO envia — ENFILEIRA em `ops_notify_queue`
+ * (mig 070) e responde 202. Quem envia é o `flusher.ts`, em lote: `urgencia`
+ * "urgente" (default, compatível com chamador antigo) sai em minutos junto com o
+ * que mais estiver na fila; "resumo" espera o horário fixo (09:00/16:00 SP).
+ * Cada aviso virava uma mensagem cobrada, espalhada pela madrugada. A fila é
+ * durável, então 202 continua significando "não vai se perder" — o painel pode
+ * seguir marcando `notified_at` no 2xx.
  */
 
 export type OpsNotifyDeps = {
@@ -38,12 +35,11 @@ export type OpsNotifyDeps = {
   /** WHATSAPP_CLOUD_ACCESS_TOKEN presente. */
   cloudConfigured: boolean;
   /**
-   * Injetados pelo index.ts (sendCloudTemplate/sendCloudText). Obrigatórios de
-   * propósito: sem eles este módulo importaria send.js, que importa config.js,
-   * e o teste da rota passaria a exigir o .env inteiro só para existir.
+   * Grava na fila. Injetado pelo index.ts (pool real) — sem ele o teste da rota
+   * passaria a exigir banco. Os 503 de config continuam ANTES do enfileirar: um
+   * aviso aceito que nunca poderá sair seria pior que a recusa.
    */
-  sendTemplate: (pnid: string, to: string, t: CloudTemplateMessage) => Promise<CloudSendResult>;
-  sendText: (pnid: string, to: string, text: string) => Promise<CloudSendResult>;
+  enqueue: (n: { titulo: string; detalhe: string | null; urgency: Urgency }) => Promise<number>;
 };
 
 /** Comparação de tempo constante — o header é um segredo, não um id. */
@@ -56,8 +52,6 @@ function secretMatches(received: unknown, expected: string): boolean {
 }
 
 export function registerOpsNotifyRoute(app: FastifyInstance, deps: OpsNotifyDeps) {
-  const { sendTemplate, sendText } = deps;
-
   app.post('/ops-notify', async (req, reply) => {
     // Sem o segredo não há como autenticar ninguém: 503 antes do 401, senão a
     // rota responderia 401 para o próprio painel e o operador procuraria o
@@ -86,54 +80,19 @@ export function registerOpsNotifyRoute(app: FastifyInstance, deps: OpsNotifyDeps
       return reply.code(400).send({ error: 'titulo obrigatório' });
     }
 
-    const pnid = deps.phoneNumberId;
-    const to = deps.to;
-    const input = { titulo, detalhe };
-
-    const viaTemplate = await attempt(() =>
-      sendTemplate(pnid, to, {
-        name: OPS_ALERT_TEMPLATE.name,
-        language: OPS_ALERT_TEMPLATE.language,
-        ...opsAlertTemplateParams(input),
-      }),
-    );
-    if (viaTemplate.ok) {
-      req.log.info({ via: 'template', send_id: viaTemplate.sendId }, 'ops-notify enviado');
-      return reply.code(200).send({ ok: true, via: 'template', send_id: viaTemplate.sendId });
+    const urgencia = (body as { urgencia?: unknown } | undefined)?.urgencia;
+    if (urgencia !== undefined && urgencia !== 'urgente' && urgencia !== 'resumo') {
+      return reply.code(400).send({ error: "urgencia deve ser 'urgente' ou 'resumo'" });
     }
-    req.log.warn(
-      { status: viaTemplate.status, detail: viaTemplate.detail, template: OPS_ALERT_TEMPLATE.name },
-      'ops-notify: template falhou — tentando texto livre',
-    );
+    const urgency: Urgency = urgencia === 'resumo' ? 'digest' : 'urgent';
 
-    const viaText = await attempt(() => sendText(pnid, to, renderOpsAlertText(input)));
-    if (viaText.ok) {
-      req.log.info({ via: 'text', send_id: viaText.sendId }, 'ops-notify enviado');
-      return reply.code(200).send({ ok: true, via: 'text', send_id: viaText.sendId });
+    try {
+      const id = await deps.enqueue({ titulo, detalhe, urgency });
+      req.log.info({ id, urgency }, 'ops-notify enfileirado');
+      return reply.code(202).send({ ok: true, queued: true, id, urgency, via: 'queue' });
+    } catch (err) {
+      req.log.error({ err: (err as Error).message }, 'ops-notify: falha ao enfileirar');
+      return reply.code(500).send({ error: 'ops-notify enqueue failed' });
     }
-
-    req.log.error(
-      { templateFailure: viaTemplate.detail, textFailure: viaText.detail },
-      'ops-notify: template E texto livre falharam',
-    );
-    return reply.code(502).send({
-      error: 'ops-notify send failed',
-      template: { status: viaTemplate.status, detail: viaTemplate.detail },
-      text: { status: viaText.status, detail: viaText.detail },
-    });
   });
-}
-
-type Outcome =
-  | { ok: true; sendId: string | null }
-  | { ok: false; status?: number; detail?: unknown };
-
-/** Exceção de rede nunca escapa: o canal de aviso não pode derrubar quem avisa. */
-async function attempt(fn: () => Promise<CloudSendResult>): Promise<Outcome> {
-  try {
-    const r = await fn();
-    return r.ok ? { ok: true, sendId: r.send_id } : { ok: false, status: r.status, detail: r.detail };
-  } catch (err) {
-    return { ok: false, detail: (err as Error).message };
-  }
 }

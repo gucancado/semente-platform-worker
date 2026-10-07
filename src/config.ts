@@ -165,6 +165,11 @@ const EnvSchema = z.object({
   OPS_NOTIFY_TOKEN: z.string().optional(),
   // Destino do aviso: E.164 sem '+' (ex.: 553196039118).
   OPS_NOTIFY_TO: z.string().optional(),
+  // Avisos ao operador saem em LOTE (ops-notify/flusher.ts, mig 070): o resumo
+  // nos horários abaixo (São Paulo, "HH:mm" separados por vírgula) e o urgente
+  // quando o mais antigo da fila completa a janela — que junta a rajada.
+  OPS_DIGEST_SLOTS: z.string().default('09:00,16:00'),
+  OPS_URGENT_WINDOW_MIN: z.coerce.number().int().min(0).default(10),
 
   // Telefones E.164 dos NOSSOS números Cloud (vírgula). A porta anti-CRM do
   // /webhook usa SEMPRE; a sonda de conexão exige. Ex.: +553190858510

@@ -40,6 +40,8 @@ import { startProvisioningReaperCron } from './whatsapp/provisioning-reaper.js';
 import { startGroupSyncCron } from './whatsapp/group-sync-cron.js';
 import { startConnectionAlertSweep } from './whatsapp/connection-alerts.js';
 import { startDownNotify } from './whatsapp/down-notify-start.js';
+import { enqueueOps } from './ops-notify/queue.js';
+import { startOpsFlusherFromConfig } from './ops-notify/start.js';
 import { handleProbeReceipt } from './whatsapp/connection-probe-service.js';
 import { setOwnCloudProbeHandler } from './webhook/routes.js';
 import { startPresenceKeepalive } from './whatsapp/presence-keepalive.js';
@@ -114,8 +116,7 @@ async function main() {
         config.CONNECTION_NOTIFY_CLOUD_AGENT,
       ),
       cloudConfigured: Boolean(config.WHATSAPP_CLOUD_ACCESS_TOKEN),
-      sendTemplate: sendCloudTemplate,
-      sendText: sendCloudText,
+      enqueue: (n) => enqueueOps(pool, { ...n, source: 'painel' }),
     });
   });
 
@@ -246,6 +247,11 @@ async function main() {
   // aqui depende do socket estar aberto, então mover pra antes não atrasa
   // `/health`.
   const probeStart = startDownNotify(pool, app.log);
+
+  // Envio em LOTE dos avisos ao operador (fila ops_notify_queue, mig 070):
+  // /ops-notify do painel, cópia do aviso de queda e avisos da sonda só
+  // enfileiram — sem este flusher nada sai.
+  startOpsFlusherFromConfig(pool, app.log);
 
   // Sonda de conexão (spec 2026-09-25-sonda-conexao-whatsapp-design.md §3, §11):
   // liga o RECEBIMENTO da sonda pelo webhook só quando `startDownNotify`

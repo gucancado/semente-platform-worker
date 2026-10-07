@@ -4,7 +4,8 @@ import { cloudPhoneNumberIdForAgent, sendCloudTemplate } from '../webhook-cloud/
 import { OPS_ALERT_TEMPLATE, opsAlertTemplateParams } from '../webhook-cloud/templates.js';
 import { resolveWorkspaceNames } from '../bloquim/workspace-names.js';
 import { listConnectedInstances, updateNumberStatus } from './numbers.js';
-import { makeCloudDownSender, makeOpsCopySender } from './down-notify-sender.js';
+import { makeCloudDownSender, type OpsCopySender } from './down-notify-sender.js';
+import { enqueueOps } from '../ops-notify/queue.js';
 import { makeEvolutionProbe } from './down-notify-probe.js';
 import { parseOffDates, type OffDates } from './business-hours.js';
 import type { EvolutionDeps } from '../evolution/client.js';
@@ -65,11 +66,23 @@ export function buildDownNotifyDeps(
       // Cópia para o operador — pelo MESMO número Cloud, com o template de
       // OPERAÇÃO. Sem OPS_NOTIFY_TO os dois campos ficam undefined e a cópia é
       // no-op silencioso: o aviso principal não muda em nada.
-      sendOpsCopy: config.OPS_NOTIFY_TO
-        ? makeOpsCopySender({ phoneNumberId, to: config.OPS_NOTIFY_TO })
-        : undefined,
+      // Desde 2026-10-07 a cópia ENFILEIRA (urgente) em vez de enviar: sai no
+      // lote do flusher (ops-notify/flusher.ts), junto com o resto da fila.
+      sendOpsCopy: config.OPS_NOTIFY_TO ? makeQueuedOpsSender(pool, 'down-notify') : undefined,
       opsCopyTo: config.OPS_NOTIFY_TO,
     },
+  };
+}
+
+/**
+ * Aviso ao operador vindo deste processo (cópia de queda, sonda): entra na fila
+ * como URGENTE. `ok:true` = enfileirado — a fila é durável e o flusher re-tenta,
+ * então para quem chama isto vale como "vai chegar".
+ */
+function makeQueuedOpsSender(pool: Pool, source: string): OpsCopySender {
+  return async (titulo, detalhe) => {
+    await enqueueOps(pool, { titulo, detalhe, urgency: 'urgent', source });
+    return { ok: true, sendId: null, via: 'template' };
   };
 }
 
@@ -128,9 +141,9 @@ function makeSendProbe(phoneNumberId: string): ProbeDeps['sendProbe'] {
 /** Aviso operacional da sonda (pipeline quebrado, envio falhou, identidade
  * divergente, 3 inconclusive, silêncio geral). Sem OPS_NOTIFY_TO, no-op
  * silencioso — igual ao `sendOpsCopy` do aviso de queda. */
-function makeSendOps(phoneNumberId: string, to: string | undefined): ProbeDeps['sendOps'] {
+function makeSendOps(pool: Pool, to: string | undefined): ProbeDeps['sendOps'] {
   if (!to) return async () => {};
-  const send = makeOpsCopySender({ phoneNumberId, to });
+  const send = makeQueuedOpsSender(pool, 'sonda');
   return async (titulo, detalhe) => {
     try {
       await send(titulo, detalhe);
@@ -185,7 +198,7 @@ function buildProbeDeps(
     rand: Math.random,
     evolution,
     sendProbe: makeSendProbe(phoneNumberId),
-    sendOps: makeSendOps(phoneNumberId, config.OPS_NOTIFY_TO),
+    sendOps: makeSendOps(pool, config.OPS_NOTIFY_TO),
     mirrorTo,
     resolveName: async (t) => {
       if (t.workspaceId) {

@@ -123,23 +123,31 @@ export const OPS_ALERT_PARAM_MAX = 600;
 /** Parâmetro VAZIO é recusado pela Meta — o travessão preserva o envio. */
 const EMPTY_PARAM = '—';
 
-function opsParam(s: string | null | undefined): string {
+/**
+ * Teto do DETALHE quando ele carrega um RESUMO (vários avisos numa mensagem só,
+ * `ops-notify/digest.ts`). Abaixo dos 1024 da Meta por parâmetro com folga para
+ * o corpo fixo e o título — o texto hidratado inteiro também precisa caber.
+ */
+export const OPS_DIGEST_DETALHE_MAX = 880;
+
+function opsParam(s: string | null | undefined, max = OPS_ALERT_PARAM_MAX): string {
   const flat = oneLine(s ?? '');
   if (!flat) return EMPTY_PARAM;
-  return flat.length > OPS_ALERT_PARAM_MAX ? `${flat.slice(0, OPS_ALERT_PARAM_MAX - 1)}…` : flat;
+  return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
 }
 
 export type OpsAlertInput = { titulo: string; detalhe?: string | null };
+export type OpsAlertOpts = { detalheMax?: number };
 
-export function opsAlertTemplateParams(p: OpsAlertInput): { bodyParams: string[] } {
-  return { bodyParams: [opsParam(p.titulo), opsParam(p.detalhe)] };
+export function opsAlertTemplateParams(p: OpsAlertInput, opts: OpsAlertOpts = {}): { bodyParams: string[] } {
+  return { bodyParams: [opsParam(p.titulo), opsParam(p.detalhe, opts.detalheMax)] };
 }
 
 /**
  * O mesmo corpo com as variáveis preenchidas: é o texto livre de fallback
  * enquanto a Meta não aprova o template. Uma fonte só.
  */
-export function renderOpsAlertText(p: OpsAlertInput): string {
-  const { bodyParams } = opsAlertTemplateParams(p);
+export function renderOpsAlertText(p: OpsAlertInput, opts: OpsAlertOpts = {}): string {
+  const { bodyParams } = opsAlertTemplateParams(p, opts);
   return OPS_ALERT_BODY_TEXT.replace(/\{\{(\d+)\}\}/g, (_, n: string) => bodyParams[Number(n) - 1] ?? '');
 }
