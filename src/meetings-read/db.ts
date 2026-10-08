@@ -36,7 +36,16 @@ const LIST_SQL = `
            e.title, e.occurred_at, e.duration_seconds, e.participants, e.summary,
            e.occurred_at AS sort_at
     FROM episodes e
-    LEFT JOIN collected_meetings cm ON cm.episode_id = e.id
+    -- UMA coleta por episódio. Um JOIN simples multiplicava o card quando duas
+    -- coletas apontavam para o mesmo episódio (reunião em dois bots unida pela
+    -- transcrição da gravação — aconteceu com a Natura em 02/10/2026).
+    LEFT JOIN LATERAL (
+      SELECT c.id, c.meet_code, c.status, c.failure_reason
+        FROM collected_meetings c
+       WHERE c.episode_id = e.id
+       ORDER BY c.created_at ASC
+       LIMIT 1
+    ) cm ON TRUE
     WHERE e.fonte = 'reuniao' AND e.workspace_id = $1
   ), sp AS (
     -- Agregado por falante. started_at_ms/ended_at_ms está populado em 100% dos
@@ -307,4 +316,67 @@ export async function getMeetingsStats(
     speakers: speakers.rows.map((r) => ({ speaker: r.speaker, segments: r.segments })),
     health: Object.fromEntries(health.rows.map((r) => [r.status, r.n])),
   };
+}
+
+/**
+ * Renomeia um falante em TODOS os turnos de um episódio (o painel nomeia
+ * "Falante 2" → "Lucas Marques"). Também ajusta `participants` e
+ * `metadata.speaker_counts` por RENOMEAÇÃO, não recálculo: no Fireflies os
+ * participantes trazem e-mail, e recalcular a partir dos turnos o apagaria.
+ * Dois rótulos que viram a mesma pessoa são fundidos (participante único,
+ * contagens somadas) — sem isso o card mostrava a pessoa duas vezes.
+ * `null` = episódio não existe ou é de outro workspace.
+ */
+export async function renameEpisodeSpeaker(
+  pool: Pool, a: { episodeId: number; workspaceId: string; from: string; to: string },
+): Promise<{ turns: number } | null> {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const ep = await client.query<{ workspace_id: string | null }>(
+      `SELECT workspace_id FROM episodes WHERE id = $1 AND fonte = 'reuniao' FOR UPDATE`, [a.episodeId],
+    );
+    if (!ep.rows[0] || ep.rows[0].workspace_id !== a.workspaceId) {
+      await client.query('ROLLBACK');
+      return null;
+    }
+    const t = await client.query(
+      `UPDATE episode_turns SET speaker_name = $3, speaker_label = $3
+        WHERE episode_id = $1 AND speaker_name = $2`,
+      [a.episodeId, a.from, a.to],
+    );
+    await client.query(
+      `UPDATE episodes e SET
+         participants = COALESCE((
+           SELECT jsonb_agg(p ORDER BY ord) FROM (
+             SELECT DISTINCT ON (COALESCE(x.p->>'name', x.p->>'email', x.ord::text))
+                    x.p, x.ord
+               FROM (
+                 SELECT CASE WHEN q.p->>'name' = $2 THEN jsonb_set(q.p, '{name}', to_jsonb($3::text)) ELSE q.p END AS p,
+                        q.ord
+                   FROM jsonb_array_elements(COALESCE(e.participants, '[]'::jsonb)) WITH ORDINALITY q(p, ord)
+               ) x
+              ORDER BY COALESCE(x.p->>'name', x.p->>'email', x.ord::text), x.ord
+           ) d
+         ), '[]'::jsonb),
+         metadata = CASE WHEN jsonb_typeof(e.metadata->'speaker_counts') = 'object' THEN
+           jsonb_set(e.metadata, '{speaker_counts}', (
+             SELECT COALESCE(jsonb_object_agg(k, v), '{}'::jsonb) FROM (
+               SELECT CASE WHEN s.k = $2 THEN $3 ELSE s.k END AS k, SUM((s.v)::numeric)::int AS v
+                 FROM jsonb_each_text(e.metadata->'speaker_counts') s(k, v)
+                GROUP BY 1
+             ) y))
+           ELSE e.metadata END,
+         updated_at = NOW()
+       WHERE e.id = $1`,
+      [a.episodeId, a.from, a.to],
+    );
+    await client.query('COMMIT');
+    return { turns: t.rowCount ?? 0 };
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
 }

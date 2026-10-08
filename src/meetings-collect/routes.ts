@@ -103,6 +103,9 @@ export function registerMeetingsCollectRoutes(
       await importCollectedMeeting(deps.collectDeps, row, meeting);
     } else {
       await updateCollectedMeeting(deps.pool, row.id, { status: 'canceled', failureReason: 'stopped_empty' });
+      // Zero segmento não prova sala vazia (transcrição ao vivo pode ter
+      // falhado). A recuperação mede a fala na gravação e descarta se não houver.
+      await deps.collectDeps.enqueueRecovery?.(row, 'silent_room').catch(() => {});
     }
     const updated = await getCollectedMeeting(deps.pool, row.id);
     return reply.send({ schema: 'meetings_v1', id: updated!.id, status: updated!.status, episode_id: updated!.episode_id });

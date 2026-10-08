@@ -296,7 +296,9 @@ const EnvSchema = z.object({
   // inteira (breaker) e teto de idade do retry que não consome tentativa.
   // Ver src/transcription/error-class.ts para o porquê.
   TRANSCRIBE_SYSTEMIC_COOLDOWN_MS: z.coerce.number().int().positive().default(600_000), // 10min
-  TRANSCRIBE_SYSTEMIC_MAX_AGE_H: z.coerce.number().int().positive().default(72),
+  // 30 dias: a falta de crédito de 29/09–02/10/2026 durou 75h e passou do teto
+  // antigo de 72h — áudio que esperou a conta voltar não pode virar falha permanente.
+  TRANSCRIBE_SYSTEMIC_MAX_AGE_H: z.coerce.number().int().positive().default(720),
   TRANSCRIBE_MAX_DURATION_S: z.coerce.number().int().positive().default(600),
   // ── Digest de reunião por IA (resumo do card + pontos discutidos) ──
   // Só duas envs de propósito: com ~20 reuniões/mês, intervalo/batch/tentativas
@@ -307,6 +309,17 @@ const EnvSchema = z.object({
   // ── Áudio da reunião: copia a gravação do bot da Vexa pro R2 (src/meetings-audio) ──
   // Nasce 'off'. 'auto' exige coleta de reuniões ligada (VEXA_*) + R2 + ffmpeg na imagem.
   MEETINGS_AUDIO_MODE: z.enum(['off', 'auto']).default('off'),
+  // ── Saúde da conta OpenAI (src/openai-health) ── sonda de 1 s de áudio a cada N min;
+  // avisa o operador na queda/volta e segura o bot na sala enquanto a conta está fora. 0 desliga.
+  OPENAI_HEALTH_INTERVAL_MIN: z.coerce.number().int().min(0).default(10),
+  // ── Transcrição pela GRAVAÇÃO (src/meetings-recover) ── quando a transcrição ao vivo
+  // falha (silent_room com fala, ou conta OpenAI fora durante a reunião). Nasce 'off'.
+  MEETINGS_RECOVERY_MODE: z.enum(['off', 'auto']).default('off'),
+  MEETINGS_RECOVERY_MODEL: z.string().default('gpt-4o-transcribe-diarize'),
+  // Token do bot da Vexa para enviar quem-falou-quando (preload do launcher).
+  MEETINGS_SPEAKER_TOKEN: z.string().optional(),
+  // Com a conta OpenAI fora, o bot NÃO sai por silêncio; este é o teto de permanência.
+  MEETINGS_STT_DOWN_MAX_MIN: z.coerce.number().int().positive().default(240),
   R2_BUCKET_WHATSAPP_MEDIA: z.string().optional(),
   // ── Mídia do WhatsApp além de áudio (imagem, vídeo, documento, figurinha) ──
   // Nasce 'off': com 'off' o ingest é byte-idêntico ao de antes (foto sem legenda

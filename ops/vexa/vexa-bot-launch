@@ -1,0 +1,52 @@
+#!/bin/bash
+# =============================================================================
+# Vexa Lite — meeting-bot launcher (process backend)  [PATCH BeeAds]
+# =============================================================================
+# Igual ao original (roda o worker sob o Xvfb/PulseAudio do supervisord), MAIS:
+# quando existe uma sessao Google JA VALIDADA no perfil montado, ajusta o
+# invocation.v1 em dois pontos:
+#
+#   1. authenticated=true  -> @vexa/join pula a entrada de nome e entra com a
+#      identidade Google. Sendo a conta da mesma organizacao do organizador, o
+#      Meet PRE-ADMITE (mostra "Join now" em vez de "Ask to join") — que e o
+#      objetivo: nao depender de ninguem clicar em "Admitir".
+#
+#   2. meetingUrl += ?hl=en -> os seletores do @vexa/join sao HARDCODED em ingles
+#      ("Join now" / "Ask to join"). Logado numa conta pt-BR o Meet renderiza
+#      "Participar agora" e o bot nunca acha o botao ("No join button found after
+#      30s"), mesmo ja pre-admitido. Forcar hl=en preserva os seletores sem mexer
+#      no idioma da conta Google.
+#
+# O gate e a SENTINELA .beeads-logged-in, escrita SO quando validateLoggedIn
+# confirmou a sessao. NAO usar Default/Cookies como gate: o Chromium cria esse
+# arquivo vazio so de abrir o browser, entao ele existe mesmo sem login nenhum.
+set -u
+
+export DISPLAY="${DISPLAY:-:99}"
+export VEXA_LOCAL_PROFILE_DIR="${VEXA_LOCAL_PROFILE_DIR:-/opt/vexa-profile}"
+
+if [ -f "${VEXA_LOCAL_PROFILE_DIR}/.beeads-logged-in" ] && [ -n "${VEXA_BOT_CONFIG:-}" ]; then
+  if PATCHED="$(node -e 'const c=JSON.parse(process.env.VEXA_BOT_CONFIG);c.authenticated=true;if(typeof c.meetingUrl==="string"&&c.meetingUrl&&!/[?&]hl=/.test(c.meetingUrl)){c.meetingUrl+=(c.meetingUrl.includes("?")?"&":"?")+"hl=en"}process.stdout.write(JSON.stringify(c))' 2>/dev/null)"; then
+    export VEXA_BOT_CONFIG="$PATCHED"
+    export BOT_CONFIG="$PATCHED"
+    echo "[beeads] bot autenticado (perfil ${VEXA_LOCAL_PROFILE_DIR}, UI em en)"
+  else
+    echo "[beeads] AVISO: falha ao ajustar invocation; seguindo como guest" >&2
+  fi
+else
+  echo "[beeads] sem sessao validada — bot entra como guest (comportamento original)"
+fi
+
+cd /app/core/meetings/services/bot
+
+# 3. Quem-falou-quando para o worker (ops/vexa/speaker-activity.mjs no repo
+#    semente-platform-worker; mig 071). Liga só se o preload E o token existirem
+#    no perfil montado (rw, sobrevive a redeploy). Sem eles: comportamento original.
+BEEADS_DIR="${VEXA_LOCAL_PROFILE_DIR}/.beeads"
+if [ -f "${BEEADS_DIR}/speaker-activity.mjs" ] && [ -s "${BEEADS_DIR}/speaker-token" ]; then
+  export BEEADS_SPEAKER_URL="${BEEADS_SPEAKER_URL:-https://agentes-worker.beeads.com.br/meetings-collect/speaker-activity}"
+  BEEADS_SPEAKER_TOKEN="$(tr -d '\r\n' < "${BEEADS_DIR}/speaker-token")"
+  export BEEADS_SPEAKER_TOKEN
+  exec node --import "file://${BEEADS_DIR}/speaker-activity.mjs" dist/index.js
+fi
+exec node dist/index.js

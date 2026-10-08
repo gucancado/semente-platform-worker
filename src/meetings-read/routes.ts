@@ -2,7 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import type { Pool } from 'pg';
 import type { MeetingDigestView } from './db.js';
 import { requirePanelToken } from '../whatsapp/provision-routes.js';
-import { listMeetings, getMeetingsStats, getMeetingTranscript, getMeetingDigest, listFailedCollections } from './db.js';
+import { listMeetings, getMeetingsStats, getMeetingTranscript, getMeetingDigest, listFailedCollections, renameEpisodeSpeaker } from './db.js';
 import { failureLabel } from './failure-label.js';
 import { getEpisodeAudio } from '../meetings-audio/db.js';
 import { AUDIO_URL_TTL_S, audioDownloadName } from '../meetings-audio/core.js';
@@ -63,6 +63,23 @@ export function registerMeetingsReadRoutes(
     if (!workspaceId || !since || !until) return reply.code(400).send({ error: 'params_required' });
     const stats = await getMeetingsStats(deps.pool, { workspaceId, since, until });
     return reply.send({ schema: 'meetings_read_v1', ...stats });
+  });
+
+  // Nomear falante: troca o nome em TODOS os turnos do episódio. Única escrita
+  // deste contrato; quem decide que só admin nomeia é o painel (mesmo critério
+  // de quem vê a transcrição).
+  app.patch('/meetings-read/:episodeId/speakers', { preHandler: auth }, async (req: any, reply) => {
+    const episodeId = Number(req.params?.episodeId);
+    const workspaceId = req.body?.workspace_id;
+    const from = typeof req.body?.from === 'string' ? req.body.from.trim() : '';
+    const to = typeof req.body?.to === 'string' ? req.body.to.trim() : '';
+    if (!Number.isFinite(episodeId) || typeof workspaceId !== 'string' || !workspaceId) {
+      return reply.code(400).send({ error: 'params_required' });
+    }
+    if (!from || !to || to.length > 120 || from === to) return reply.code(400).send({ error: 'invalid_names' });
+    const r = await renameEpisodeSpeaker(deps.pool, { episodeId, workspaceId, from, to });
+    if (!r) return reply.code(404).send({ error: 'not_found' });
+    return reply.send({ schema: 'meetings_read_v1', ok: true, turns: r.turns });
   });
 
   app.get('/meetings-read/:episodeId/transcript', { preHandler: auth }, async (req: any, reply) => {

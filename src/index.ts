@@ -48,6 +48,9 @@ import { startPresenceKeepalive } from './whatsapp/presence-keepalive.js';
 import { startTranscriptionPoller } from './transcription/poller.js';
 import { startSummaryPoller } from './meetings-summary/poller.js';
 import { startMeetingsAudioPoller } from './meetings-audio/poller.js';
+import { startMeetingsRecoverPoller } from './meetings-recover/poller.js';
+import { registerSpeakerActivityRoute } from './meetings-recover/routes.js';
+import { startOpenAIHealth } from './openai-health/start.js';
 import { OpenAISummaryLlm } from './meetings-summary/provider.js';
 import { r2Configured } from './integrations/r2.js';
 import { startCreationPoller } from './whatsapp/opportunity-pipeline.js';
@@ -212,6 +215,12 @@ async function main() {
   } else {
     app.log.info('meetings-collect: rotas NÃO registradas (VEXA_API_URL/KEY ausentes)');
   }
+  // Quem-falou-quando enviado pelo bot da Vexa (ops/vexa/). Auth própria.
+  if (meetingsEnabled && config.MEETINGS_SPEAKER_TOKEN) {
+    await app.register(async (scope) => {
+      registerSpeakerActivityRoute(scope, { pool, token: config.MEETINGS_SPEAKER_TOKEN! });
+    });
+  }
 
   // Leitura de reuniões (contrato meetings_read_v1): auth X-Panel-Token. Gate por env.
   assertMeetingsReadConfig(config, config.MEETINGS_READ_ENABLED);
@@ -252,6 +261,10 @@ async function main() {
   // /ops-notify do painel, cópia do aviso de queda e avisos da sonda só
   // enfileiram — sem este flusher nada sai.
   startOpsFlusherFromConfig(pool, app.log);
+
+  // Sonda da conta OpenAI (mig 071): avisa o operador na queda/volta e segura o
+  // bot de reunião na sala enquanto a transcrição ao vivo está fora.
+  startOpenAIHealth(pool, app.log);
 
   // Sonda de conexão (spec 2026-09-25-sonda-conexao-whatsapp-design.md §3, §11):
   // liga o RECEBIMENTO da sonda pelo webhook só quando `startDownNotify`
@@ -359,6 +372,14 @@ async function main() {
     startMeetingsAudioPoller(app.log);
   } else {
     app.log.info({ mode: config.MEETINGS_AUDIO_MODE, meetingsEnabled, r2: r2Configured() }, 'meetings-audio: poller NÃO iniciado');
+  }
+
+  // Transcrição pela GRAVAÇÃO quando a ao vivo falha (mig 071). Exige coleta,
+  // R2 (áudio do episódio) e a chave OpenAI.
+  if (config.MEETINGS_RECOVERY_MODE === 'auto' && meetingsEnabled && r2Configured() && config.OPENAI_API_KEY) {
+    startMeetingsRecoverPoller(app.log);
+  } else {
+    app.log.info({ mode: config.MEETINGS_RECOVERY_MODE, meetingsEnabled, r2: r2Configured() }, 'meetings-recover: poller NÃO iniciado');
   }
 
   if (config.MEETING_SUMMARY_MODE === 'auto') {

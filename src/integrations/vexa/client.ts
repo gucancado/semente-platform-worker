@@ -80,6 +80,13 @@ export class VexaClient {
     return this.req('GET', '/bots/status');
   }
 
+  /** Uma reunião pelo id da Vexa (`GET /meetings/{id}`). Diferente de
+   *  `getTranscript(meetCode)`, que devolve a reunião MAIS RECENTE daquela sala —
+   *  errado quando a mesma sala teve dois bots. */
+  async getMeeting(meetingId: number): Promise<Pick<VexaMeeting, 'id' | 'start_time' | 'end_time' | 'status'>> {
+    return this.req('GET', `/meetings/${meetingId}`);
+  }
+
   /** Gravações do usuário da API key, com o `meeting_id` da Vexa em cada uma. */
   async listRecordings(): Promise<VexaRecording[]> {
     const body = await this.req('GET', '/recordings');

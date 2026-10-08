@@ -37,8 +37,10 @@ export const SYSTEMIC_BACKOFF_SEC = 900;
 
 /** Idade máxima de um job preso em falha sistêmica. Sem teto de IDADE (o de
  *  tentativas não se aplica ao sistêmico, que não as consome) a fila cresceria
- *  para sempre num apagão longo. */
-export const SYSTEMIC_MAX_AGE_H = 72;
+ *  para sempre num apagão longo. 30 dias e não 72h: a falta de crédito de
+ *  29/09–02/10/2026 durou 75h e o digest de uma reunião virou falha PERMANENTE
+ *  por 3h de diferença, exigindo reprocesso manual. Um digest atrasado ainda vale. */
+export const SYSTEMIC_MAX_AGE_H = 720;
 
 /**
  * Status HTTP do AMBIENTE. 408/409/429 e todo 5xx são transitórios; 401/403 são

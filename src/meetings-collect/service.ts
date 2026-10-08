@@ -5,6 +5,10 @@ import { updateCollectedMeeting, listQueuedMeetings, countActiveCollections } fr
 import { vexaMeetingToEpisodeInput, episodeHasEnoughContent } from '../integrations/vexa/normalize.js';
 import type { insertEpisodeWithTurns } from '../episodes/db.js';
 import { appendStatusLog, silentRoomDetail, truncateDetail, vexaFailedDetail } from './diagnostics.js';
+import { sttAffectedSince, type HealthState } from '../openai-health/core.js';
+
+/** Por que uma coleta vai para a transcrição pela gravação (mig 071). */
+export type RecoveryReason = 'silent_room' | 'partial';
 
 export type MeetingsCollectDeps = {
   pool: Pool;
@@ -18,7 +22,33 @@ export type MeetingsCollectDeps = {
   queueMaxWaitMin: number;
   now: () => Date;
   log?: { warn: (o: unknown, m?: string) => void; info: (o: unknown, m?: string) => void };
+  /** Estado da conta OpenAI (a MESMA da transcrição ao vivo da Vexa). Ausente =
+   *  comportamento antigo: silêncio derruba o bot. */
+  sttHealth?: () => Promise<{ state: HealthState; lastDownAt: Date | null }>;
+  /** Teto de permanência na sala com a conta fora (o bot não sai por silêncio). */
+  sttDownMaxMin?: number;
+  /** Encaminha a coleta para a transcrição pela gravação. Ausente = não encaminha. */
+  enqueueRecovery?: (row: CollectedMeetingRow, reason: RecoveryReason) => Promise<void>;
 };
+
+/** A transcrição ao vivo desta coleta foi afetada por queda da conta OpenAI?
+ *  Erro ao ler o estado = "não" (cai no comportamento antigo, nunca trava). */
+async function sttAffected(deps: MeetingsCollectDeps, row: CollectedMeetingRow): Promise<boolean> {
+  if (!deps.sttHealth) return false;
+  try {
+    const h = await deps.sttHealth();
+    return sttAffectedSince(h, new Date(row.started_at ?? row.created_at));
+  } catch (err) {
+    deps.log?.warn?.({ id: row.id, err: (err as Error).message }, 'meetings-collect: estado da OpenAI ilegível');
+    return false;
+  }
+}
+
+async function enqueueRecoverySafe(deps: MeetingsCollectDeps, row: CollectedMeetingRow, reason: RecoveryReason): Promise<void> {
+  if (!deps.enqueueRecovery) return;
+  try { await deps.enqueueRecovery(row, reason); }
+  catch (err) { deps.log?.warn?.({ id: row.id, err: (err as Error).message }, 'meetings-collect: falha ao encaminhar para recuperação'); }
+}
 
 /**
  * Expira e promove a fila de coletas. Chamado pelo POST (resposta imediata
@@ -97,6 +127,10 @@ export async function importCollectedMeeting(
       { id: row.id, turns: input.turns.length },
       'meetings-collect: abaixo do piso de fala; não importado',
     );
+    // Sem fala TRANSCRITA não quer dizer sem fala: com a transcrição ao vivo
+    // quebrada a sala inteira conversa e nada chega aqui. A recuperação mede a
+    // fala na gravação e decide.
+    await enqueueRecoverySafe(deps, row, 'silent_room');
     return;
   }
   await deps.putAndVerify(rawKey, JSON.stringify(meeting), 'application/json');
@@ -107,6 +141,9 @@ export async function importCollectedMeeting(
   await updateCollectedMeeting(deps.pool, row.id, {
     status: 'imported', episodeId: r.id, vexaMeetingId: meeting.id, failureReason: null,
   });
+  // A conta caiu durante a reunião: a transcrição ao vivo está incompleta. A
+  // recuperação refaz pela gravação e SUBSTITUI o episódio (mesma chave).
+  if (await sttAffected(deps, row)) await enqueueRecoverySafe(deps, row, 'partial');
 }
 
 /**
@@ -161,8 +198,17 @@ export async function processCollectedMeeting(deps: MeetingsCollectDeps, row: Co
     return;
   }
 
+  const startedMs = new Date(row.started_at ?? row.created_at).getTime();
+  const sttMaxMs = (deps.sttDownMaxMin ?? 180) * 60_000;
+
   if (hasSegments) {
     const idleMs = now - (lastSeg ?? new Date(row.created_at)).getTime();
+    // Silêncio de segmentos com a conta OpenAI fora não é silêncio da sala: a
+    // transcrição parou, a reunião não. Fica até o teto; a gravação cobre o resto.
+    if (idleMs > deps.inactivityStopMin * 60_000 && now - startedMs < sttMaxMs && await sttAffected(deps, row)) {
+      await updateCollectedMeeting(deps.pool, row.id, { lastSegmentAt: lastSeg, vexaMeetingId: meeting.id });
+      return;
+    }
     if (idleMs > deps.inactivityStopMin * 60_000) {
       await deps.vexa.stopBot(row.meet_code).catch(() => {});
       await importCollectedMeeting(deps, row, meeting);
@@ -184,13 +230,22 @@ export async function processCollectedMeeting(deps: MeetingsCollectDeps, row: Co
   // a coleta foi PEDIDA (`created_at`): desde a fila (mig 048), uma coleta que esperou
   // vaga morria aqui no mesmo tick em que ganhou o slot. Rows anteriores à mig 065
   // não têm `started_at` — pra elas `created_at` era a âncora certa.
-  const waitedMs = now - new Date(row.started_at ?? row.created_at).getTime();
+  const waitedMs = now - startedMs;
   if (waitedMs > deps.admissionTimeoutMin * 60_000) {
+    // Conta OpenAI fora: zero segmento é o esperado mesmo com a sala cheia. Até
+    // 02/10/2026 o bot saía aqui com a reunião acontecendo, um bot novo entrava,
+    // e os minutos entre os dois se perdiam. Fica até o teto; a gravação vira
+    // transcrição depois (recuperação).
+    if (waitedMs < sttMaxMs && await sttAffected(deps, row)) {
+      await updateCollectedMeeting(deps.pool, row.id, { vexaMeetingId: meeting.id });
+      return;
+    }
     await deps.vexa.stopBot(row.meet_code).catch(() => {});
     await updateCollectedMeeting(deps.pool, row.id, {
       status: 'failed', failureReason: 'silent_room', vexaMeetingId: meeting.id,
       failureDetail: silentRoomDetail(meeting.status ?? null, waitedMs),
     });
+    await enqueueRecoverySafe(deps, { ...row, vexa_meeting_id: meeting.id } as CollectedMeetingRow, 'silent_room');
     return;
   }
   await updateCollectedMeeting(deps.pool, row.id, { vexaMeetingId: meeting.id });
