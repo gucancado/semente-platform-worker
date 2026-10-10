@@ -115,13 +115,31 @@ export async function instanceForScope(pool: Pool, scope: GroupScope): Promise<s
   return rows[0]?.evolution_instance ?? null;
 }
 
+const INVITE_TTL_MS = 60 * 60_000;
+
 export function registerGroupReadRoutes(
   app: FastifyInstance,
-  deps: { pool: Pool; panelToken: string; authz?: RouteAuthz; logAccess?: LogAccessFn },
+  deps: {
+    pool: Pool;
+    panelToken: string;
+    authz?: RouteAuthz;
+    logAccess?: LogAccessFn;
+    /**
+     * Código de convite do grupo na Evolution (`fetchGroupInviteCode`). Só a
+     * rota /invite usa; sem ela, /invite responde 503. Injetado, e não
+     * importado aqui, porque o client da Evolution puxa módulos que leem a
+     * config do servidor no import — os testes destas rotas rodam sem env.
+     */
+    fetchInviteCode?: (instance: string, groupJid: string) => Promise<string | null>;
+    /** Relógio injetável (testes do cache do convite). */
+    now?: () => number;
+  },
 ) {
   const authz = deps.authz ?? defaultRouteAuthz;
   const logAccess = deps.logAccess ?? defaultLogAccess;
   const auth = requirePanelToken(deps.panelToken);
+  const now = deps.now ?? Date.now;
+  const inviteCache = new Map<string, { code: string; expiresAt: number }>();
 
   /**
    * Passos 1-4 comuns. Devolve o grupo, ou null quando a resposta já foi enviada.
@@ -288,6 +306,44 @@ export function registerGroupReadRoutes(
       identifier: g.jid,
     });
     return reply.send({ schema: 'group_v1', context: groupContext(g), outages, truncated });
+  });
+
+  // ── GET /whatsapp/groups/:jid/invite ─────────────────────────────────────────
+  // Código de convite do grupo, pra o painel ABRIR a conversa no WhatsApp Web
+  // (`web.whatsapp.com/accept?code=`; membro cai direto no grupo). Mesmo gate
+  // das outras rotas (admin do workspace vinculado) — o código também deixa
+  // ENTRAR no grupo, então não pode vazar pra quem não lê a conversa.
+  //
+  // Cache em memória de 1h por (instância, jid): o WhatsApp corta rajada de
+  // inviteCode (~11 seguidas, depois `rate-overlimit`), e o código só muda se
+  // um admin o revogar. Falha NÃO é cacheada.
+  app.get('/whatsapp/groups/:jid/invite', { preHandler: auth }, async (req: any, reply) => {
+    const g = await gateAndResolve(req, reply);
+    if (!g) return;
+    if (!deps.fetchInviteCode) return reply.code(503).send({ error: 'evolution_unconfigured' });
+    const instance = await instanceForScope(deps.pool, g.scope);
+    if (!instance) return reply.code(404).send({ error: 'instance_not_found' });
+    const key = `${instance}|${g.jid}`;
+    const t = now();
+    const hit = inviteCache.get(key);
+    let code = hit && hit.expiresAt > t ? hit.code : null;
+    if (!code) {
+      code = await deps.fetchInviteCode(instance, g.jid);
+      if (!code) return reply.code(502).send({ error: 'invite_unavailable' });
+      inviteCache.set(key, { code, expiresAt: t + INVITE_TTL_MS });
+    }
+    logAccess(deps.pool, {
+      actor: req.actingUser, action: 'group_invite',
+      workspaceId: g.linkedWorkspaceId,
+      numberId: g.scope.kind === 'number' ? g.scope.numberId : null,
+      identifier: g.jid,
+    });
+    return reply.send({
+      schema: 'group_v1',
+      context: groupContext(g),
+      inviteCode: code,
+      webUrl: `https://web.whatsapp.com/accept?code=${code}`,
+    });
   });
 
   // ── GET /whatsapp/groups/:jid/search ─────────────────────────────────────────

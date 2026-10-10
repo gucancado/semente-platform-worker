@@ -329,3 +329,80 @@ test('(j) auditoria registra o workspace do CLIENTE', async () => {
   assert.equal(logged[0].identifier, '+120363001');
   await app.close();
 });
+
+// ── /invite: link pra abrir o grupo no WhatsApp Web ──────────────────────────
+function fakeEvolution(responses: Array<string | null>) {
+  const calls: string[] = [];
+  return {
+    calls,
+    fetchInviteCode: async (instance: string, jid: string) => {
+      calls.push(`${instance}|${jid}`);
+      return responses.length ? responses.shift()! : null;
+    },
+  };
+}
+
+test('(o) invite — não-admin → 403 sem chamar a Evolution', async () => {
+  const evo = fakeEvolution([]);
+  const app = Fastify({ logger: false });
+  registerGroupReadRoutes(app, { pool: PANIC_POOL, panelToken: PANEL_TOKEN, authz: adminForbidden(), logAccess: noopLog, fetchInviteCode: evo.fetchInviteCode });
+  const res = await app.inject({ method: 'GET', url: '/whatsapp/groups/+120363099/invite?workspace_id=ws-cliente', headers: ACTOR_HEADERS });
+  assert.equal(res.statusCode, 403);
+  assert.equal(evo.calls.length, 0);
+  await app.close();
+});
+
+test('(p) invite — escopo agent: instância = agent, URL do WhatsApp Web, cache de 1h', async () => {
+  const evo = fakeEvolution([
+    'ABC123',
+    'NOVO999',
+  ]);
+  let t = 1_000;
+  const app = Fastify({ logger: false });
+  registerGroupReadRoutes(app, {
+    pool: makeLinkPool([AGENT_LINK_ROW]), panelToken: PANEL_TOKEN, authz: allPass(), logAccess: noopLog,
+    fetchInviteCode: evo.fetchInviteCode, now: () => t,
+  });
+  const url = '/whatsapp/groups/+120363099/invite?workspace_id=ws-cliente';
+  const r1 = await app.inject({ method: 'GET', url, headers: ACTOR_HEADERS });
+  assert.equal(r1.statusCode, 200);
+  assert.equal(r1.json().webUrl, 'https://web.whatsapp.com/accept?code=ABC123');
+  assert.equal(evo.calls[0], 'saturno|+120363099', 'instância = agent; jid no formato interno');
+  // Dentro da hora: cache, sem nova chamada (o WhatsApp corta rajada).
+  t += 59 * 60_000;
+  const r2 = await app.inject({ method: 'GET', url, headers: ACTOR_HEADERS });
+  assert.equal(r2.json().inviteCode, 'ABC123');
+  assert.equal(evo.calls.length, 1);
+  // Depois da hora: busca de novo.
+  t += 2 * 60_000;
+  const r3 = await app.inject({ method: 'GET', url, headers: ACTOR_HEADERS });
+  assert.equal(r3.json().inviteCode, 'NOVO999');
+  assert.equal(evo.calls.length, 2);
+  await app.close();
+});
+
+test('(q) invite — Evolution falha (rate-overlimit) → 502, e a falha NÃO é cacheada', async () => {
+  const evo = fakeEvolution([
+    null,
+    'OK1',
+  ]);
+  const app = Fastify({ logger: false });
+  registerGroupReadRoutes(app, {
+    pool: makeLinkPool([AGENT_LINK_ROW]), panelToken: PANEL_TOKEN, authz: allPass(), logAccess: noopLog, fetchInviteCode: evo.fetchInviteCode,
+  });
+  const url = '/whatsapp/groups/+120363099/invite?workspace_id=ws-cliente';
+  const r1 = await app.inject({ method: 'GET', url, headers: ACTOR_HEADERS });
+  assert.equal(r1.statusCode, 502);
+  const r2 = await app.inject({ method: 'GET', url, headers: ACTOR_HEADERS });
+  assert.equal(r2.statusCode, 200);
+  assert.equal(r2.json().inviteCode, 'OK1');
+  await app.close();
+});
+
+test('(r) invite — sem Evolution configurada → 503', async () => {
+  const app = Fastify({ logger: false });
+  registerGroupReadRoutes(app, { pool: makeLinkPool([AGENT_LINK_ROW]), panelToken: PANEL_TOKEN, authz: allPass(), logAccess: noopLog });
+  const res = await app.inject({ method: 'GET', url: '/whatsapp/groups/+120363099/invite?workspace_id=ws-cliente', headers: ACTOR_HEADERS });
+  assert.equal(res.statusCode, 503);
+  await app.close();
+});

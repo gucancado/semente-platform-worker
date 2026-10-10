@@ -317,6 +317,44 @@ export async function fetchAllGroups(
 }
 
 /**
+ * Link de convite do grupo (`GET /group/inviteCode/{instance}?groupJid=<id>@g.us`)
+ * — é o único jeito de ABRIR um grupo específico no WhatsApp Web por URL
+ * (`web.whatsapp.com/accept?code=<código>`; quem já é membro cai direto na
+ * conversa). Exige que a instância seja admin do grupo.
+ *
+ * O WhatsApp limita a rajada (medido 2026-10-09: ~11 chamadas seguidas e a 12ª
+ * volta `404 rate-overlimit`), então quem chama deve CACHEAR e nunca varrer a
+ * frota com isto. Qualquer falha devolve null: o código é efêmero (o admin pode
+ * revogar) e "não deu pra gerar" não é motivo pra derrubar quem chamou.
+ *
+ * `groupJid` no formato interno ('+<dígitos>', igual a `messages.identifier`).
+ */
+export async function fetchGroupInviteCode(
+  deps: EvolutionDeps,
+  instance: string,
+  groupJid: string,
+): Promise<string | null> {
+  const f = deps.fetch ?? fetch;
+  const digits = groupJid.replace(/^\+/, '');
+  try {
+    const res = await f(
+      `${deps.baseUrl}/group/inviteCode/${instance}?groupJid=${digits}@g.us`,
+      {
+        method: 'GET',
+        headers: { apikey: deps.apiKey, 'Content-Type': 'application/json' },
+        signal: AbortSignal.timeout(EVO_TIMEOUT_MS),
+      } as any,
+    );
+    if (!res.ok) return null;
+    const r: any = await res.json();
+    const code = typeof r?.inviteCode === 'string' ? r.inviteCode.trim() : '';
+    return /^[A-Za-z0-9]+$/.test(code) ? code : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Roster de UM grupo via `GET /group/participants/{instance}?groupJid=<id>@g.us`
  * — usado pelo sync do escopo 'agent' (`agent-group-sync.ts`), que não tem
  * como pedir `fetchAllGroups?getParticipants=true` porque o grupo não é
