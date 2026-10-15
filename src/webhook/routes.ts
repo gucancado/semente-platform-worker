@@ -19,6 +19,7 @@ import { agentsToTrigger, quarantineUnknownInstance } from '../whatsapp/reaction
 import { detectAndTagSource } from '../whatsapp/source-signals.js';
 import { mediaIngestPlan, mediaMessageText } from '../whatsapp/media-policy.js';
 import { insertWhatsappMediaJob } from '../whatsapp/media-jobs.js';
+import { loadMonitors, monitorForInstance, planMonitorIngest, hasMonitorGroupRow, buildMonitorCopy, insertMonitorCopy } from '../whatsapp/group-monitors.js';
 import { extractProbeCode, ownCloudMatch, ownCloudText } from '../whatsapp/own-cloud.js';
 
 type ProbeKey = { id: string; remoteJid: string; fromMe: boolean };
@@ -135,6 +136,14 @@ export async function registerWebhookRoutes(app: FastifyInstance) {
     }
 
     if (resolved.source === 'number') {
+      // Monitor de grupos (slots A/B, mig 072): número que é monitor é SÓ grupos.
+      // DM nunca entra (nem webhook_logs, nem CRM, IA, áudio, mídia). Fica DEPOIS
+      // da porta own-cloud acima — a sonda de conexão manda DM e precisa passar.
+      const monitor = monitorForInstance(await loadMonitors(pool), msg.instance);
+      if (planMonitorIngest({ isMonitor: !!monitor, isGroup: msg.isGroup, hasMonitorRow: false, hasText: false }) === 'drop_dm') {
+        req.log.info({ instance: msg.instance, slot: monitor!.slot }, 'webhook: DM de número monitor de grupos — descartada');
+        return { ignored: true, reason: 'group_monitor_dm' };
+      }
       // Caminho NÚMERO (pós-inversão). agent = operador único (agent_operated) ou null (monitored).
       const agent = await resolveInboundAgent(pool, {
         workspaceId: resolved.workspaceId!,
@@ -233,6 +242,20 @@ export async function registerWebhookRoutes(app: FastifyInstance) {
           }
         } catch (err) {
           req.log.warn({ err: (err as Error).message }, 'insertMessage(number-path) falhou — webhook segue');
+        }
+      }
+      if (monitor && msg.isGroup && msg.identifier && msg.rawEventId) {
+        try {
+          const hasRow = await hasMonitorGroupRow(pool, msg.identifier);
+          const text = msg.messageText ?? null;
+          if (planMonitorIngest({ isMonitor: true, isGroup: true, hasMonitorRow: hasRow, hasText: !!text }) === 'copy') {
+            await insertMonitorCopy(pool, buildMonitorCopy({
+              channel: msg.channel, identifier: msg.identifier, author: msg.author ?? null,
+              text: text!, eventId: msg.rawEventId, monitorPhone: monitor.phone,
+            }));
+          }
+        } catch (err) {
+          req.log.warn({ err: (err as Error).message, slot: monitor.slot }, 'cópia p/ escopo do monitor falhou — webhook segue');
         }
       }
       // Reação: agentes reactive que operam o número recebem trigger (debounce/quiet-hours

@@ -5,6 +5,7 @@ import { extractMessageText } from '../webhook/evolution.js';
 import { getNumber } from './numbers.js';
 import { logAccess } from './access-log.js';
 import { setLeadStatus as realSetLeadStatus, LeadCascadeGanhoError } from './thread-meta.js';
+import { loadMonitors, monitorForInstance } from './group-monitors.js';
 import { isFromOwnCloudRecord } from './own-cloud.js';
 
 export type BackfillResult = { scanned: number; inserted: number; updated: number; skippedNoText: number; pages: number; reachedCutoff: boolean };
@@ -31,6 +32,7 @@ export async function backfillNumber(
   // sonda/isOwnDownNotice continuam pulando o registro. Quem chama passa
   // `config.WHATSAPP_CLOUD_OWN_PHONES`.
   const ownPhones = opts.ownPhones ?? [];
+  const isMonitor = !!monitorForInstance(await loadMonitors(pool), num.evolutionInstance);
   let scanned = 0, inserted = 0, updated = 0, skippedNoText = 0, page = 1, reachedCutoff = false;
 
   for (; page <= opts.maxPages; page++) {
@@ -50,6 +52,8 @@ export async function backfillNumber(
       const text = extractMessageText(m?.message);
       if (!text) { skippedNoText++; continue; }
       const isGroup = jid.endsWith('@g.us');
+      // número monitor de grupos: DM nunca é gravada (mig 072)
+      if (isMonitor && !isGroup) continue;
       const identifier = normalizeGroupJid(jid);
       const author = isGroup
         ? (m?.key?.participant ? normalizeGroupJid(canonicalJid(m.key.participant, m?.key?.participantAlt)) : null)
