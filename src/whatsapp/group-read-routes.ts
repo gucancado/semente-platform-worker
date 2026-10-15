@@ -15,6 +15,7 @@ import { lastMessageByAuthor, attachLastMessage } from './group-activity.js';
 import { listOutagesByInstance, OUTAGE_PAGE_CAP, type OutageRow } from './instance-outages.js';
 import { intersectOutages } from './outage-intersection.js';
 import { loadMonitors, MONITOR_AGENT } from './group-monitors.js';
+import { listMonitorStatus } from './group-monitors-status.js';
 
 /**
  * Contrato `group_v1` — leitura READ-ONLY da conversa de um grupo de WhatsApp
@@ -161,6 +162,17 @@ export function registerGroupReadRoutes(
     if (!g) { reply.code(404).send({ error: 'group_not_linked' }); return null; }
     return g;
   }
+
+  // ── GET /whatsapp/group-monitors ─────────────────────────────────────────────
+  // Status dos slots "Monitor de grupos A/B" pro Painel tático. Sem dado de
+  // cliente (números da organização) → só o token do painel, sem gate de workspace.
+  app.get('/whatsapp/group-monitors', { preHandler: auth }, async (_req: any, reply) => {
+    try {
+      return reply.send({ monitors: await listMonitorStatus(deps.pool) });
+    } catch {
+      return reply.code(503).send({ error: 'unavailable' });
+    }
+  });
 
   // ── GET /whatsapp/groups ─────────────────────────────────────────────────────
   // Grupos vinculados ao workspace. Sem vínculo → 200 com lista vazia (é lista).
