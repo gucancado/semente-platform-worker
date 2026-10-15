@@ -12,7 +12,9 @@ import { logAccess as defaultLogAccess, type LogAccessFn } from './access-log.js
 import { emptyToUndefined } from './query-coerce.js';
 import { searchGroupMessages, resolveAnchor, listMessagesAround } from './group-search.js';
 import { lastMessageByAuthor, attachLastMessage } from './group-activity.js';
-import { listOutagesByInstance, OUTAGE_PAGE_CAP } from './instance-outages.js';
+import { listOutagesByInstance, OUTAGE_PAGE_CAP, type OutageRow } from './instance-outages.js';
+import { intersectOutages } from './outage-intersection.js';
+import { loadMonitors, MONITOR_AGENT } from './group-monitors.js';
 
 /**
  * Contrato `group_v1` — leitura READ-ONLY da conversa de um grupo de WhatsApp
@@ -291,8 +293,20 @@ export function registerGroupReadRoutes(
   app.get('/whatsapp/groups/:jid/outages', { preHandler: auth }, async (req: any, reply) => {
     const g = await gateAndResolve(req, reply);
     if (!g) return;
-    const instance = await instanceForScope(deps.pool, g.scope);
-    const outages = instance ? await listOutagesByInstance(deps.pool, instance) : [];
+    // Escopo do monitor: buraco = interseção dos slots A/B (só some quando o
+    // monitor inteiro esteve fora). Vazio em group_monitors cai no saturno puro.
+    let instance: string | null = null;
+    let outages: OutageRow[];
+    if (g.scope.kind === 'agent' && g.scope.agent === MONITOR_AGENT) {
+      const monitors = await loadMonitors(deps.pool);
+      const lists = monitors.length
+        ? await Promise.all(monitors.map((m) => listOutagesByInstance(deps.pool, m.instance)))
+        : [await listOutagesByInstance(deps.pool, MONITOR_AGENT)];
+      outages = intersectOutages(lists, 'group_monitors');
+    } else {
+      instance = await instanceForScope(deps.pool, g.scope);
+      outages = instance ? await listOutagesByInstance(deps.pool, instance) : [];
+    }
     const truncated = outages.length >= OUTAGE_PAGE_CAP;
     if (truncated) {
       // Outage é raro. Bater no teto significa episódio órfão reabrindo em loop,
