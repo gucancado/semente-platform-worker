@@ -13,7 +13,7 @@ import { emptyToUndefined } from './query-coerce.js';
 import { searchGroupMessages, resolveAnchor, listMessagesAround } from './group-search.js';
 import { lastMessageByAuthor, attachLastMessage } from './group-activity.js';
 import { listOutagesByInstance, OUTAGE_PAGE_CAP, type OutageRow } from './instance-outages.js';
-import { intersectOutages } from './outage-intersection.js';
+import { intersectOutages, withImplicitOpenOutage } from './outage-intersection.js';
 import { loadMonitors, MONITOR_AGENT } from './group-monitors.js';
 import { listMonitorStatus } from './group-monitors-status.js';
 
@@ -312,7 +312,19 @@ export function registerGroupReadRoutes(
     if (g.scope.kind === 'agent' && g.scope.agent === MONITOR_AGENT) {
       const monitors = await loadMonitors(deps.pool);
       const lists = monitors.length
-        ? await Promise.all(monitors.map((m) => listOutagesByInstance(deps.pool, m.instance)))
+        ? await Promise.all(monitors.map(async (m) => {
+            const list = await listOutagesByInstance(deps.pool, m.instance);
+            const { rows } = await deps.pool.query(
+              `SELECT status, disconnected_since, updated_at FROM whatsapp_numbers
+                WHERE evolution_instance = $1 AND removed_at IS NULL ORDER BY id LIMIT 1`,
+              [m.instance]);
+            const n = rows[0];
+            const iso = (v: unknown) => (v ? new Date(v as any).toISOString() : null);
+            return withImplicitOpenOutage(list, {
+              instance: m.instance, isNumber: !!n, status: n?.status ?? null,
+              disconnectedSince: iso(n?.disconnected_since), fallbackSince: iso(n?.updated_at),
+            });
+          }))
         : [await listOutagesByInstance(deps.pool, MONITOR_AGENT)];
       outages = intersectOutages(lists, 'group_monitors');
     } else {

@@ -27,7 +27,7 @@ export async function currentSystemTargets(pool: Pool, env: SystemTarget[]): Pro
   try {
     const monitors = await loadMonitors(pool);
     const { rows } = await pool.query(
-      `SELECT evolution_instance FROM whatsapp_numbers WHERE evolution_instance IS NOT NULL`,
+      `SELECT evolution_instance FROM whatsapp_numbers WHERE evolution_instance IS NOT NULL AND removed_at IS NULL`,
     );
     return mergeSystemTargets(env, monitors, new Set(rows.map((r: any) => String(r.evolution_instance))));
   } catch {

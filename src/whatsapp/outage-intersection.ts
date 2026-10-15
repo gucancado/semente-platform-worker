@@ -40,3 +40,22 @@ export function intersectOutages(lists: OutageRow[][], label: string): OutageRow
       reason: null,
     }));
 }
+
+/**
+ * Número-monitor fora do ar SEM episódio aberto (caiu antes da mig 066 ou o
+ * episódio nunca foi aberto) conta como fora desde `disconnectedSince`
+ * (fallback `fallbackSince`). Mesma regra de `deriveMonitorStatus`.
+ */
+export function withImplicitOpenOutage(
+  list: OutageRow[],
+  p: { instance: string; isNumber: boolean; status: string | null; disconnectedSince: string | null; fallbackSince: string | null },
+): OutageRow[] {
+  if (!p.isNumber || p.status === 'connected') return list;
+  if (list.some((r) => r.endedAt === null)) return list;
+  const since = p.disconnectedSince ?? p.fallbackSince;
+  if (!since) return list;
+  return [
+    { instance: p.instance, startedAt: since, endedAt: null, startedAtSource: 'detected_now', reason: 'implicit_not_connected' },
+    ...list,
+  ];
+}

@@ -5,6 +5,7 @@
  * Exit 2 = argumento/estado inválido.
  */
 import { pool } from '../db.js';
+import { config } from '../config.js';
 import { MONITOR_AGENT } from '../whatsapp/group-monitors.js';
 import { parseGroupMonitorArgs } from '../whatsapp/monitor-cli-args.js';
 
@@ -30,7 +31,10 @@ async function main(): Promise<number> {
   const other = existing.rows.find((r: any) => r.slot !== slot && r.instance === instance);
   if (other) { console.error(`a instância ${instance} já é o slot ${other.slot}; um slot por instância`); return 2; }
   const current = existing.rows.find((r: any) => r.slot === slot);
-  const phone = args.phone ?? numberPhone ?? (instance === MONITOR_AGENT ? current?.phone ?? null : null);
+  const phone = args.phone ?? numberPhone ?? (instance === MONITOR_AGENT
+    ? (current?.instance === MONITOR_AGENT ? current.phone : null)
+      ?? config.SYSTEM_INSTANCE_WATCH_JSON.find((t) => t.instance === MONITOR_AGENT)?.expectedPhone ?? null
+    : null);
   if (!phone) { console.error('telefone desconhecido: informe --phone=+55...'); return 2; }
 
   console.log(`slot ${slot}: ${current ? `${current.instance} (${current.phone})` : '(vazio)'} -> ${instance} (${phone})`);
