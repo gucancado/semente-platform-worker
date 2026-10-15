@@ -16,6 +16,7 @@ import { listOutagesByInstance, OUTAGE_PAGE_CAP, type OutageRow } from './instan
 import { intersectOutages, withImplicitOpenOutage } from './outage-intersection.js';
 import { loadMonitors, MONITOR_AGENT } from './group-monitors.js';
 import { listMonitorStatus } from './group-monitors-status.js';
+import { parseMonitorSlot, issueMonitorReconnectLink } from './group-monitor-reconnect.js';
 
 /**
  * Contrato `group_v1` — leitura READ-ONLY da conversa de um grupo de WhatsApp
@@ -172,6 +173,18 @@ export function registerGroupReadRoutes(
     } catch {
       return reply.code(503).send({ error: 'unavailable' });
     }
+  });
+
+  // ── POST /whatsapp/group-monitors/:slot/reconnect-link ──────────────────────
+  // Link de reconexão do monitor, pro QR do Painel tático. O corpo é ignorado:
+  // instância e telefone saem do slot, nunca do caller (a trava de telefone é
+  // o que impede parear outro número no monitor).
+  app.post('/whatsapp/group-monitors/:slot/reconnect-link', { preHandler: auth }, async (req: any, reply) => {
+    const slot = parseMonitorSlot(req.params.slot);
+    if (!slot) return reply.code(400).send({ error: 'invalid_slot' });
+    const link = await issueMonitorReconnectLink(deps.pool, slot, req.actingUser ?? null);
+    if (!link) return reply.code(404).send({ error: 'slot_not_configured' });
+    return reply.send(link);
   });
 
   // ── GET /whatsapp/groups ─────────────────────────────────────────────────────
