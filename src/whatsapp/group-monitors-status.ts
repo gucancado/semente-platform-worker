@@ -40,25 +40,28 @@ SELECT
       ORDER BY m.created_at DESC LIMIT 1)
   END AS last_msg
 FROM (SELECT 1) x
-LEFT JOIN whatsapp_numbers wn ON wn.evolution_instance = $1 AND wn.removed_at IS NULL`;
+LEFT JOIN whatsapp_numbers wn ON wn.evolution_instance = $1 AND wn.removed_at IS NULL
+ORDER BY wn.id LIMIT 1`;
 
 export async function listMonitorStatus(pool: Pool): Promise<MonitorStatus[]> {
   const { rows: slots } = await pool.query(`SELECT slot, instance, phone FROM group_monitors ORDER BY slot`);
   const out: MonitorStatus[] = [];
   for (const s of slots) {
-    const { rows } = await pool.query(STATUS_SQL, [s.instance, MONITOR_AGENT]);
-    const r = rows[0] ?? {};
-    const d = deriveMonitorStatus({
-      openOutageStartedAt: iso(r.open_started),
-      numberStatus: r.number_status ?? null,
-      numberDisconnectedSince: iso(r.disconnected_since),
-      isNumber: r.number_id != null,
-    });
-    out.push({
-      slot: s.slot as MonitorSlot, label: monitorLabel(s.slot as MonitorSlot),
-      phone: String(s.phone), instance: String(s.instance),
-      status: d.status, since: d.since, lastMessageAt: iso(r.last_msg),
-    });
+    const slot = s.slot as MonitorSlot;
+    const base = { slot, label: monitorLabel(slot), phone: String(s.phone), instance: String(s.instance) };
+    try {
+      const { rows } = await pool.query(STATUS_SQL, [s.instance, MONITOR_AGENT]);
+      const r = rows[0] ?? {};
+      const d = deriveMonitorStatus({
+        openOutageStartedAt: iso(r.open_started),
+        numberStatus: r.number_status ?? null,
+        numberDisconnectedSince: iso(r.disconnected_since),
+        isNumber: r.number_id != null,
+      });
+      out.push({ ...base, status: d.status, since: d.since, lastMessageAt: iso(r.last_msg) });
+    } catch {
+      out.push({ ...base, status: 'unknown', since: null, lastMessageAt: null });
+    }
   }
   return out;
 }
