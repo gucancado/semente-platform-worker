@@ -13,7 +13,7 @@ import { emptyToUndefined } from './query-coerce.js';
 import { searchGroupMessages, resolveAnchor, listMessagesAround } from './group-search.js';
 import { lastMessageByAuthor, attachLastMessage } from './group-activity.js';
 import { listOutagesByInstance, OUTAGE_PAGE_CAP, type OutageRow } from './instance-outages.js';
-import { intersectOutages, withImplicitOpenOutage } from './outage-intersection.js';
+import { intersectOutages, withImplicitOpenOutage, denoiseOutages, OUTAGE_MIN_MS } from './outage-intersection.js';
 import { loadMonitors, MONITOR_AGENT } from './group-monitors.js';
 import { listMonitorStatus } from './group-monitors-status.js';
 import { parseMonitorSlot, issueMonitorReconnectLink } from './group-monitor-reconnect.js';
@@ -326,23 +326,26 @@ export function registerGroupReadRoutes(
       const monitors = await loadMonitors(deps.pool);
       const lists = monitors.length
         ? await Promise.all(monitors.map(async (m) => {
-            const list = await listOutagesByInstance(deps.pool, m.instance);
+            const list = await listOutagesByInstance(deps.pool, m.instance, OUTAGE_PAGE_CAP, OUTAGE_MIN_MS);
             const { rows } = await deps.pool.query(
               `SELECT status, disconnected_since, updated_at FROM whatsapp_numbers
                 WHERE evolution_instance = $1 AND removed_at IS NULL ORDER BY id LIMIT 1`,
               [m.instance]);
             const n = rows[0];
             const iso = (v: unknown) => (v ? new Date(v as any).toISOString() : null);
-            return withImplicitOpenOutage(list, {
+            return denoiseOutages(withImplicitOpenOutage(list, {
               instance: m.instance, isNumber: !!n, status: n?.status ?? null,
               disconnectedSince: iso(n?.disconnected_since), fallbackSince: iso(n?.updated_at),
-            });
+            }), Date.now());
           }))
-        : [await listOutagesByInstance(deps.pool, MONITOR_AGENT)];
-      outages = intersectOutages(lists, 'group_monitors');
+        : [denoiseOutages(await listOutagesByInstance(deps.pool, MONITOR_AGENT, OUTAGE_PAGE_CAP, OUTAGE_MIN_MS), Date.now())];
+      // Ruído de novo NO RESULTADO: a interseção de duas quedas longas pode ser uma fatia de segundos.
+      outages = denoiseOutages(intersectOutages(lists, 'group_monitors'), Date.now());
     } else {
       instance = await instanceForScope(deps.pool, g.scope);
-      outages = instance ? await listOutagesByInstance(deps.pool, instance) : [];
+      outages = instance
+        ? denoiseOutages(await listOutagesByInstance(deps.pool, instance, OUTAGE_PAGE_CAP, OUTAGE_MIN_MS), Date.now())
+        : [];
     }
     const truncated = outages.length >= OUTAGE_PAGE_CAP;
     if (truncated) {

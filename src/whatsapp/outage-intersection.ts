@@ -59,3 +59,41 @@ export function withImplicitOpenOutage(
     ...list,
   ];
 }
+
+/**
+ * Abaixo disto, queda não é buraco de monitoramento. A Evolution oscila
+ * `connecting`→`open` em segundos várias vezes por dia em todo número (medido
+ * 15/10/2026: ~1.400 episódios < 1 min em 14 instâncias) e a mensagem enviada
+ * nesse intervalo chega na reconexão — a do Vemcurtir das 18:08, no meio de uma
+ * rajada de quedas de 2 s, foi capturada. Sem o filtro cada oscilação virava um
+ * card "Sem monitoramento · 0min" na conversa do grupo.
+ */
+export const OUTAGE_MIN_MS = 5 * 60_000;
+
+/**
+ * Tira o ruído antes de exibir: descarta episódio fechado mais curto que
+ * `OUTAGE_MIN_MS` e aberto há menos que isso (ainda pode ser oscilação), e funde
+ * episódios separados por menos que isso. Devolve DESC por início.
+ */
+export function denoiseOutages(list: OutageRow[], nowMs: number, minMs = OUTAGE_MIN_MS): OutageRow[] {
+  const kept = list
+    .map((r) => ({ r, s: Date.parse(r.startedAt), e: r.endedAt ? Date.parse(r.endedAt) : Infinity }))
+    .filter(({ s, e }) => Number.isFinite(s) && (e === Infinity ? nowMs - s >= minMs : e - s >= minMs))
+    .sort((a, b) => a.s - b.s);
+  const merged: typeof kept = [];
+  for (const cur of kept) {
+    const last = merged[merged.length - 1];
+    if (last && cur.s - last.e < minMs) {
+      if (cur.e > last.e) last.e = cur.e;
+    } else {
+      merged.push({ ...cur });
+    }
+  }
+  return merged
+    .sort((a, b) => b.s - a.s)
+    .map(({ r, s, e }) => ({
+      ...r,
+      startedAt: new Date(s).toISOString(),
+      endedAt: e === Infinity ? null : new Date(e).toISOString(),
+    }));
+}

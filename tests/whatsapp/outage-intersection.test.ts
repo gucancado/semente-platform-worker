@@ -57,3 +57,42 @@ test('implícito: sem disconnected_since usa o fallback', () => {
   const r = withImplicitOpenOutage([], { instance: 'b', isNumber: true, status: 'connecting', disconnectedSince: null, fallbackSince: '2026-08-20T00:00:00.000Z' });
   assert.equal(r[0]!.startedAt, '2026-08-20T00:00:00.000Z');
 });
+
+import { denoiseOutages, OUTAGE_MIN_MS } from '../../src/whatsapp/outage-intersection.js';
+const NOW = Date.parse('2026-10-15T22:00:00.000Z');
+const ep = (s: string, e: string | null, src = 'webhook') => ({ instance: 'x', startedAt: s, endedAt: e, startedAtSource: src, reason: null });
+
+test('denoise: limiar é 5 min', () => { assert.equal(OUTAGE_MIN_MS, 5 * 60_000); });
+
+test('denoise: queda fechada curta some; longa fica', () => {
+  const r = denoiseOutages([
+    ep('2026-10-15T21:08:46.000Z', '2026-10-15T21:08:47.000Z'),
+    ep('2026-10-15T10:00:00.000Z', '2026-10-15T11:00:00.000Z'),
+  ], NOW);
+  assert.deepEqual(r.map((x) => x.startedAt), ['2026-10-15T10:00:00.000Z']);
+});
+
+test('denoise: aberto há menos de 5 min some; aberto há mais fica', () => {
+  assert.deepEqual(denoiseOutages([ep('2026-10-15T21:58:00.000Z', null)], NOW), []);
+  assert.equal(denoiseOutages([ep('2026-10-15T21:50:00.000Z', null)], NOW).length, 1);
+});
+
+test('denoise: quedas longas separadas por menos de 5 min viram uma; ordem DESC', () => {
+  const r = denoiseOutages([
+    ep('2026-10-15T12:00:00.000Z', '2026-10-15T12:30:00.000Z'),
+    ep('2026-10-15T12:32:00.000Z', null),
+    ep('2026-10-15T08:00:00.000Z', '2026-10-15T08:10:00.000Z'),
+  ], NOW);
+  assert.deepEqual(r.map((x) => [x.startedAt, x.endedAt]), [
+    ['2026-10-15T12:00:00.000Z', null],
+    ['2026-10-15T08:00:00.000Z', '2026-10-15T08:10:00.000Z'],
+  ]);
+});
+
+test('denoise: rajada de quedas de segundos (a da disputa de sockets) não vira buraco', () => {
+  const burst = Array.from({ length: 50 }, (_, i) => {
+    const s = Date.parse('2026-10-15T21:07:00.000Z') + i * 20_000;
+    return ep(new Date(s).toISOString(), new Date(s + 2_000).toISOString());
+  });
+  assert.deepEqual(denoiseOutages(burst, NOW), []);
+});
