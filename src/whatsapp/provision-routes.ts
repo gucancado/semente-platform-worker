@@ -1,11 +1,12 @@
 import type { FastifyInstance } from 'fastify';
+import { sharedQrCache } from './qr-cache.js';
 import type { Pool } from 'pg';
 import { randomBytes } from 'node:crypto';
 import { config } from '../config.js';
 import { getNumber, renameNumberLabel, getNumberByInstance, setNumberLifecycle, normalizePhone, updateNumberStatus } from './numbers.js';
 import { createProvisioning, getProvisioning, deleteProvisioning } from './provisioning.js';
 import { createProvisionLink, createReconnectLink, getProvisionLink, computeLinkState, incrementLinkClick, refundLinkClick, markLinkConsumed, generateLinkToken } from './provision-links.js';
-import { createEvolutionInstance, ensureEvolutionInstance, getQrCode, getConnectionState, setInstanceWebhook, logoutInstance, deleteInstance, type EvolutionDeps } from '../evolution/client.js';
+import { createEvolutionInstance, ensureEvolutionInstance, getConnectionState, setInstanceWebhook, logoutInstance, deleteInstance, type EvolutionDeps } from '../evolution/client.js';
 import { syncGroupSubjects } from './group-sync.js';
 import { backfillNumber } from './backfill.js';
 import { setGroupExposure } from './thread-meta.js';
@@ -88,7 +89,7 @@ export function registerProvisionRoutes(app: FastifyInstance, deps: { pool: Pool
       if (prov.workspaceId !== ws) return { code: 404 as const };
       if (prov.blockedWorkspaceId) return { body: { state: 'blocked', blockedWorkspaceId: prov.blockedWorkspaceId } };
       if (new Date(prov.expiresAt).getTime() < Date.now()) return { body: { state: 'expired' } };
-      const qr = await getQrCode(deps.evolution, instance);
+      const qr = await sharedQrCache(deps.evolution).get(instance);
       return { body: { state: 'awaiting_scan', qr: qr.base64, pairingCode: qr.pairingCode } };
     }
     return { body: { state: 'gone' } };
@@ -350,7 +351,7 @@ export function registerProvisionRoutes(app: FastifyInstance, deps: { pool: Pool
         await markLinkConsumed(deps.pool, token, null);
         return reply.send({ state: 'connected' });
       }
-      const qr = await getQrCode(deps.evolution, instance);
+      const qr = await sharedQrCache(deps.evolution).get(instance);
       return reply.send({ state: 'awaiting_scan', qr: qr.base64, pairingCode: qr.pairingCode });
     } catch {
       return reply.code(502).send({ error: 'evolution_unavailable' });
@@ -375,7 +376,7 @@ export function registerProvisionRoutes(app: FastifyInstance, deps: { pool: Pool
   app.get('/admin/whatsapp/numbers/:id/qr', async (req: any, reply) => {
     const n = await getNumber(deps.pool, Number(req.params.id));
     if (!n) return reply.code(404).send({ error: 'not found' });
-    return reply.send(await getQrCode(deps.evolution, n.evolutionInstance));
+    return reply.send(await sharedQrCache(deps.evolution).get(n.evolutionInstance));
   });
 
   app.delete('/admin/whatsapp/numbers/:id', async (req: any, reply) => {

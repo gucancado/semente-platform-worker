@@ -1,4 +1,5 @@
 import type { Pool } from 'pg';
+import { qrFromWebhook, sharedQrCache } from './qr-cache.js';
 import { updateNumberStatus, getNumberByInstance, upsertConnectedNumber, claimNumberByPhone, normalizePhone } from './numbers.js';
 import { getProvisioning, deleteProvisioning, markProvisioningBlocked } from './provisioning.js';
 import { markLinkConsumed, settleReconnectLinks } from './provision-links.js';
@@ -35,6 +36,13 @@ function extractPhone(data: any): string | undefined {
 
 export async function handleConnectionEvent(pool: Pool, payload: any): Promise<boolean> {
   if (!INSTANCE_EVENTS.has(payload?.event)) return false;
+  // QR rotacionado pela Evolution no MESMO socket: guardar evita que as telas de
+  // QR chamem /instance/connect (que abre socket novo) a cada consulta.
+  if (payload.event === 'qrcode.updated' && typeof payload.instance === 'string') {
+    const qr = qrFromWebhook(payload.data);
+    if (qr) sharedQrCache().remember(payload.instance, qr);
+    return true;
+  }
   const status = STATE_MAP[payload?.data?.state];
   if (!status) return true;
 
@@ -46,6 +54,7 @@ export async function handleConnectionEvent(pool: Pool, payload: any): Promise<b
   }
 
   // status === 'connected'
+  sharedQrCache().forget(instance);
 
   // Links de reconexão desta instância se liquidam AQUI — o webhook é a única
   // autoridade sobre o open real (o polling das rotas perde um open→close rápido).
