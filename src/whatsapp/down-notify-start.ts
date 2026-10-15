@@ -10,6 +10,7 @@ import { makeEvolutionProbe } from './down-notify-probe.js';
 import { parseOffDates, type OffDates } from './business-hours.js';
 import type { EvolutionDeps } from '../evolution/client.js';
 import { archiveChat, fetchInstanceOwner, findProbeInStore, markMessageAsRead } from '../evolution/client.js';
+import { currentSystemTargets } from './monitor-watch-targets.js';
 import { listProbeTargets, runProbeTick, type ProbeDeps } from './connection-probe-service.js';
 // buildProbeConfig/probeStarted moram em `connection-probe.ts` (módulo
 // ZERO-IMPORT) pra o teste puro de config não precisar de `--env-file` só
@@ -281,12 +282,18 @@ export function startDownNotify(pool: Pool, log: DownNotifyLog): { probeEvolutio
   if (numbersOn) {
     loop('numbers', config.CONNECTION_ALERT_SWEEP_INTERVAL_MS, () => sweepDownNumbers(deps), log);
   }
-  if (targets.length > 0) {
+  {
+    // Slots de monitor vivem no banco (desconhecidos neste boot síncrono): o
+    // loop sobe sempre e cada tick resolve os alvos; lista vazia = no-op.
     const probe = buildSystemProbe(pool);
     loop(
       'system',
       config.SYSTEM_INSTANCE_WATCH_INTERVAL_MS,
-      () => runSystemInstanceWatch({ ...deps, probe, ...watchOpts }, targets),
+      async () => {
+        const ts = await currentSystemTargets(pool, config.SYSTEM_INSTANCE_WATCH_JSON);
+        if (ts.length === 0) return [];
+        return runSystemInstanceWatch({ ...deps, probe, ...watchOpts }, ts);
+      },
       log,
     );
   }
@@ -302,7 +309,7 @@ export function startDownNotify(pool: Pool, log: DownNotifyLog): { probeEvolutio
     loop(
       'probe',
       config.SYSTEM_INSTANCE_WATCH_INTERVAL_MS,
-      async () => runProbeTick(probeDeps, await listProbeTargets(pool, config.SYSTEM_INSTANCE_WATCH_JSON)),
+      async () => runProbeTick(probeDeps, await listProbeTargets(pool, await currentSystemTargets(pool, config.SYSTEM_INSTANCE_WATCH_JSON))),
       log,
       Math.floor(config.SYSTEM_INSTANCE_WATCH_INTERVAL_MS / 2),
     );

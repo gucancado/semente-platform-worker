@@ -21,6 +21,7 @@ import {
   type SystemTarget,
 } from './down-notify-store.js';
 import type { DownSendResult, DownSender, OpsCopySender } from './down-notify-sender.js';
+import { loadMonitors, monitorForInstance, monitorLabel } from './group-monitors.js';
 import { opsCopyFor, sameWhatsappNumber } from './down-notify-ops-copy.js';
 
 /**
@@ -135,8 +136,10 @@ async function notifyOne(
 
   // Nome do workspace no lugar do rótulo do número (que costuma ser genérico:
   // "atendimento"). Sem workspace ou sem resposta, fica o rótulo — nunca bloqueia.
-  const workspaceName =
-    t.workspaceId && deps.resolveWorkspaceName
+  const monitor = monitorForInstance(await loadMonitors(deps.pool), t.instance);
+  const workspaceName = monitor
+    ? monitorLabel(monitor.slot)
+    : t.workspaceId && deps.resolveWorkspaceName
       ? await deps.resolveWorkspaceName(t.workspaceId).catch(() => null)
       : null;
   const name = workspaceName ?? t.label;
