@@ -32,7 +32,9 @@ export async function backfillNumber(
   // sonda/isOwnDownNotice continuam pulando o registro. Quem chama passa
   // `config.WHATSAPP_CLOUD_OWN_PHONES`.
   const ownPhones = opts.ownPhones ?? [];
-  const isMonitor = !!monitorForInstance(await loadMonitors(pool), num.evolutionInstance);
+  // Monitor com keep_dms (mig 073) é também número de atendimento: DM entra normal.
+  const monitorSlot = monitorForInstance(await loadMonitors(pool), num.evolutionInstance);
+  const isMonitor = !!monitorSlot && !monitorSlot.keepDms;
   let scanned = 0, inserted = 0, updated = 0, skippedNoText = 0, page = 1, reachedCutoff = false;
 
   for (; page <= opts.maxPages; page++) {

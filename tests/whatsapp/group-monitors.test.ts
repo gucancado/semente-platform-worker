@@ -42,3 +42,9 @@ test('loadMonitors: cacheia 30s e sobrevive a erro de query', async () => {
   invalidateMonitors(); fail = true;
   assert.deepEqual(await loadMonitors(pool, () => t), []); // sem valor bom → []
 });
+
+test('planMonitorIngest: monitor com keepDms (mig 073) deixa DM no fluxo normal e segue copiando grupo', () => {
+  assert.equal(planMonitorIngest({ isMonitor: true, isGroup: false, hasMonitorRow: false, hasText: true, keepDms: true }), 'none');
+  assert.equal(planMonitorIngest({ isMonitor: true, isGroup: false, hasMonitorRow: false, hasText: true, keepDms: false }), 'drop_dm');
+  assert.equal(planMonitorIngest({ isMonitor: true, isGroup: true, hasMonitorRow: true, hasText: true, keepDms: true }), 'copy');
+});

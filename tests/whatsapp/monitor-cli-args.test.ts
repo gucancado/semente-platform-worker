@@ -5,9 +5,9 @@ import { parseGroupMonitorArgs, parseMonitorCopyArgs } from '../../src/whatsapp/
 test('group-monitor list/set', () => {
   assert.deepEqual(parseGroupMonitorArgs(['list']), { cmd: 'list' });
   assert.deepEqual(parseGroupMonitorArgs(['set', '--slot=B', '--instance=ws-x', '--dry-run']),
-    { cmd: 'set', slot: 'B', instance: 'ws-x', phone: null, dryRun: true });
+    { cmd: 'set', slot: 'B', instance: 'ws-x', phone: null, keepDms: false, dryRun: true });
   assert.deepEqual(parseGroupMonitorArgs(['set', '--slot=a', '--instance=ws-x', '--phone=+5531999999999']),
-    { cmd: 'set', slot: 'A', instance: 'ws-x', phone: '+5531999999999', dryRun: false });
+    { cmd: 'set', slot: 'A', instance: 'ws-x', phone: '+5531999999999', keepDms: false, dryRun: false });
   assert.ok('error' in parseGroupMonitorArgs(['set', '--slot=C', '--instance=x']));
   assert.ok('error' in parseGroupMonitorArgs(['set', '--slot=A']));
   assert.ok('error' in parseGroupMonitorArgs(['set', '--slot=A', '--instance=x', '--phone=5531']));
@@ -20,4 +20,11 @@ test('monitor-copy', () => {
   assert.ok('error' in parseMonitorCopyArgs([]));
   assert.ok('error' in parseMonitorCopyArgs(['--since=ontem']));
   assert.ok('error' in parseMonitorCopyArgs(['--since=2026-10-13T00:00:00Z', '--until=x']));
+});
+
+test('parseGroupMonitorArgs: --keep-dms liga keepDms; ausente = false', () => {
+  const on = parseGroupMonitorArgs(['set', '--slot=A', '--instance=ws-x', '--keep-dms']);
+  assert.ok('cmd' in on && on.cmd === 'set' && on.keepDms === true);
+  const off = parseGroupMonitorArgs(['set', '--slot=A', '--instance=ws-x']);
+  assert.ok('cmd' in off && off.cmd === 'set' && off.keepDms === false);
 });

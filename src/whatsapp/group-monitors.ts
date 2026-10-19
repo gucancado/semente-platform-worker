@@ -6,7 +6,8 @@ import type { Pool } from 'pg';
 /** Chave interna do escopo do monitor. Não renomear: os grupos e o histórico vivem nela. */
 export const MONITOR_AGENT = 'saturno';
 export type MonitorSlot = 'A' | 'B';
-export type GroupMonitor = { slot: MonitorSlot; instance: string; phone: string };
+/** keepDms (mig 073): o monitor também é número de atendimento — DM segue o fluxo normal. */
+export type GroupMonitor = { slot: MonitorSlot; instance: string; phone: string; keepDms?: boolean };
 
 const TTL_MS = 30_000;
 let cache: { at: number; value: GroupMonitor[] } | null = null;
@@ -27,8 +28,8 @@ export async function loadMonitors(pool: Pool, now: () => number = Date.now): Pr
   const t = now();
   if (cache && t - cache.at < TTL_MS) return cache.value;
   try {
-    const { rows } = await pool.query(`SELECT slot, instance, phone FROM group_monitors ORDER BY slot`);
-    const value = rows.map((r: any) => ({ slot: r.slot as MonitorSlot, instance: String(r.instance), phone: String(r.phone) }));
+    const { rows } = await pool.query(`SELECT slot, instance, phone, keep_dms FROM group_monitors ORDER BY slot`);
+    const value = rows.map((r: any) => ({ slot: r.slot as MonitorSlot, instance: String(r.instance), phone: String(r.phone), keepDms: r.keep_dms === true }));
     cache = { at: t, value };
     lastGood = value;
     return value;
@@ -45,9 +46,9 @@ export function monitorForInstance(monitors: GroupMonitor[], instance: string): 
 
 export type MonitorIngestPlan = 'drop_dm' | 'copy' | 'none';
 
-export function planMonitorIngest(p: { isMonitor: boolean; isGroup: boolean; hasMonitorRow: boolean; hasText: boolean }): MonitorIngestPlan {
+export function planMonitorIngest(p: { isMonitor: boolean; isGroup: boolean; hasMonitorRow: boolean; hasText: boolean; keepDms?: boolean }): MonitorIngestPlan {
   if (!p.isMonitor) return 'none';
-  if (!p.isGroup) return 'drop_dm';
+  if (!p.isGroup) return p.keepDms ? 'none' : 'drop_dm';
   return p.hasMonitorRow && p.hasText ? 'copy' : 'none';
 }
 

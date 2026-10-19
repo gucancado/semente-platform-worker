@@ -137,10 +137,11 @@ export async function registerWebhookRoutes(app: FastifyInstance) {
 
     if (resolved.source === 'number') {
       // Monitor de grupos (slots A/B, mig 072): número que é monitor é SÓ grupos.
-      // DM nunca entra (nem webhook_logs, nem CRM, IA, áudio, mídia). Fica DEPOIS
+      // DM nunca entra (nem webhook_logs, nem CRM, IA, áudio, mídia), salvo slot com
+      // keep_dms (mig 073: monitor que também é número de atendimento). Fica DEPOIS
       // da porta own-cloud acima — a sonda de conexão manda DM e precisa passar.
       const monitor = monitorForInstance(await loadMonitors(pool), msg.instance);
-      if (planMonitorIngest({ isMonitor: !!monitor, isGroup: msg.isGroup, hasMonitorRow: false, hasText: false }) === 'drop_dm') {
+      if (planMonitorIngest({ isMonitor: !!monitor, isGroup: msg.isGroup, hasMonitorRow: false, hasText: false, keepDms: monitor?.keepDms }) === 'drop_dm') {
         req.log.info({ instance: msg.instance, slot: monitor!.slot }, 'webhook: DM de número monitor de grupos — descartada');
         return { ignored: true, reason: 'group_monitor_dm' };
       }

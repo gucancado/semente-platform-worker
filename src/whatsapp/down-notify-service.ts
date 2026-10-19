@@ -137,7 +137,8 @@ async function notifyOne(
   // Nome do workspace no lugar do rótulo do número (que costuma ser genérico:
   // "atendimento"). Sem workspace ou sem resposta, fica o rótulo — nunca bloqueia.
   const monitor = monitorForInstance(await loadMonitors(deps.pool), t.instance);
-  const workspaceName = monitor
+  // Monitor que também atende (keep_dms) é avisado pelo nome do workspace.
+  const workspaceName = monitor && !monitor.keepDms
     ? monitorLabel(monitor.slot)
     : t.workspaceId && deps.resolveWorkspaceName
       ? await deps.resolveWorkspaceName(t.workspaceId).catch(() => null)

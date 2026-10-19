@@ -1,7 +1,9 @@
 /**
  * Lista/troca os slots "Monitor de grupos A/B" (tabela group_monitors).
  *   pnpm whatsapp:group-monitor list
- *   pnpm whatsapp:group-monitor set --slot=B --instance=<evolution_instance> [--phone=+55...] [--dry-run]
+ *   pnpm whatsapp:group-monitor set --slot=B --instance=<evolution_instance> [--phone=+55...] [--keep-dms] [--dry-run]
+ * --keep-dms: o número também é de atendimento — DM segue o fluxo normal (mig 073).
+ *   Sem a flag, número-monitor é SÓ grupos (DM descartada).
  * Exit 2 = argumento/estado inválido.
  */
 import { pool } from '../db.js';
@@ -14,9 +16,9 @@ async function main(): Promise<number> {
   if ('error' in args) { console.error(args.error); return 2; }
 
   if (args.cmd === 'list') {
-    const { rows } = await pool.query(`SELECT slot, instance, phone, updated_at, updated_by FROM group_monitors ORDER BY slot`);
+    const { rows } = await pool.query(`SELECT slot, instance, phone, keep_dms, updated_at, updated_by FROM group_monitors ORDER BY slot`);
     if (rows.length === 0) console.log('(nenhum slot configurado)');
-    for (const r of rows) console.log(`${r.slot} | ${r.instance} | ${r.phone} | ${new Date(r.updated_at).toISOString()} | ${r.updated_by ?? '-'}`);
+    for (const r of rows) console.log(`${r.slot} | ${r.instance} | ${r.phone} | ${r.keep_dms ? 'mantém DM' : 'só grupos'} | ${new Date(r.updated_at).toISOString()} | ${r.updated_by ?? '-'}`);
     return 0;
   }
 
@@ -37,12 +39,13 @@ async function main(): Promise<number> {
     : null);
   if (!phone) { console.error('telefone desconhecido: informe --phone=+55...'); return 2; }
 
-  console.log(`slot ${slot}: ${current ? `${current.instance} (${current.phone})` : '(vazio)'} -> ${instance} (${phone})`);
+  if (args.keepDms && instance === MONITOR_AGENT) { console.error('--keep-dms só vale para número de whatsapp_numbers'); return 2; }
+  console.log(`slot ${slot}: ${current ? `${current.instance} (${current.phone})` : '(vazio)'} -> ${instance} (${phone}) ${args.keepDms ? '[mantém DM]' : '[só grupos: DM descartada]'}`);
   if (args.dryRun) { console.log('--dry-run: nada gravado'); return 0; }
   await pool.query(
-    `INSERT INTO group_monitors(slot, instance, phone, updated_by) VALUES ($1,$2,$3,'cli')
-     ON CONFLICT (slot) DO UPDATE SET instance=EXCLUDED.instance, phone=EXCLUDED.phone, updated_at=now(), updated_by='cli'`,
-    [slot, instance, phone],
+    `INSERT INTO group_monitors(slot, instance, phone, keep_dms, updated_by) VALUES ($1,$2,$3,$4,'cli')
+     ON CONFLICT (slot) DO UPDATE SET instance=EXCLUDED.instance, phone=EXCLUDED.phone, keep_dms=EXCLUDED.keep_dms, updated_at=now(), updated_by='cli'`,
+    [slot, instance, phone, args.keepDms],
   );
   console.log('gravado. efeito em até 30s nos processos do worker');
   return 0;
