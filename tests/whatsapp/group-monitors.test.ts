@@ -48,3 +48,11 @@ test('planMonitorIngest: monitor com keepDms (mig 073) deixa DM no fluxo normal 
   assert.equal(planMonitorIngest({ isMonitor: true, isGroup: false, hasMonitorRow: false, hasText: true, keepDms: false }), 'drop_dm');
   assert.equal(planMonitorIngest({ isMonitor: true, isGroup: true, hasMonitorRow: true, hasText: true, keepDms: true }), 'copy');
 });
+
+test('orderMonitorInstances: conectado primeiro, depois por slot', async () => {
+  const { orderMonitorInstances } = await import('../../src/whatsapp/group-monitors.js');
+  const ms = [{ slot: 'A' as const, instance: 'ia', phone: '1' }, { slot: 'B' as const, instance: 'ib', phone: '2' }];
+  assert.deepEqual(orderMonitorInstances(ms, new Set(['ia', 'ib'])), ['ia', 'ib']);
+  assert.deepEqual(orderMonitorInstances(ms, new Set(['ib'])), ['ib', 'ia']);
+  assert.deepEqual(orderMonitorInstances(ms, new Set()), ['ia', 'ib']);
+});

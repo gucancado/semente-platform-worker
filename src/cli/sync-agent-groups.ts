@@ -1,6 +1,7 @@
 import { pool } from '../db.js';
 import { config } from '../config.js';
 import { syncAgentGroupParticipants, syncNumberGroupParticipants } from '../whatsapp/agent-group-sync.js';
+import { instancesForAgent } from '../whatsapp/group-monitors.js';
 import { getNumber } from '../whatsapp/numbers.js';
 
 /**
@@ -25,7 +26,7 @@ async function main() {
   for (const r of rows) {
     const agent = r.agent as string;
     try {
-      results[agent] = await syncAgentGroupParticipants(pool, evolution, agent);
+      results[agent] = await syncAgentGroupParticipants(pool, evolution, agent, await instancesForAgent(pool, agent));
     } catch (err) {
       results[agent] = { error: err instanceof Error ? err.message : String(err) };
     }

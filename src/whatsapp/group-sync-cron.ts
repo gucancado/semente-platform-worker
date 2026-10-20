@@ -2,6 +2,7 @@ import type { Pool } from 'pg';
 import type { EvolutionDeps } from '../evolution/client.js';
 import { syncGroupSubjects } from './group-sync.js';
 import { syncAgentGroupParticipants, syncNumberGroupParticipants } from './agent-group-sync.js';
+import { instancesForAgent } from './group-monitors.js';
 import { sweepGroupAvatars } from './group-avatars.js';
 import { resolveGroupIdentities } from './group-identity.js';
 import { getNumber } from './numbers.js';
@@ -81,8 +82,10 @@ export async function runGroupSyncCycle(
       // (medido em produção: instância 'saturno' viva) — reusada tanto pro
       // fetch de roster (dentro de syncAgentGroupParticipants) quanto pro
       // sweep de avatares, que é global por telefone (ver group-avatars.ts).
-      const synced = await syncAgentGroupParticipants(pool, deps, agent);
-      const avatars = await sweepGroupAvatars(pool, deps, agent, budgets.avatars);
+      // Monitor: instâncias dos slots A/B (a 'saturno' foi desligada em 19/10).
+      const instances = await instancesForAgent(pool, agent);
+      const synced = await syncAgentGroupParticipants(pool, deps, agent, instances);
+      const avatars = await sweepGroupAvatars(pool, deps, instances[0]!, budgets.avatars);
       log.info({ agent, synced, avatars }, 'group-sync: ciclo agent concluído');
     } catch (err) {
       // Um agent com problema não pode derrubar o ciclo dos outros.

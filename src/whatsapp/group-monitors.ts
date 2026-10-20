@@ -40,6 +40,35 @@ export async function loadMonitors(pool: Pool, now: () => number = Date.now): Pr
   }
 }
 
+/**
+ * Instâncias Evolution que respondem por um escopo 'agent' (roster, avatares,
+ * convite). Para o monitor são os slots A/B — a instância 'saturno' saiu de
+ * cena em 2026-10-19 (chip cancelado), e o nome do agent deixou de ser nome
+ * de instância. Ordem: slots conectados primeiro, depois por slot. Sem slot
+ * nenhum, cai no nome do agent (comportamento antigo).
+ */
+export function orderMonitorInstances(monitors: GroupMonitor[], connected: Set<string>): string[] {
+  return [...monitors]
+    .sort((a, b) => Number(connected.has(b.instance)) - Number(connected.has(a.instance)) || a.slot.localeCompare(b.slot))
+    .map((m) => m.instance);
+}
+
+export async function instancesForAgent(pool: Pool, agent: string): Promise<string[]> {
+  if (agent !== MONITOR_AGENT) return [agent];
+  const monitors = await loadMonitors(pool);
+  if (monitors.length === 0) return [agent];
+  let connected = new Set<string>();
+  try {
+    const { rows } = await pool.query(
+      `SELECT evolution_instance FROM whatsapp_numbers
+        WHERE evolution_instance = ANY($1::text[]) AND removed_at IS NULL AND status = 'connected'`,
+      [monitors.map((m) => m.instance)],
+    );
+    connected = new Set(rows.map((r: any) => String(r.evolution_instance)));
+  } catch { /* sem status: só a ordem por slot */ }
+  return orderMonitorInstances(monitors, connected);
+}
+
 export function monitorForInstance(monitors: GroupMonitor[], instance: string): GroupMonitor | null {
   return monitors.find((m) => m.instance === instance) ?? null;
 }

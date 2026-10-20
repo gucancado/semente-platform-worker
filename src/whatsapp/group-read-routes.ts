@@ -14,7 +14,7 @@ import { searchGroupMessages, resolveAnchor, listMessagesAround } from './group-
 import { lastMessageByAuthor, attachLastMessage } from './group-activity.js';
 import { listOutagesByInstance, OUTAGE_PAGE_CAP, type OutageRow } from './instance-outages.js';
 import { intersectOutages, withImplicitOpenOutage, denoiseOutages, OUTAGE_MIN_MS } from './outage-intersection.js';
-import { loadMonitors, MONITOR_AGENT } from './group-monitors.js';
+import { loadMonitors, MONITOR_AGENT, instancesForAgent } from './group-monitors.js';
 import { listMonitorStatus } from './group-monitors-status.js';
 import { parseMonitorSlot, issueMonitorReconnectLink } from './group-monitor-reconnect.js';
 
@@ -112,7 +112,7 @@ async function rosterView(pool: Pool, g: LinkedGroup) {
  * conversa e ninguém percebe.
  */
 export async function instanceForScope(pool: Pool, scope: GroupScope): Promise<string | null> {
-  if (scope.kind === 'agent') return scope.agent;
+  if (scope.kind === 'agent') return (await instancesForAgent(pool, scope.agent))[0] ?? null;
   const { rows } = await pool.query(
     `SELECT evolution_instance FROM whatsapp_numbers WHERE id = $1`, [scope.numberId],
   );

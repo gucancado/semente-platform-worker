@@ -46,6 +46,7 @@ export async function syncAgentGroupParticipants(
   pool: Pool,
   deps: EvolutionDeps,
   agent: string,
+  instances: string[] = [agent],
 ): Promise<AgentGroupSyncResult> {
   const { rows } = await pool.query(
     `SELECT id, jid
@@ -53,7 +54,25 @@ export async function syncAgentGroupParticipants(
       WHERE linked_workspace_id IS NOT NULL AND whatsapp_number_id IS NULL AND agent = $1`,
     [agent],
   );
-  return syncGroupRosters(pool, deps, agent, rows as Array<{ id: number; jid: string }>);
+  // Monitor com 2 slots: cada instância tenta só os grupos que a anterior não
+  // conseguiu (o número pode não estar em todos os grupos).
+  let pending = rows as Array<{ id: number; jid: string }>;
+  const out: AgentGroupSyncResult = { groupsAttempted: pending.length, groupsSynced: 0, participants: 0, failed: 0 };
+  let failedIds = new Set<number>();
+  for (const instance of instances) {
+    if (pending.length === 0) break;
+    const synced = new Set<number>();
+    const failed = new Set<number>();
+    const r = await syncGroupRosters(pool, deps, instance, pending, synced, failed);
+    out.groupsSynced += r.groupsSynced;
+    out.participants += r.participants;
+    pending = pending.filter((g) => !synced.has(Number(g.id)));
+    // Falha = exceção na ÚLTIMA instância que tentou o grupo (404/roster vazio não é falha).
+    failedIds = new Set([...failedIds, ...failed].filter((id) => !synced.has(id)));
+    for (const g of pending) if (!failed.has(Number(g.id))) failedIds.delete(Number(g.id));
+  }
+  out.failed = failedIds.size;
+  return out;
 }
 
 /**
@@ -88,6 +107,8 @@ async function syncGroupRosters(
   deps: EvolutionDeps,
   instance: string,
   rows: Array<{ id: number; jid: string }>,
+  syncedIds?: Set<number>,
+  failedIds?: Set<number>,
 ): Promise<AgentGroupSyncResult> {
   const out: AgentGroupSyncResult = { groupsAttempted: rows.length, groupsSynced: 0, participants: 0, failed: 0 };
   for (const g of rows) {
@@ -110,10 +131,12 @@ async function syncGroupRosters(
         await pool.query(`UPDATE whatsapp_groups SET participants_synced_at = $2 WHERE id = $1`, [groupId, syncedAt]);
         out.groupsSynced++;
         out.participants += stored;
+        syncedIds?.add(groupId);
       }
     } catch {
       // Um grupo com problema não pode derrubar o sync dos outros.
       out.failed++;
+      failedIds?.add(groupId);
     }
   }
   return out;
