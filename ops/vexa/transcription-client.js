@@ -2,7 +2,9 @@ import { log } from './log.js';
 import { isLowConfidenceSegment } from './confidence.js';
 // [PATCH BeeAds] Montado sobre /app/core/meetings/modules/whisper/dist/transcription-client.js
 // (imagem vexaai/vexa-lite@sha256:216652b4…). Fonte: semente-platform-worker/ops/vexa/.
-const ALWAYS_JUNK = /amara\.org|opusdei\.pt|legendas? pela comunidade/i;
+// Créditos de legenda inventados: sai só o pedaço (já veio colado em fala real).
+const ALWAYS_JUNK = /(?:saiba mais em )?www\.opusdei\.pt|legendas? pela comunidade(?: d[aoe])?(?: amara\.org)?|amara\.org/giu;
+const stripJunk = (t) => (t || '').replace(ALWAYS_JUNK, ' ').replace(/\s+/g, ' ').trim();
 /** A typed STT failure. `source` lets a consumer attribute it; `retryable` drives backoff. */
 export class TranscriptionError extends Error {
     kind;
@@ -181,10 +183,13 @@ export class TranscriptionClient {
             // rebuild the text from what survives, so phantoms never reach the pipeline.
             // If the model returned no segments we can't score, so keep its text as-is.
             // [PATCH BeeAds] + créditos de legenda que o Whisper inventa (nunca são fala).
-            const segments = allSegments.filter((s) => !isLowConfidenceSegment(s) && !ALWAYS_JUNK.test(s.text || ''));
+            const segments = allSegments
+                .filter((s) => !isLowConfidenceSegment(s))
+                .map((s) => ({ ...s, text: stripJunk(s.text) }))
+                .filter((s) => /[\p{L}\p{N}]/u.test(s.text));
             const text = allSegments.length
                 ? segments.map((s) => (s.text || '').trim()).filter(Boolean).join(' ')
-                : (data.text || '');
+                : stripJunk(data.text);
             if (allSegments.length && segments.length < allSegments.length) {
                 log(`[STT] dropped ${allSegments.length - segments.length}/${allSegments.length} low-confidence segment(s)`);
             }

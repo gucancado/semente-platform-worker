@@ -41,8 +41,12 @@ export const STOCK_PHRASES: readonly string[] = [
   'que deus te abençoe',
 ];
 
-/** Inventado em QUALQUER posição: nunca é fala de reunião. */
-const ALWAYS_JUNK = /amara\.org|opusdei\.pt|legendas? pela comunidade|legendas? por [a-zà-ú ]{2,40}amara/i;
+/**
+ * Créditos de legenda: nunca são fala de reunião, em QUALQUER posição. Sai só o
+ * pedaço, não a frase: já veio "Amara.org porque a gente, semanalmente, faz uma
+ * reunião…" num trecho só, e apagar o trecho levaria a fala real junto.
+ */
+const ALWAYS_JUNK = /(?:saiba mais em )?www\.opusdei\.pt|legendas? pela comunidade(?: d[aoe])?(?: amara\.org)?|amara\.org/giu;
 
 const STOCK = new Set(STOCK_PHRASES);
 
@@ -50,25 +54,24 @@ function normalize(text: string): string {
   return text.trim().toLowerCase().replace(/\s+/g, ' ').replace(/[.!?…]+$/u, '').trim();
 }
 
-/** O trecho inteiro é frase inventada? (vazio também conta: não há o que guardar) */
-export function isStockPhrase(text: string | null | undefined): boolean {
-  if (!text || !text.trim()) return true;
-  if (ALWAYS_JUNK.test(text)) return true;
-  return STOCK.has(normalize(text));
-}
-
 /**
- * Limpa uma fala JÁ JUNTADA (histórico em `episode_turns`, onde os trechos foram
- * concatenados com espaço). Divide nas fronteiras de trecho que o STT deixa:
- * pontuação final seguida de espaço, ou espaço seguido de MAIÚSCULA (o Whisper
- * abre cada trecho com maiúscula, então "criação, Muito obrigado! então" separa
- * o "Muito obrigado!"). Remove só as unidades que, sozinhas, são frase inventada.
+ * Tira as frases inventadas de um texto. Serve tanto pro trecho que chega do STT
+ * quanto pra fala JÁ JUNTADA do histórico (`episode_turns`, trechos concatenados
+ * com espaço): divide nas fronteiras que o STT deixa (pontuação final seguida de
+ * espaço, ou espaço seguido de MAIÚSCULA, já que o Whisper abre cada trecho com
+ * maiúscula: "criação, Muito obrigado! então" separa o "Muito obrigado!") e
+ * remove só as unidades que, sozinhas, são frase inventada.
  */
 export function stripStockPhrases(text: string): string {
-  const units = text.split(/(?<=[.!?…])\s+|\s+(?=\p{Lu})/u);
+  const units = text.replace(ALWAYS_JUNK, ' ').split(/(?<=[.!?…])\s+|\s+(?=\p{Lu})/u);
   return units
-    .filter((u) => !isStockPhrase(u))
+    .filter((u) => u.trim() && !/^[\s.,!?…]+$/u.test(u) && !STOCK.has(normalize(u)))
     .join(' ')
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+/** O trecho inteiro é frase inventada? (vazio também conta: não há o que guardar) */
+export function isStockPhrase(text: string | null | undefined): boolean {
+  return !text || stripStockPhrases(text) === '';
 }

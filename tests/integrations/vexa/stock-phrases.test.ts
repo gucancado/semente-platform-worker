@@ -48,3 +48,12 @@ test('vexaMeetingToEpisodeInput descarta trecho inventado antes de virar fala e 
   assert.deepEqual(ep.turns.map((t) => [t.speaker_name, t.text]), [['Ana', 'Bom dia a todos. Vamos começar.']]);
   assert.deepEqual(ep.participants.map((p) => p.name), ['Ana']);
 });
+
+test('crédito de legenda colado em fala real: sai só o crédito', () => {
+  assert.equal(
+    stripStockPhrases('Amara.org porque a gente, semanalmente, faz uma reunião.'),
+    'porque a gente, semanalmente, faz uma reunião.',
+  );
+  assert.equal(stripStockPhrases('Saiba mais em www.opusdei.pt'), '');
+  assert.equal(stripStockPhrases('Legendas pela comunidade do Amara.org Muito obrigado'), '');
+});

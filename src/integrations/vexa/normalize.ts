@@ -1,6 +1,6 @@
 import type { EpisodeInput, EpisodeTurnInput } from '../../episodes/db.js';
 import type { VexaMeeting, VexaSegment } from './client.js';
-import { isStockPhrase } from './stock-phrases.js';
+import { stripStockPhrases } from './stock-phrases.js';
 
 /** Vexa manda start_time sem sufixo de tz (ex.: "2026-07-10T21:58:25.557234"). É UTC — anexa 'Z' se faltar offset. */
 export function parseVexaTimestamp(s: string | null): Date | null {
@@ -76,7 +76,9 @@ export function episodeHasEnoughContent(input: Pick<EpisodeInput, 'turns'>): boo
 export function vexaMeetingToEpisodeInput(m: VexaMeeting, rawR2Key: string | null): EpisodeInput {
   // Frase inventada pelo Whisper em trecho sem fala sai ANTES de tudo: senão vira
   // fala, participante ("Speaker") e conta no piso de importação.
-  const segments = dedupSegments((m.segments ?? []).filter((s) => !isStockPhrase(s.text)));
+  const segments = dedupSegments(
+    (m.segments ?? []).map((s) => ({ ...s, text: stripStockPhrases(s.text ?? '') })).filter((s) => s.text !== ''),
+  );
   const firstSegment = segments[0];
   const lastSegment = segments[segments.length - 1];
   const firstStart = firstSegment ? firstSegment.start : 0;
