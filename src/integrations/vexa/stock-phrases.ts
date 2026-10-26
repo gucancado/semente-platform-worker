@@ -58,18 +58,22 @@ export const STOCK_PHRASES: readonly string[] = [
  * unidade inteira em STOCK_PHRASES): numa agência, falar de vídeo e canal é
  * assunto de reunião. Aqui só entra o que tem a cauda inconfundível (sininho, URL).
  */
-const ALWAYS_JUNK = new RegExp([
+const ALWAYS_JUNK = new RegExp('(?:' + [
   String.raw`(?:saiba mais em )?www\.opusdei\.pt`,
   String.raw`legendas? pela comunidade(?: d[aoe])?(?: amara\.org)?`,
   String.raw`amara\.org`,
-  String.raw`(?:(?:e )?(?:se )?inscreva(?:-se)? no (?:nosso )?canal,? e )?ative o sininho(?: para receber (?:as )?notifica\S* (?:de|sobre) (?:novos )?vídeos)?\.?`,
+  String.raw`(?:(?:e )?(?:se )?inscreva(?:-se)? no (?:nosso )?canal,? e )?ative o sininho(?: para receber (?:as )?notifica\S*(?: (?:de|sobre) (?:novos )?vídeos)?)?`,
   String.raw`para mais vídeos,? acesse \S+`,
-].join('|'), 'giu');
+].join('|') + ')[.!]?', 'giu');
 
 /** Só os créditos/encerramentos (sem a lista de despedidas). Para transcrição que
  *  não vem do Whisper ao vivo (Fireflies), onde "Tchau, tchau." é despedida real. */
 export function stripJunk(text: string): string {
-  const out = text.replace(ALWAYS_JUNK, ' ').replace(/\s+/g, ' ').replace(/\s+([.,!?…])/gu, '$1').trim();
+  // Sem crédito no texto, devolve o texto INTOCADO (nem espaço muda): a limpeza do
+  // histórico compara antes/depois, e normalizar fala sem frase inventada viraria
+  // alteração em massa sem motivo.
+  if (text.search(ALWAYS_JUNK) === -1) return text;
+  const out = text.replace(ALWAYS_JUNK, ' ').replace(/\s+/g, ' ').trim();
   return /[\p{L}\p{N}]/u.test(out) ? out : '';
 }
 
@@ -88,12 +92,12 @@ function normalize(text: string): string {
  * remove só as unidades que, sozinhas, são frase inventada.
  */
 export function stripStockPhrases(text: string): string {
-  const units = text.replace(ALWAYS_JUNK, ' ').split(/(?<=[.!?…])\s+|\s+(?=\p{Lu})/u);
-  return units
-    .filter((u) => u.trim() && !/^[\s.,!?…]+$/u.test(u) && !STOCK.has(normalize(u)))
-    .join(' ')
-    .replace(/\s+/g, ' ')
-    .trim();
+  const base = stripJunk(text);
+  const units = base.split(/(?<=[.!?…])\s+|\s+(?=\p{Lu})/u);
+  const kept = units.filter((u) => u.trim() && !/^[\s.,!?…]+$/u.test(u) && !STOCK.has(normalize(u)));
+  // Nada removido: devolve o texto como veio (mesma razão do stripJunk).
+  if (base === text && kept.length === units.length) return text;
+  return kept.join(' ').replace(/\s+/g, ' ').trim();
 }
 
 /** O trecho inteiro é frase inventada? (vazio também conta: não há o que guardar) */

@@ -4,13 +4,13 @@ import { isLowConfidenceSegment } from './confidence.js';
 // (imagem vexaai/vexa-lite@sha256:216652b4…). Fonte: semente-platform-worker/ops/vexa/.
 // Créditos de legenda inventados: sai só o pedaço (já veio colado em fala real).
 // Mesma regex de src/integrations/vexa/stock-phrases.ts (manter iguais).
-const ALWAYS_JUNK = new RegExp([
+const ALWAYS_JUNK = new RegExp('(?:' + [
     String.raw`(?:saiba mais em )?www\.opusdei\.pt`,
     String.raw`legendas? pela comunidade(?: d[aoe])?(?: amara\.org)?`,
     String.raw`amara\.org`,
-    String.raw`(?:(?:e )?(?:se )?inscreva(?:-se)? no (?:nosso )?canal,? e )?ative o sininho(?: para receber (?:as )?notifica\S* (?:de|sobre) (?:novos )?vídeos)?\.?`,
+    String.raw`(?:(?:e )?(?:se )?inscreva(?:-se)? no (?:nosso )?canal,? e )?ative o sininho(?: para receber (?:as )?notifica\S*(?: (?:de|sobre) (?:novos )?vídeos)?)?`,
     String.raw`para mais vídeos,? acesse \S+`,
-].join('|'), 'giu');
+].join('|') + ')[.!]?', 'giu');
 const stripJunk = (t) => (t || '').replace(ALWAYS_JUNK, ' ').replace(/\s+/g, ' ').trim();
 // Frase que o Whisper inventa em silêncio. Medido em 2026-10-26 (whisper-1, pt):
 // fala real vem com no_speech_prob 0; "Legendas pela comunidade Amara.org",

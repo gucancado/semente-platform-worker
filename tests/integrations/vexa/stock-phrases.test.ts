@@ -85,3 +85,15 @@ test('stripJunk (Fireflies): tira crédito, mantém despedida real', () => {
   assert.equal(stripJunk('Amara.org.'), '');
   assert.equal(stripJunk('Valeu. Tchau, tchau.'), 'Valeu. Tchau, tchau.');
 });
+
+test('fala sem frase inventada sai idêntica, byte a byte (espaços e pontuação)', () => {
+  for (const t of ['Equipe, adicionar membro é com .com ou .com.br?', 'então por exemplo... ...comemora a primavera', 'a  b']) {
+    assert.equal(stripJunk(t), t);
+    assert.equal(stripStockPhrases(t), t);
+  }
+});
+
+test('cauda "para receber as notificações" sai junto; ponto do crédito não duplica', () => {
+  assert.equal(stripJunk('Aí acabou. se inscreva no canal e ative o sininho para receber as notificações. Equipe X.'), 'Aí acabou. Equipe X.');
+  assert.equal(stripJunk('vou pegar uma água. Legendas pela comunidade Amara.org Legendas pela comunidade.'), 'vou pegar uma água.');
+});
