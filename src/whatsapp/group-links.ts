@@ -19,8 +19,9 @@ import type { Pool } from 'pg';
  * Auditar com `pnpm whatsapp:check-group-links`.
  *
  * Nao ha caminho de escrita de `linked_workspace_id` no codigo: os vinculos sao
- * feitos a mao, por SQL. Enquanto for assim, a regra nao tem como ser imposta
- * na escrita — o check acima e a rede.
+ * feitos a mao, por SQL. Desde a mig 074 o banco impoe a regra na escrita
+ * (CHECK `wg_link_only_monitor`: vinculo so em linha sem `whatsapp_number_id`).
+ * Vincular = INSERT da linha `agent='saturno'` + `pnpm whatsapp:monitor-copy`.
  *
  * `scope` expoe qual dos dois e, porque as duas leituras (mensagens,
  * roster/avatares) usam fontes diferentes — ver `group-read-routes.ts`.

@@ -8,6 +8,9 @@
  *
  *   pnpm whatsapp:check-group-links
  *
+ * Desde a mig 074 o CHECK `wg_link_only_monitor` recusa vínculo em linha de
+ * número, então este check só acusa algo se a constraint for removida.
+ *
  * POR QUE ISTO EXISTE: não há caminho de escrita de `linked_workspace_id` em
  * lugar nenhum do código — os vínculos são feitos à mão, por SQL. Sem validação
  * no momento da escrita, escolher a linha errada é silencioso e só aparece
@@ -61,11 +64,6 @@ async function main() {
 
   if (rows.length === 0) {
     console.log(`ok — os ${total.rows[0].n} vínculos de grupo estão no monitor (${MONITOR_AGENT}).`);
-    console.log('');
-    console.log('Com zero divergências, dá pra travar a regra no banco:');
-    console.log('  ALTER TABLE whatsapp_groups');
-    console.log('    ADD CONSTRAINT wg_link_only_monitor');
-    console.log('    CHECK (linked_workspace_id IS NULL OR whatsapp_number_id IS NULL);');
     await pool.end();
     return;
   }
