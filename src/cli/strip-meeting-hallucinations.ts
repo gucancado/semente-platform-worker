@@ -14,13 +14,17 @@
  *   `_bkp_episodes_hallucinations` (só as linhas tocadas). Reverter = restaurar dali.
  * - O digest não muda: o prompt dele já ignorava essas frases.
  *
+ * `--source=fireflies`: só créditos de legenda e encerramento de vídeo (`stripJunk`).
+ *   Lá "Tchau, tchau." é despedida real, e `participants` são os CONVIDADOS (não os
+ *   falantes), então a lista de participantes não é tocada.
+ *
  * Uso (no container):
  *   node dist/cli/strip-meeting-hallucinations.js            # simulação
  *   node dist/cli/strip-meeting-hallucinations.js --apply
  *   node dist/cli/strip-meeting-hallucinations.js --apply --episode=519
  */
 import { pool } from '../db.js';
-import { stripStockPhrases } from '../integrations/vexa/stock-phrases.js';
+import { stripStockPhrases, stripJunk } from '../integrations/vexa/stock-phrases.js';
 
 function flag(name: string): string | undefined {
   const hit = process.argv.slice(2).find((a) => a === `--${name}` || a.startsWith(`--${name}=`));
@@ -34,10 +38,13 @@ type Turn = { id: string; speaker_name: string | null; text: string };
 async function main(): Promise<void> {
   const apply = flag('apply') !== undefined;
   const only = flag('episode');
+  const source = flag('source') || 'vexa';
+  if (source !== 'vexa' && source !== 'fireflies') throw new Error('--source=vexa|fireflies');
+  const clean = source === 'vexa' ? stripStockPhrases : stripJunk;
 
   const eps = await pool.query<{ id: string }>(
-    `SELECT id FROM episodes WHERE external_source = 'vexa' ${only ? 'AND id = $1' : ''} ORDER BY id`,
-    only ? [only] : [],
+    `SELECT id FROM episodes WHERE external_source = $1 ${only ? 'AND id = $2' : ''} ORDER BY id`,
+    only ? [source, only] : [source],
   );
 
   if (apply) {
@@ -51,7 +58,7 @@ async function main(): Promise<void> {
     const turns = (await pool.query<Turn>(
       `SELECT id, speaker_name, text FROM episode_turns WHERE episode_id = $1 ORDER BY turn_index`, [id],
     )).rows;
-    const plan = turns.map((t) => ({ ...t, next: stripStockPhrases(t.text) })).filter((t) => t.next !== t.text);
+    const plan = turns.map((t) => ({ ...t, next: clean(t.text) })).filter((t) => t.next !== t.text);
     if (!plan.length) continue;
     touchedEpisodes++;
     for (const t of plan) {
@@ -63,7 +70,7 @@ async function main(): Promise<void> {
     const removedIds = new Set(plan.filter((t) => !t.next).map((t) => t.id));
     const before = new Set(turns.map((t) => t.speaker_name).filter(Boolean) as string[]);
     const after = new Set(turns.filter((t) => !removedIds.has(t.id)).map((t) => t.speaker_name).filter(Boolean) as string[]);
-    const gone = [...before].filter((n) => !after.has(n));
+    const gone = source === 'vexa' ? [...before].filter((n) => !after.has(n)) : [];
 
     const c = await pool.connect();
     try {
@@ -97,7 +104,7 @@ async function main(): Promise<void> {
   }
 
   console.log(JSON.stringify({
-    mode: apply ? 'apply' : 'dry-run', episodes: eps.rows.length, touchedEpisodes,
+    mode: apply ? 'apply' : 'dry-run', source, episodes: eps.rows.length, touchedEpisodes,
     turnsChanged: changed, turnsDeleted: deleted, charsRemoved: charsBefore - charsAfter,
   }));
   await pool.end();

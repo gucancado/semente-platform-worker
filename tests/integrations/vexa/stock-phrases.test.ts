@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { isStockPhrase, stripStockPhrases } from '../../../src/integrations/vexa/stock-phrases.js';
+import { isStockPhrase, stripStockPhrases, stripJunk } from '../../../src/integrations/vexa/stock-phrases.js';
 import { vexaMeetingToEpisodeInput } from '../../../src/integrations/vexa/normalize.js';
 
 test('isStockPhrase: trecho inteiro inventado', () => {
@@ -56,4 +56,32 @@ test('crédito de legenda colado em fala real: sai só o crédito', () => {
   );
   assert.equal(stripStockPhrases('Saiba mais em www.opusdei.pt'), '');
   assert.equal(stripStockPhrases('Legendas pela comunidade do Amara.org Muito obrigado'), '');
+});
+
+test('encerramento de vídeo colado em fala real (casos do histórico)', () => {
+  assert.equal(
+    stripStockPhrases('Só que assim, gente, curso não é mentoria, né? se inscreva no canal e ative o sininho para receber notificações de novos vídeos.'),
+    'Só que assim, gente, curso não é mentoria, né?',
+  );
+  assert.equal(
+    stripStockPhrases('E aí, com relação ao... Para mais vídeos acesse www.leonardomunizodonto.com.br'),
+    'E aí, com relação ao...',
+  );
+  assert.equal(stripStockPhrases('Se inscreva no canal e ative o sininho.'), '');
+  assert.equal(stripStockPhrases('Aí também deu a mesma coisa. Um abraço e até o próximo vídeo. Indo do anúncio, estou no feed.'),
+    'Aí também deu a mesma coisa. Indo do anúncio, estou no feed.');
+  assert.equal(stripStockPhrases('Deus lhe abençoe.'), '');
+});
+
+test('assunto de reunião sobre vídeo e canal não é tocado', () => {
+  for (const t of ['A gente grava até o próximo vídeo da série.', 'Pede pra galera se inscrever no canal do YouTube.',
+    'O CTA do vídeo vai ser: inscreva-se no canal.']) {
+    assert.equal(stripStockPhrases(t), t);
+  }
+});
+
+test('stripJunk (Fireflies): tira crédito, mantém despedida real', () => {
+  assert.equal(stripJunk('Legendas pela comunidade Amara.org Gente! Olá! Tá todo mundo aí?'), 'Gente! Olá! Tá todo mundo aí?');
+  assert.equal(stripJunk('Amara.org.'), '');
+  assert.equal(stripJunk('Valeu. Tchau, tchau.'), 'Valeu. Tchau, tchau.');
 });

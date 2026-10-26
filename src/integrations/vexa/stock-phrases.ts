@@ -39,14 +39,39 @@ export const STOCK_PHRASES: readonly string[] = [
   'um beijo e até a próxima',
   'deus te abençoe',
   'que deus te abençoe',
+  'deus lhe abençoe',
+  'que deus lhe abençoe',
+  'um abraço e até o próximo vídeo',
+  'inscreva-se no nosso canal',
+  'se inscreva no nosso canal',
 ];
 
 /**
- * Créditos de legenda: nunca são fala de reunião, em QUALQUER posição. Sai só o
- * pedaço, não a frase: já veio "Amara.org porque a gente, semanalmente, faz uma
- * reunião…" num trecho só, e apagar o trecho levaria a fala real junto.
+ * Créditos de legenda e encerramento de vídeo: nunca são fala de reunião, em
+ * QUALQUER posição. Sai só o pedaço, não a frase: já veio "Amara.org porque a
+ * gente, semanalmente, faz uma reunião…" num trecho só, e apagar o trecho levaria
+ * a fala real junto. Medido no histórico em 2026-10-27: "Se inscreva no canal e
+ * ative o sininho para receber notificações de novos vídeos" 90×, "Para mais
+ * vídeos acesse www.…" 14×, vindos colados em fala real.
+ *
+ * "Até o próximo vídeo" e "se inscreva no canal" SOZINHOS ficam fora daqui (são
+ * unidade inteira em STOCK_PHRASES): numa agência, falar de vídeo e canal é
+ * assunto de reunião. Aqui só entra o que tem a cauda inconfundível (sininho, URL).
  */
-const ALWAYS_JUNK = /(?:saiba mais em )?www\.opusdei\.pt|legendas? pela comunidade(?: d[aoe])?(?: amara\.org)?|amara\.org/giu;
+const ALWAYS_JUNK = new RegExp([
+  String.raw`(?:saiba mais em )?www\.opusdei\.pt`,
+  String.raw`legendas? pela comunidade(?: d[aoe])?(?: amara\.org)?`,
+  String.raw`amara\.org`,
+  String.raw`(?:(?:e )?(?:se )?inscreva(?:-se)? no (?:nosso )?canal,? e )?ative o sininho(?: para receber (?:as )?notifica\S* (?:de|sobre) (?:novos )?vídeos)?\.?`,
+  String.raw`para mais vídeos,? acesse \S+`,
+].join('|'), 'giu');
+
+/** Só os créditos/encerramentos (sem a lista de despedidas). Para transcrição que
+ *  não vem do Whisper ao vivo (Fireflies), onde "Tchau, tchau." é despedida real. */
+export function stripJunk(text: string): string {
+  const out = text.replace(ALWAYS_JUNK, ' ').replace(/\s+/g, ' ').replace(/\s+([.,!?…])/gu, '$1').trim();
+  return /[\p{L}\p{N}]/u.test(out) ? out : '';
+}
 
 const STOCK = new Set(STOCK_PHRASES);
 
