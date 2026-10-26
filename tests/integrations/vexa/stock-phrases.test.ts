@@ -97,3 +97,8 @@ test('cauda "para receber as notificações" sai junto; ponto do crédito não d
   assert.equal(stripJunk('Aí acabou. se inscreva no canal e ative o sininho para receber as notificações. Equipe X.'), 'Aí acabou. Equipe X.');
   assert.equal(stripJunk('vou pegar uma água. Legendas pela comunidade Amara.org Legendas pela comunidade.'), 'vou pegar uma água.');
 });
+
+test('variantes "dos novos vídeos" e "Obrigado por assistir,"', () => {
+  assert.equal(stripJunk('e aí nisso... se inscreva no canal e ative o sininho para receber as notificações dos novos vídeos.'), 'e aí nisso...');
+  assert.equal(stripJunk('Obrigado por assistir, se inscreva no canal e ative o sininho para receber notificações de novos vídeos.'), '');
+});

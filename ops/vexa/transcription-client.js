@@ -8,8 +8,9 @@ const ALWAYS_JUNK = new RegExp('(?:' + [
     String.raw`(?:saiba mais em )?www\.opusdei\.pt`,
     String.raw`legendas? pela comunidade(?: d[aoe])?(?: amara\.org)?`,
     String.raw`amara\.org`,
-    String.raw`(?:(?:e )?(?:se )?inscreva(?:-se)? no (?:nosso )?canal,? e )?ative o sininho(?: para receber (?:as )?notifica\S*(?: (?:de|sobre) (?:novos )?vídeos)?)?`,
+    String.raw`(?:(?:e )?(?:se )?inscreva(?:-se)? no (?:nosso )?canal,? e )?ative o sininho(?: para receber (?:as )?notifica\S*(?: (?:de|sobre|dos|das) (?:novos )?vídeos)?)?`,
     String.raw`para mais vídeos,? acesse \S+`,
+    String.raw`obrigad[oa] por assistir(?:em)?,?`,
 ].join('|') + ')[.!]?', 'giu');
 const stripJunk = (t) => (t || '').replace(ALWAYS_JUNK, ' ').replace(/\s+/g, ' ').trim();
 // Frase que o Whisper inventa em silêncio. Medido em 2026-10-26 (whisper-1, pt):
