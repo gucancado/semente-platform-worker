@@ -5,6 +5,11 @@ import { isLowConfidenceSegment } from './confidence.js';
 // Créditos de legenda inventados: sai só o pedaço (já veio colado em fala real).
 const ALWAYS_JUNK = /(?:saiba mais em )?www\.opusdei\.pt|legendas? pela comunidade(?: d[aoe])?(?: amara\.org)?|amara\.org/giu;
 const stripJunk = (t) => (t || '').replace(ALWAYS_JUNK, ' ').replace(/\s+/g, ' ').trim();
+// Frase que o Whisper inventa em silêncio. Medido em 2026-10-26 (whisper-1, pt):
+// fala real vem com no_speech_prob 0; "Legendas pela comunidade Amara.org",
+// "Inscreva-se no canal", "e aí" vêm com 0,85-0,91 e avg_logprob -0,5 a -0,95,
+// que o isLowConfidenceSegment original deixa passar (exige logprob < -1,0).
+const isSilenceHallucination = (s) => s.no_speech_prob !== undefined && s.no_speech_prob > 0.7;
 /** A typed STT failure. `source` lets a consumer attribute it; `retryable` drives backoff. */
 export class TranscriptionError extends Error {
     kind;
@@ -121,14 +126,10 @@ export class TranscriptionClient {
                 `Content-Disposition: form-data; name="language"\r\n\r\n` +
                 `${language}\r\n`));
         }
-        // [PATCH BeeAds] Pede SEGMENT junto com word. Só com `word` a OpenAI não devolve
-        // `segments` (nem no_speech_prob/avg_logprob), e o filtro de confiança abaixo
-        // nunca rodava: toda frase que o Whisper inventa em silêncio passava.
-        for (const granularity of ['segment', 'word']) {
-            parts.push(Buffer.from(`--${boundary}\r\n` +
-                `Content-Disposition: form-data; name="timestamp_granularities[]"\r\n\r\n` +
-                `${granularity}\r\n`));
-        }
+        // Request word-level timestamps
+        parts.push(Buffer.from(`--${boundary}\r\n` +
+            `Content-Disposition: form-data; name="timestamp_granularities"\r\n\r\n` +
+            `word\r\n`));
         // Max speech segment duration (controls how often Whisper splits segments)
         if (this.maxSpeechDurationSec !== undefined) {
             parts.push(Buffer.from(`--${boundary}\r\n` +
@@ -184,7 +185,7 @@ export class TranscriptionClient {
             // If the model returned no segments we can't score, so keep its text as-is.
             // [PATCH BeeAds] + créditos de legenda que o Whisper inventa (nunca são fala).
             const segments = allSegments
-                .filter((s) => !isLowConfidenceSegment(s))
+                .filter((s) => !isLowConfidenceSegment(s) && !isSilenceHallucination(s))
                 .map((s) => ({ ...s, text: stripJunk(s.text) }))
                 .filter((s) => /[\p{L}\p{N}]/u.test(s.text));
             const text = allSegments.length
