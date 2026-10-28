@@ -102,3 +102,9 @@ test('variantes "dos novos vídeos" e "Obrigado por assistir,"', () => {
   assert.equal(stripJunk('e aí nisso... se inscreva no canal e ative o sininho para receber as notificações dos novos vídeos.'), 'e aí nisso...');
   assert.equal(stripJunk('Obrigado por assistir, se inscreva no canal e ative o sininho para receber notificações de novos vídeos.'), '');
 });
+
+test('crédito "Transcrição e Legendas www.intervoices.com" (visto ao vivo em 27/10)', () => {
+  assert.equal(stripJunk('Transcrição e Legendas www.intervoices.com'), '');
+  assert.equal(stripJunk('Fechamos o cronograma. Transcrição e Legendas www.intervoices.com'), 'Fechamos o cronograma.');
+  assert.equal(stripJunk('Legendas por intervoices.com'), '');
+});

@@ -10,6 +10,8 @@ const ALWAYS_JUNK = new RegExp('(?:' + [
     String.raw`amara\.org`,
     String.raw`(?:(?:e )?(?:se )?inscreva(?:-se)? no (?:nosso )?canal,? e )?ative o sininho(?: para receber (?:as )?notifica\S*(?: (?:de|sobre|dos|das) (?:novos )?vídeos)?)?`,
     String.raw`para mais vídeos,? acesse \S+`,
+    String.raw`(?:transcrição e )?legendas? (?:por |de )?(?:www\.)?intervoices\.com`,
+    String.raw`(?:www\.)?intervoices\.com`,
     String.raw`obrigad[oa] por assistir(?:em)?,?`,
 ].join('|') + ')[.!]?', 'giu');
 const stripJunk = (t) => (t || '').replace(ALWAYS_JUNK, ' ').replace(/\s+/g, ' ').trim();
