@@ -107,4 +107,7 @@ test('crédito "Transcrição e Legendas www.intervoices.com" (visto ao vivo em 
   assert.equal(stripJunk('Transcrição e Legendas www.intervoices.com'), '');
   assert.equal(stripJunk('Fechamos o cronograma. Transcrição e Legendas www.intervoices.com'), 'Fechamos o cronograma.');
   assert.equal(stripJunk('Legendas por intervoices.com'), '');
+  assert.equal(stripJunk('Tradução e Legendas www.intervoices.com'), '');
+  assert.equal(stripJunk('Transcrição e Legendas www.intervoices.com.br Olhando as contas.'), 'Olhando as contas.');
+  assert.equal(stripJunk('um certo preconceito. Contribuição e Legendas www.intervoices.com.br'), 'um certo preconceito.');
 });
