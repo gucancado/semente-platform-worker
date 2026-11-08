@@ -11,10 +11,10 @@
 //
 // Envs (com defaults sãos; só o token é obrigatório):
 //   COOLIFY_TOKEN     (obrigatório) Bearer token do Coolify — rotaciona ~mensal, NUNCA commitar
-//   COOLIFY_API       default http://5.78.199.192:8000/api/v1
+//   COOLIFY_API       default https://coolify.beeads.com.br/api/v1
 //   COOLIFY_APP_UUID  default qlp2n4fi3jlklisftet1y7cz (semente-platform-worker)
 
-const API = process.env.COOLIFY_API ?? 'http://5.78.199.192:8000/api/v1';
+const API = process.env.COOLIFY_API ?? 'https://coolify.beeads.com.br/api/v1';
 const UUID = process.env.COOLIFY_APP_UUID ?? 'qlp2n4fi3jlklisftet1y7cz';
 const TOKEN = process.env.COOLIFY_TOKEN;
 const dryRun = process.argv.includes('--dry-run');
