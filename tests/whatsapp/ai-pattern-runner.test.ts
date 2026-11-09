@@ -62,7 +62,7 @@ function judgments(n: number): PatternContext['judgments'] {
 
 function decision(over: Partial<PatternDecision> = {}): PatternDecision {
   return {
-    newTags: [], editTags: [], newLossReasons: [], editLossReasons: [],
+    tagSuggestions: [], newLossReasons: [], editLossReasons: [],
     guidanceSuggestions: [], backfillLossReasons: [], insightSummary: 'resumo', ...over,
   };
 }
@@ -189,13 +189,13 @@ test('runPatternForWorkspace: RETOMADA com decisão persistida → RE-APLICA a m
   let judgeCalls = 0;
   let applyArg: any = null;
   let finished: any = null;
-  const persistedDecision = decision({ newTags: [{ name: 'X', description: 'd', retroOpportunityIds: [] }], insightSummary: 'ok' });
+  const persistedDecision = decision({ tagSuggestions: [{ name: 'X', description: 'd', reason: 'r' }], insightSummary: 'ok' });
   const provider = fakeProvider({ judge: async () => { judgeCalls += 1; return { raw: '{}', usage: { inputTokens: 1, outputTokens: 1 } }; } });
   const deps: RunPatternDeps = {
     claimRun: async () => ({ runId: 9, resumed: true }), // retomada de failed
     getRunOutput: (async () => ({ decision: persistedDecision })) as any,
     buildContext: (async () => ctx({ judgments: judgments(10) })) as any,
-    applyDecision: (async (_p: any, _c: any, d: any, opts: any) => { applyArg = { d, opts }; return { applied: ['tag_created:1', 'insight:dedupe'], skipped: [] }; }) as any,
+    applyDecision: (async (_p: any, _c: any, d: any, opts: any) => { applyArg = { d, opts }; return { applied: ['suggestion:tag_new:X', 'insight:dedupe'], skipped: [] }; }) as any,
     finishRun: (async (_p: any, id: number, out: any) => { finished = { id, out }; }) as any,
     // buildPrompt/parseDecision/persistDecision NÃO devem ser chamados no resume.
     buildPrompt: () => { throw new Error('não deve montar prompt no resume'); },

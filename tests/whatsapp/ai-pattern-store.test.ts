@@ -128,7 +128,7 @@ test('finishPatternRun: output null vira objeto vazio (merge é no-op, não apag
 
 test('persistPatternDecision: MERGE de {decision} no output SEM mudar o status (segue running)', async () => {
   const { pool, calls } = makeFakePool([() => ({ rows: [] })]);
-  const decision = { newTags: [], insightSummary: 'x' };
+  const decision = { tagSuggestions: [], insightSummary: 'x' };
   await persistPatternDecision(pool, 7, decision);
   assert.equal(calls.length, 1);
   assert.match(calls[0].sql, /UPDATE whatsapp_ai_pattern_runs/);
@@ -277,6 +277,25 @@ test('listPendingSuggestions: filtra status=pending e mapeia snake_case → came
     status: 'pending', createdAt: '2026-07-27T10:00:00.000Z',
     resolvedAt: null, resolvedBy: null,
   }]);
+});
+
+test('listPendingSuggestions sem kind não traz tag_new; com kind filtra por ele', async () => {
+  const { pool, calls } = makeFakePool([() => ({ rows: [] }), () => ({ rows: [] })]);
+  await listPendingSuggestions(pool, 'ws-1');
+  assert.match(calls[0].sql, /kind\s*<>\s*'tag_new'/);
+  assert.deepEqual(calls[0].params, ['ws-1']);
+  await listPendingSuggestions(pool, 'ws-1', 'tag_new');
+  assert.match(calls[1].sql, /kind\s*=\s*\$2/);
+  assert.deepEqual(calls[1].params, ['ws-1', 'tag_new']);
+});
+
+test('insertSuggestion tag_new: dedupe por nome (case-insensitive) entre as pendentes', async () => {
+  const { pool, calls } = makeFakePool([() => ({ rows: [{ id: 9 }] })]);
+  const payload = { name: 'Telhado', description: null, reason: 'r' };
+  assert.equal(await insertSuggestion(pool, 'ws-1', 'tag_new', payload), 9);
+  assert.match(calls[0].sql, /lower\(payload->>'name'\)\s*=\s*lower\(\$3::jsonb->>'name'\)/);
+  assert.match(calls[0].sql, /kind\s*=\s*\$2/);
+  assert.deepEqual(calls[0].params, ['ws-1', 'tag_new', JSON.stringify(payload)]);
 });
 
 // ── resolveSuggestion ─────────────────────────────────────────────────────────

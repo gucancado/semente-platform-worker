@@ -43,7 +43,7 @@ const positiveInt = (value: unknown): number | null => {
 };
 
 /** kind da sugestão → campo de whatsapp_workspace_settings que ela edita. */
-const SUGGESTION_KIND_TO_SETTINGS_FIELD: Record<SuggestionKind, keyof SettingsPatch> = {
+const SUGGESTION_KIND_TO_SETTINGS_FIELD: Record<Exclude<SuggestionKind, 'tag_new'>, keyof SettingsPatch> = {
   guidance_lead: 'aiLeadGuidance',
   guidance_qualified: 'aiQualifiedGuidance',
 };
@@ -110,7 +110,8 @@ export function registerSuggestionRoutes(app: FastifyInstance, deps: {
     return suggestion;
   };
 
-  // GET /whatsapp/suggestions?number_id=&status=pending — fila de revisão humana
+  // GET /whatsapp/suggestions?number_id=&status=pending[&kind=] — sem `kind` só guidance_*
+  // (tag_new é pedida explicitamente pela tela de tags) — fila de revisão humana
   // (member lê). `status` só aceita 'pending' hoje (única listagem que o store
   // expõe e a única que a UI consome — sugestões applied/dismissed já saíram
   // da fila e não precisam de uma view própria ainda).
@@ -120,8 +121,15 @@ export function registerSuggestionRoutes(app: FastifyInstance, deps: {
     if (query.status !== undefined && query.status !== 'pending') {
       return reply.code(400).send({ error: 'invalid status' });
     }
+    let kind: SuggestionKind | undefined;
+    if (query.kind !== undefined) {
+      if (query.kind !== 'tag_new' && query.kind !== 'guidance_lead' && query.kind !== 'guidance_qualified') {
+        return reply.code(400).send({ error: 'invalid kind' });
+      }
+      kind = query.kind;
+    }
     if (!await gateMember(req, reply, num.workspaceId, authz)) return;
-    const suggestions = await listPendingSuggestions(deps.pool, num.workspaceId);
+    const suggestions = await listPendingSuggestions(deps.pool, num.workspaceId, kind);
     logAccess(deps.pool, { actor: req.actingUser, action: 'list_suggestions', workspaceId: num.workspaceId, numberId: num.id });
     return reply.send({ schema: 'whatsapp_v1', context: tenantContext(num), suggestions: suggestions.map(toWireSuggestion) });
   });
@@ -143,6 +151,10 @@ export function registerSuggestionRoutes(app: FastifyInstance, deps: {
     // passa por aqui normalmente.
     if (suggestion.status !== 'pending') {
       return reply.code(409).send({ error: 'suggestion already resolved', status: suggestion.status });
+    }
+    // tag_new não tem efeito no worker: a tag nasce no painel (mark-applied registra isso).
+    if (suggestion.kind === 'tag_new') {
+      return reply.code(400).send({ error: 'tag_new cannot be applied here', hint: 'use mark-applied' });
     }
     const payload = suggestion.payload as { suggested?: unknown } | null;
     if (typeof payload?.suggested !== 'string') {
@@ -174,6 +186,23 @@ export function registerSuggestionRoutes(app: FastifyInstance, deps: {
       req.log?.error?.({ err: (err as Error).message }, 'apply_suggestion: patchSettings falhou — sugestão revertida pra pending');
       return reply.code(500).send({ error: 'failed to apply guidance' });
     }
+  });
+
+  // POST /whatsapp/suggestions/:id/mark-applied — admin. Só tag_new: o painel já criou a
+  // tag no vocabulário; aqui apenas se fecha a sugestão, sem tocar settings nem tags.
+  app.post('/whatsapp/suggestions/:id/mark-applied', { preHandler: auth }, async (req: any, reply) => {
+    if (!req.actingUser) return reply.code(400).send({ error: 'x-acting-user required' });
+    const id = positiveInt(req.params.id);
+    if (!id) return reply.code(400).send({ error: 'id must be numeric' });
+    const body = req.body ?? {};
+    const num = await loadNumber(body.number_id, reply); if (!num) return;
+    if (!await gateAdmin(req, reply, num.workspaceId, authz)) return;
+    const suggestion = await loadScopedSuggestion(id, num.workspaceId, reply); if (!suggestion) return;
+    if (suggestion.kind !== 'tag_new') return reply.code(400).send({ error: 'only tag_new can be marked applied' });
+    const resolved = await resolveSuggestion(deps.pool, id, 'applied', req.actingUser);
+    if (!resolved) return reply.code(409).send({ error: 'suggestion already resolved' });
+    logAccess(deps.pool, { actor: req.actingUser, action: 'mark_suggestion_applied', workspaceId: num.workspaceId, numberId: num.id });
+    return reply.send({ schema: 'whatsapp_v1', context: tenantContext(num), suggestion: toWireSuggestion(resolved) });
   });
 
   // POST /whatsapp/suggestions/:id/dismiss — admin. Não toca settings.

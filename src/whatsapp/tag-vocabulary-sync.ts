@@ -67,10 +67,11 @@ export function planVocabularySync(mirror: MirrorRow[], snapshot: VocabRow[]): S
   }
 
   for (const v of snapshot) {
-    if (!v.deletedAt && !v.mergedIntoId) continue;
+    // mergedIntoId sozinho é uma mesclagem que falhou no meio: a tag segue viva no painel.
+    if (!v.deletedAt) continue;
     const m = byExt.get(v.id);
     if (!m || m.deletedAt) continue;
-    const deletedAt = v.deletedAt ?? new Date().toISOString();
+    const deletedAt = v.deletedAt;
     if (v.mergedIntoId) {
       merges.push({ op: 'merge', fromId: m.id, toExternalId: v.mergedIntoId });
       mergeTombstones.push({ op: 'tombstone', id: m.id, deletedAt });

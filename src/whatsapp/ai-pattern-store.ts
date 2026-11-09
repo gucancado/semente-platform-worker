@@ -16,7 +16,7 @@
 import type { Pool } from 'pg';
 
 export type PatternRunStatus = 'running' | 'done' | 'failed';
-export type SuggestionKind = 'guidance_lead' | 'guidance_qualified';
+export type SuggestionKind = 'guidance_lead' | 'guidance_qualified' | 'tag_new';
 export type SuggestionStatus = 'pending' | 'applied' | 'dismissed';
 
 export interface ClaimPatternRunResult {
@@ -240,13 +240,16 @@ export async function insertSuggestion(
   kind: SuggestionKind,
   payload: unknown,
 ): Promise<number | null> {
+  // tag_new coexiste em vários por workspace: o dedupe é por nome (mesmo índice parcial
+  // uq_ai_suggestions_pending_tag_new da migration 076), não por kind.
+  const sameName = kind === 'tag_new' ? ` AND lower(payload->>'name') = lower($3::jsonb->>'name')` : '';
   try {
     const { rows } = await pool.query(
       `INSERT INTO whatsapp_ai_suggestions (workspace_id, kind, payload)
        SELECT $1, $2, $3::jsonb
         WHERE NOT EXISTS (
           SELECT 1 FROM whatsapp_ai_suggestions
-           WHERE workspace_id = $1 AND kind = $2 AND status = 'pending'
+           WHERE workspace_id = $1 AND kind = $2 AND status = 'pending'${sameName}
         )
        RETURNING id`,
       [workspaceId, kind, JSON.stringify(payload)],
@@ -301,14 +304,21 @@ export async function listInsights(pool: Pool, workspaceId: string, limit: numbe
   return rows.map(mapInsight);
 }
 
-/** Sugestões pendentes de um workspace, mais antigas primeiro (fila de revisão humana). */
-export async function listPendingSuggestions(pool: Pool, workspaceId: string): Promise<Suggestion[]> {
+/**
+ * Sugestões pendentes de um workspace, mais antigas primeiro (fila de revisão humana).
+ * Sem `kind` devolve só as de guidance: a tela atual não conhece `tag_new` e quebraria.
+ */
+export async function listPendingSuggestions(
+  pool: Pool,
+  workspaceId: string,
+  kind?: SuggestionKind,
+): Promise<Suggestion[]> {
   const { rows } = await pool.query(
     `SELECT id, workspace_id, kind, payload, status, created_at, resolved_at, resolved_by
        FROM whatsapp_ai_suggestions
-      WHERE workspace_id = $1 AND status = 'pending'
+      WHERE workspace_id = $1 AND status = 'pending' AND ${kind ? 'kind = $2' : "kind <> 'tag_new'"}
       ORDER BY created_at ASC`,
-    [workspaceId],
+    kind ? [workspaceId, kind] : [workspaceId],
   );
   return rows.map(mapSuggestion);
 }

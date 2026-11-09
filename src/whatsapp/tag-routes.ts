@@ -17,6 +17,14 @@ const positiveInt = (value: unknown): number | null => {
 const isDuplicate = (error: unknown): boolean =>
   typeof error === 'object' && error !== null && 'code' in error && error.code === '23505';
 
+// Com o espelho do painel ligado, o catálogo é somente leitura aqui: escrever
+// divergiria da fonte e o próximo sync desfaria a edição. Lida por request.
+const vocabularyReadOnly = (reply: any): boolean => {
+  if (process.env.TAG_VOCABULARY_SYNC !== 'on') return false;
+  reply.code(409).send({ error: 'tag_vocabulary_read_only', message: 'Tags são gerenciadas em /tags no painel' });
+  return true;
+};
+
 export function registerTagRoutes(app: FastifyInstance, deps: {
   pool: Pool; panelToken: string; authz?: RouteAuthz; logAccess?: LogAccessFn;
 }) {
@@ -42,6 +50,7 @@ export function registerTagRoutes(app: FastifyInstance, deps: {
   });
 
   app.post('/whatsapp/tags', { preHandler: auth }, async (req: any, reply) => {
+    if (vocabularyReadOnly(reply)) return;
     if (!req.actingUser) return reply.code(400).send({ error: 'x-acting-user required' });
     const body = req.body ?? {};
     const num = await loadNumber(body.number_id, reply); if (!num) return;
@@ -61,6 +70,7 @@ export function registerTagRoutes(app: FastifyInstance, deps: {
   });
 
   app.patch('/whatsapp/tags/:id', { preHandler: auth }, async (req: any, reply) => {
+    if (vocabularyReadOnly(reply)) return;
     if (!req.actingUser) return reply.code(400).send({ error: 'x-acting-user required' });
     const id = positiveInt(req.params.id);
     if (!id) return reply.code(400).send({ error: 'id must be numeric' });
@@ -94,6 +104,7 @@ export function registerTagRoutes(app: FastifyInstance, deps: {
   });
 
   app.delete('/whatsapp/tags/:id', { preHandler: auth }, async (req: any, reply) => {
+    if (vocabularyReadOnly(reply)) return;
     if (!req.actingUser) return reply.code(400).send({ error: 'x-acting-user required' });
     const id = positiveInt(req.params.id);
     if (!id) return reply.code(400).send({ error: 'id must be numeric' });

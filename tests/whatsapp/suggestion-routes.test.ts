@@ -38,7 +38,9 @@ function makePool() {
     // listPendingSuggestions
     if (/FROM whatsapp_ai_suggestions/.test(text) && /WHERE workspace_id = \$1 AND status = 'pending'/.test(text)) {
       const workspaceId = params[0];
-      const rows = [...state.suggestions.values()].filter(r => r.workspace_id === workspaceId && r.status === 'pending');
+      const kind = /kind = \$2/.test(text) ? params[1] : null;
+      const rows = [...state.suggestions.values()].filter(r => r.workspace_id === workspaceId && r.status === 'pending'
+        && (kind ? r.kind === kind : r.kind !== 'tag_new'));
       return { rows, rowCount: rows.length };
     }
     // getSuggestion (SELECT by id, sem filtro de workspace)
@@ -366,4 +368,66 @@ test('GET insights limit acima do cap (51) → 400', async () => {
   const res = await app.inject({ method: 'GET', url: '/whatsapp/insights?number_id=1&limit=51', headers });
   assert.equal(res.statusCode, 400);
   await app.close();
+});
+
+// ── tag_new ───────────────────────────────────────────────────────────────────
+
+const tagPayload = { name: 'Telhado', description: 'obra no telhado', reason: 'recorrente' };
+
+test('listar sugestões sem kind não traz tag_new; com kind=tag_new traz só elas', async () => {
+  const { pool, state } = makePool(); const app = appFor(pool);
+  seedSuggestion(state);
+  seedSuggestion(state, { id: 2, kind: 'tag_new', payload: tagPayload });
+  const all = await app.inject({ method: 'GET', url: '/whatsapp/suggestions?number_id=1&status=pending', headers });
+  assert.deepEqual(all.json().suggestions.map((x: any) => x.id), [1]);
+  const tags = await app.inject({ method: 'GET', url: '/whatsapp/suggestions?number_id=1&status=pending&kind=tag_new', headers });
+  assert.deepEqual(tags.json().suggestions.map((x: any) => x.id), [2]);
+  assert.deepEqual(tags.json().suggestions[0].payload, tagPayload);
+  const bad = await app.inject({ method: 'GET', url: '/whatsapp/suggestions?number_id=1&kind=outra', headers });
+  assert.equal(bad.statusCode, 400);
+  await app.close();
+});
+
+test('apply de tag_new → 400 e a sugestão segue pendente', async () => {
+  const { pool, state } = makePool(); const app = appFor(pool);
+  seedSuggestion(state, { id: 2, kind: 'tag_new', payload: tagPayload });
+  const res = await app.inject({ method: 'POST', url: '/whatsapp/suggestions/2/apply', headers, payload: { number_id: 1 } });
+  assert.equal(res.statusCode, 400);
+  assert.equal(state.suggestions.get(2)?.status, 'pending');
+  await app.close();
+});
+
+test('dismiss de tag_new funciona', async () => {
+  const { pool, state } = makePool(); const app = appFor(pool);
+  seedSuggestion(state, { id: 2, kind: 'tag_new', payload: tagPayload });
+  const res = await app.inject({ method: 'POST', url: '/whatsapp/suggestions/2/dismiss', headers, payload: { number_id: 1 } });
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.json().suggestion.status, 'dismissed');
+  await app.close();
+});
+
+test('mark-applied marca tag_new como aplicada sem tocar settings', async () => {
+  const { pool, state } = makePool(); const app = appFor(pool);
+  seedSuggestion(state, { id: 2, kind: 'tag_new', payload: tagPayload });
+  const res = await app.inject({ method: 'POST', url: '/whatsapp/suggestions/2/mark-applied', headers, payload: { number_id: 1 } });
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.json().suggestion.status, 'applied');
+  assert.equal(res.json().suggestion.resolved_by, 'user-1');
+  assert.equal(state.settings.size, 0);
+  const again = await app.inject({ method: 'POST', url: '/whatsapp/suggestions/2/mark-applied', headers, payload: { number_id: 1 } });
+  assert.equal(again.statusCode, 409);
+  await app.close();
+});
+
+test('mark-applied: guidance → 400, não-admin → 403, outro workspace → 404', async () => {
+  const { pool, state } = makePool(); const app = appFor(pool);
+  seedSuggestion(state, { id: 1 });
+  seedSuggestion(state, { id: 3, kind: 'tag_new', payload: tagPayload, workspace_id: 'ws-2' });
+  assert.equal((await app.inject({ method: 'POST', url: '/whatsapp/suggestions/1/mark-applied', headers, payload: { number_id: 1 } })).statusCode, 400);
+  assert.equal((await app.inject({ method: 'POST', url: '/whatsapp/suggestions/3/mark-applied', headers, payload: { number_id: 1 } })).statusCode, 404);
+  await app.close();
+  const denied = appFor(pool, { assertMember: async () => {}, assertAdmin: async () => { throw new AuthzError('forbidden', 'FORBIDDEN'); } });
+  seedSuggestion(state, { id: 2, kind: 'tag_new', payload: tagPayload });
+  assert.equal((await denied.inject({ method: 'POST', url: '/whatsapp/suggestions/2/mark-applied', headers, payload: { number_id: 1 } })).statusCode, 403);
+  await denied.close();
 });

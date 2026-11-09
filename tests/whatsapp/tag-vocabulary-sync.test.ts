@@ -61,6 +61,14 @@ test('merged_into_id gera merge antes do tombstone', () => {
   assert.deepEqual(ops[0], { op: 'merge', fromId: 1, toExternalId: 'b' });
 });
 
+test('tag viva com merged_into_id (mesclagem que falhou no meio) não sofre nada', () => {
+  const ops = planVocabularySync(
+    [m({ id: 1, externalId: 'a' }), m({ id: 2, externalId: 'b', name: 'Dest' })],
+    [v({ id: 'a', mergedIntoId: 'b', deletedAt: null }), v({ id: 'b', name: 'Dest' })],
+  );
+  assert.deepEqual(ops, []);
+});
+
 test('tag já tombada no espelho não gera op', () => {
   const ops = planVocabularySync(
     [m({ id: 1, externalId: 'a', deletedAt: '2026-10-01T00:00:00Z' })],

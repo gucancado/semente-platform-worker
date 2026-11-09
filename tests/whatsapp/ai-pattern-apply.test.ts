@@ -1,11 +1,8 @@
 // tests/whatsapp/ai-pattern-apply.test.ts  (PURO — fake pool routeado por marcador + deps injetados)
 //
 // Prova a ORQUESTRAÇÃO do aplicador do motor de IA nível 2 (Task E3, spec v3 §8):
-//   - tags novas: cor do ciclo TAG_COLORS (índice = count existentes % len), created_by='ai';
-//   - tags editadas: guard humano IN-SQL (NOT humanActorSql) → 0 rows = skip human_owned;
-//   - colisão de aplicação (race) → re-lê e trata como edit se não-humana, senão skip;
+//   - tags: NUNCA escreve em whatsapp_tags; sugestão de tag vira suggestion kind='tag_new';
 //   - motivos de perda novos (code = slug do label) e editados (guard);
-//   - retro-etiquetagem sob o lock do par, add-only, respeita tagsRemovedByHuman DAQUELA opp;
 //   - guidance → insertSuggestion {current, suggested, reason} (dedupe → skip);
 //   - insight → insertInsight (runId); backfill de loss_reason = skip note (não implementado).
 // A correção do SQL real (ON CONFLICT, guard) é do .db.test; aqui pool/lock/sticky/store
@@ -24,15 +21,10 @@ const NO_STICKY: StickyFlags = { isLead: false, isQualified: false, status: fals
 
 // ── roteamento por marcador de SQL ──────────────────────────────────────────────
 function routeKey(sql: string): string {
-  if (sql.includes('/* pat_apply:tag_count */')) return 'tag_count';
-  if (sql.includes('/* pat_apply:tag_insert */')) return 'tag_insert';
-  if (sql.includes('/* pat_apply:tag_reread */')) return 'tag_reread';
-  if (sql.includes('/* pat_apply:tag_update */')) return 'tag_update';
   if (sql.includes('/* pat_apply:loss_insert */')) return 'loss_insert';
   if (sql.includes('/* pat_apply:loss_reread */')) return 'loss_reread';
   if (sql.includes('/* pat_apply:loss_update */')) return 'loss_update';
   if (sql.includes('/* pat_apply:opp_pair */')) return 'opp_pair';
-  if (sql.includes('/* pat_apply:retro_tag_insert */')) return 'retro_tag_insert';
   if (sql.includes('/* pat_apply:backfill_state */')) return 'backfill_state';
   return 'other';
 }
@@ -73,12 +65,12 @@ function baseCtx(over: Partial<PatternContext> = {}): PatternContext {
 
 function baseDecision(over: Partial<PatternDecision> = {}): PatternDecision {
   return {
-    newTags: [], editTags: [], newLossReasons: [], editLossReasons: [],
+    tagSuggestions: [], newLossReasons: [], editLossReasons: [],
     guidanceSuggestions: [], backfillLossReasons: [], insightSummary: 'resumo da semana', ...over,
   };
 }
 
-/** deps com spies pro lock/sticky/store/insertEvent; captura chamadas. */
+/** deps com spies pro lock/sticky/store; captura chamadas. */
 function makeDeps(over: {
   runId?: number | null;
   stickyByOpp?: Record<number, StickyFlags>;
@@ -104,7 +96,6 @@ function makeDeps(over: {
       const client = { query: (_pool as any).__lockClientQuery };
       return fn(client);
     }) as any,
-    insertEvent: (async (_client: any, p: any) => { log.events.push(p); }) as any,
     applyOppPatchInTx: (async (_client: any, oppId: number, cur: any, patch: any, changedBy: string, pair: any) => {
       log.patches.push({ oppId, cur, patch, changedBy, pair });
       return over.patchResult ?? { oppChanged: true, threadChanged: false };
@@ -126,85 +117,6 @@ function makeDeps(over: {
 function wireLockClient(pool: Pool, client: { query: any }) {
   (pool as any).__lockClientQuery = client.query;
 }
-
-// =============================================================================
-// tags novas — cor do ciclo + created_by='ai'
-// =============================================================================
-
-test('tag nova: cor do ciclo TAG_COLORS (índice = count existentes % len), created_by=ai', async () => {
-  const { pool, calls } = makeFakePool({
-    tag_count: () => ({ rows: [{ n: 2 }] }),          // 2 existentes → slot 2
-    tag_insert: () => ({ rows: [{ id: 50 }] }),
-  });
-  const { deps } = makeDeps();
-  const res = await applyPatternDecision(pool, baseCtx(), baseDecision({
-    newTags: [{ name: 'Plano de saúde', description: 'aceita convênio', retroOpportunityIds: [] }],
-  }), deps);
-  assert.ok(res.applied.includes('tag_created:50'));
-  const ins = calls.find((c) => c.key === 'tag_insert')!;
-  assert.equal(ins.params[1], 'Plano de saúde');
-  assert.equal(ins.params[2], TAG_COLORS[2 % TAG_COLORS.length], 'cor = slot 2 do ciclo');
-  assert.equal(ins.params[3], 'aceita convênio');
-});
-
-test('2 tags novas: a cor avança só em INSERT real (colisão não consome slot)', async () => {
-  let n = 0;
-  const { pool, calls } = makeFakePool({
-    tag_count: () => ({ rows: [{ n: 0 }] }),
-    tag_insert: () => { n += 1; return n === 1 ? { rows: [], rowCount: 0 } : { rows: [{ id: 60 }] }; }, // 1ª colide, 2ª insere
-    tag_reread: () => ({ rows: [{ id: 41, updated_by: 'ai' }] }),
-    tag_update: () => ({ rows: [{ id: 41 }], rowCount: 1 }),
-  });
-  const { deps } = makeDeps();
-  await applyPatternDecision(pool, baseCtx(), baseDecision({
-    newTags: [
-      { name: 'A', description: 'da', retroOpportunityIds: [] },
-      { name: 'B', description: 'db', retroOpportunityIds: [] },
-    ],
-  }), deps);
-  const inserts = calls.filter((c) => c.key === 'tag_insert');
-  // a 2ª tag (que de fato insere) usa o slot 0 (a colisão não avançou o contador).
-  assert.equal(inserts[1].params[2], TAG_COLORS[0]);
-});
-
-// =============================================================================
-// tags editadas — guard humano IN-SQL
-// =============================================================================
-
-test('editTag: guard 0 rows (humano correu na frente) → skip human_owned', async () => {
-  const { pool } = makeFakePool({ tag_update: () => ({ rows: [], rowCount: 0 }) });
-  const { deps } = makeDeps();
-  const res = await applyPatternDecision(pool, baseCtx(), baseDecision({
-    editTags: [{ id: 12, description: 'nova' }],
-  }), deps);
-  assert.ok(res.skipped.includes('tag_edit:12:human_owned'));
-  assert.ok(!res.applied.some((a) => a.startsWith('tag_edited')));
-});
-
-test('editTag: UPDATE afeta 1 row → tag_edited', async () => {
-  const { pool, calls } = makeFakePool({ tag_update: () => ({ rows: [{ id: 12 }], rowCount: 1 }) });
-  const { deps } = makeDeps();
-  const res = await applyPatternDecision(pool, baseCtx(), baseDecision({
-    editTags: [{ id: 12, description: 'nova' }],
-  }), deps);
-  assert.ok(res.applied.includes('tag_edited:12'));
-  const upd = calls.find((c) => c.key === 'tag_update')!;
-  assert.deepEqual(upd.params, [12, 'ws', 'nova']);
-});
-
-test('tag nova colide na aplicação com tag HUMANA → não edita a description (skip human_owned)', async () => {
-  const { pool } = makeFakePool({
-    tag_count: () => ({ rows: [{ n: 0 }] }),
-    tag_insert: () => ({ rows: [], rowCount: 0 }),               // conflito
-    tag_reread: () => ({ rows: [{ id: 30, updated_by: 'uuid-humano' }] }),
-    tag_update: () => ({ rows: [], rowCount: 0 }),               // guard barra o humano
-  });
-  const { deps } = makeDeps();
-  const res = await applyPatternDecision(pool, baseCtx(), baseDecision({
-    newTags: [{ name: 'Bairro X', description: 'tenta reescrever', retroOpportunityIds: [] }],
-  }), deps);
-  assert.ok(res.skipped.includes('tag_conflict:Bairro X:human_owned'));
-});
 
 // =============================================================================
 // motivos de perda
@@ -229,72 +141,6 @@ test('editLossReason: guard 0 rows → skip human_owned', async () => {
     editLossReasons: [{ id: 9, description: 'melhor' }],
   }), deps);
   assert.ok(res.skipped.includes('loss_edit:9:human_owned'));
-});
-
-// =============================================================================
-// retro-etiquetagem — lock por par, add-only, respeita sticky
-// =============================================================================
-
-test('retro-etiquetagem: sob lock do par, respeita tagsRemovedByHuman DAQUELA opp', async () => {
-  // opp 41: humano removeu 'Plano' → skip; opp 55: sem remoção → insere + evento.
-  const { pool, client, calls } = makeFakePool({
-    tag_count: () => ({ rows: [{ n: 0 }] }),
-    tag_insert: () => ({ rows: [{ id: 50 }] }),
-    opp_pair: (p) => ({ rows: [{ whatsapp_number_id: 1, identifier: `c${p[0]}`, workspace_id: 'ws' }] }),
-    retro_tag_insert: () => ({ rows: [{ tag_id: 50 }], rowCount: 1 }),
-  });
-  wireLockClient(pool, client);
-  const { deps, log } = makeDeps({
-    stickyByOpp: { 41: { ...NO_STICKY, tagsRemovedByHuman: ['Plano'] }, 55: NO_STICKY },
-  });
-  const res = await applyPatternDecision(pool, baseCtx({ opportunityIds: [41, 55] }), baseDecision({
-    newTags: [{ name: 'Plano', description: 'd', retroOpportunityIds: [41, 55] }],
-  }), deps);
-  assert.ok(res.skipped.includes('retro_tag:41:50:removed_by_human'), 'opp com remoção humana pulada');
-  assert.ok(res.applied.includes('retro_tag:55:50'), 'opp sem remoção etiquetada');
-  assert.equal(log.events.length, 1, 'um evento tag_added (só a 55)');
-  assert.equal(log.events[0].field, 'tag_added');
-  assert.equal(log.events[0].changedBy, 'ai');
-  assert.equal(log.events[0].opportunityId, 55);
-  // opp_pair lido pros 2; retro insert só pra 55.
-  assert.equal(calls.filter((c) => c.key === 'opp_pair').length, 2);
-  assert.equal(calls.filter((c) => c.key === 'retro_tag_insert').length, 1);
-});
-
-test('retro-etiquetagem: opp de outro workspace / inexistente → skip not_found (sem lock útil)', async () => {
-  const { pool, client } = makeFakePool({
-    tag_count: () => ({ rows: [{ n: 0 }] }),
-    tag_insert: () => ({ rows: [{ id: 50 }] }),
-    opp_pair: () => ({ rows: [{ whatsapp_number_id: 1, identifier: 'x', workspace_id: 'OUTRO' }] }),
-  });
-  wireLockClient(pool, client);
-  const { deps, log } = makeDeps();
-  const res = await applyPatternDecision(pool, baseCtx({ opportunityIds: [41] }), baseDecision({
-    newTags: [{ name: 'Plano', description: 'd', retroOpportunityIds: [41] }],
-  }), deps);
-  assert.ok(res.skipped.includes('retro_tag:41:50:not_found'));
-  assert.equal(log.events.length, 0);
-});
-
-test('retro-etiquetagem: MESMA opp em 2 tags trava o par UMA vez (agrupado por opp)', async () => {
-  const { pool, client, calls } = makeFakePool({
-    tag_count: () => ({ rows: [{ n: 0 }] }),
-    tag_insert: (p) => ({ rows: [{ id: p[1] === 'A' ? 50 : 51 }] }),
-    opp_pair: () => ({ rows: [{ whatsapp_number_id: 1, identifier: 'c', workspace_id: 'ws' }] }),
-    retro_tag_insert: () => ({ rows: [{ tag_id: 1 }], rowCount: 1 }),
-  });
-  wireLockClient(pool, client);
-  const { deps, log } = makeDeps();
-  const res = await applyPatternDecision(pool, baseCtx({ opportunityIds: [41] }), baseDecision({
-    newTags: [
-      { name: 'A', description: 'da', retroOpportunityIds: [41] },
-      { name: 'B', description: 'db', retroOpportunityIds: [41] },
-    ],
-  }), deps);
-  assert.equal(calls.filter((c) => c.key === 'opp_pair').length, 1, 'par lido uma vez só');
-  assert.equal(log.stickyCalls.length, 1, 'sticky computado uma vez só');
-  assert.ok(res.applied.includes('retro_tag:41:50'));
-  assert.ok(res.applied.includes('retro_tag:41:51'));
 });
 
 // =============================================================================
@@ -425,4 +271,37 @@ test('backfill: opp de outro workspace → skip not_found sem abrir estado', asy
   }), deps);
   assert.ok(res.skipped.includes('backfill_loss:71:not_found'));
   assert.equal(log.patches.length, 0);
+});
+
+// =============================================================================
+// sugestão de tag — o worker não escreve mais no catálogo de tags
+// =============================================================================
+
+test('aplicador insere sugestão tag_new e não escreve em whatsapp_tags', async () => {
+  const { pool } = makeFakePool({});
+  const queries: string[] = [];
+  const spy = { ...pool, query: (sql: string, p?: any[]) => { queries.push(sql); return (pool as any).query(sql, p); } } as unknown as Pool;
+  const { deps, log } = makeDeps({ suggestionResult: (kind) => (kind === 'tag_new' ? 77 : 100) });
+  const res = await applyPatternDecision(spy, baseCtx(), baseDecision({
+    tagSuggestions: [
+      { name: 'Telhado', description: 'obra no telhado', reason: 'recorrente' },
+      { name: 'Piso', description: null, reason: 'r' },
+    ],
+  }), deps);
+  const tagNew = log.suggestions.filter((x) => x.kind === 'tag_new');
+  assert.deepEqual(tagNew.map((x) => x.payload), [
+    { name: 'Telhado', description: 'obra no telhado', reason: 'recorrente' },
+    { name: 'Piso', description: null, reason: 'r' },
+  ]);
+  assert.ok(res.applied.includes('suggestion:tag_new:Telhado'));
+  assert.equal(queries.some((q) => /whatsapp_tags/.test(q)), false);
+});
+
+test('sugestão tag_new repetida (dedupe por nome) vira skip', async () => {
+  const { pool } = makeFakePool({});
+  const { deps } = makeDeps({ suggestionResult: () => null });
+  const res = await applyPatternDecision(pool, baseCtx(), baseDecision({
+    tagSuggestions: [{ name: 'Telhado', description: null, reason: 'r' }],
+  }), deps);
+  assert.ok(res.skipped.includes('suggestion:tag_new:Telhado:dedupe'));
 });

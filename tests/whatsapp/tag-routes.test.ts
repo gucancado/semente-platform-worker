@@ -116,3 +116,46 @@ test('tag de outro workspace retorna 404 em PATCH e DELETE', async () => {
   assert.equal((await app.inject({ method: 'DELETE', url: '/whatsapp/tags/1?number_id=1', headers })).statusCode, 404);
   await app.close();
 });
+
+test('rotas de escrita devolvem 409 com sync ligado', async () => {
+  const prev = process.env.TAG_VOCABULARY_SYNC;
+  process.env.TAG_VOCABULARY_SYNC = 'on';
+  try {
+    const { pool, state } = makePool(); const app = appFor(pool);
+    state.tags.push({ id: 1, workspace_id: 'ws-1', name: 'VIP', color: 'red' });
+    const expected = { error: 'tag_vocabulary_read_only', message: 'Tags são gerenciadas em /tags no painel' };
+    const post = await app.inject({ method: 'POST', url: '/whatsapp/tags', headers,
+      payload: { number_id: 1, name: 'Nova', color: 'red' } });
+    const patch = await app.inject({ method: 'PATCH', url: '/whatsapp/tags/1', headers,
+      payload: { number_id: 1, color: 'blue' } });
+    const del = await app.inject({ method: 'DELETE', url: '/whatsapp/tags/1?number_id=1', headers });
+    for (const res of [post, patch, del]) {
+      assert.equal(res.statusCode, 409); assert.deepEqual(res.json(), expected);
+    }
+    assert.equal(state.tags.length, 1); assert.equal(state.tags[0].color, 'red');
+    const get = await app.inject({ method: 'GET', url: '/whatsapp/tags?number_id=1', headers });
+    assert.equal(get.statusCode, 200);
+    await app.close();
+  } finally {
+    if (prev === undefined) delete process.env.TAG_VOCABULARY_SYNC; else process.env.TAG_VOCABULARY_SYNC = prev;
+  }
+});
+
+test('sem sync as rotas de escrita seguem funcionando', async () => {
+  const prev = process.env.TAG_VOCABULARY_SYNC;
+  delete process.env.TAG_VOCABULARY_SYNC;
+  try {
+    const { pool, state } = makePool(); const app = appFor(pool);
+    const post = await app.inject({ method: 'POST', url: '/whatsapp/tags', headers,
+      payload: { number_id: 1, name: 'Nova', color: 'red' } });
+    assert.equal(post.statusCode, 200);
+    const id = post.json().tag.id;
+    assert.equal((await app.inject({ method: 'PATCH', url: `/whatsapp/tags/${id}`, headers,
+      payload: { number_id: 1, color: 'blue' } })).statusCode, 200);
+    assert.equal((await app.inject({ method: 'DELETE', url: `/whatsapp/tags/${id}?number_id=1`, headers })).statusCode, 200);
+    assert.equal(state.tags.length, 0);
+    await app.close();
+  } finally {
+    if (prev !== undefined) process.env.TAG_VOCABULARY_SYNC = prev;
+  }
+});

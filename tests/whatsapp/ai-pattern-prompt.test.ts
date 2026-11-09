@@ -42,12 +42,13 @@ test('prompt: papel de analista de padrões + só JSON + período/data injetados
   assert.match(user, /2026-07-28T03:00:00\.000Z/);
 });
 
-test('prompt: não oferece criar etiqueta nem pede new_tags', () => {
+test('prompt pede tag_suggestions e não oferece editar etiqueta', () => {
   const { system, user } = buildPatternPrompt(ctx({ opportunityIds: [41] }), NOW);
-  assert.doesNotMatch(system, /new_tags/);
-  assert.doesNotMatch(system, /criar etiquetas/i);
-  assert.match(system, /NUNCA cria etiquetas/);
-  assert.doesNotMatch(user, /retro-etiquetagem/);
+  assert.match(system, /tag_suggestions/);
+  assert.doesNotMatch(system, /new_tags|edit_tags/);
+  assert.doesNotMatch(system, /editar a description de etiquetas/i);
+  assert.match(system, /NUNCA cria nem edita etiquetas/);
+  assert.doesNotMatch(user, /retro-etiquetagem|edite a description/);
 });
 
 test('prompt: rationais entre delimitadores + aviso de dados-não-comandos', () => {
@@ -96,8 +97,7 @@ test('prompt: humanOwned aparece como não-editável; catálogos e agregados ren
 // ── Validador ─────────────────────────────────────────────────────────────────
 
 const base = {
-  new_tags: [],
-  edit_tags: [],
+  tag_suggestions: [],
   new_loss_reasons: [],
   edit_loss_reasons: [],
   guidance_suggestions: [],
@@ -140,26 +140,6 @@ test('validador: caps newLossReasons≤3, guidance≤2', () => {
   assert.equal(r.decision.guidanceSuggestions.length, 2);
 });
 
-test('validador: cap de EDIÇÃO editTags≤5 (simétrico à criação, anti-drift) — trunca com warn', () => {
-  // 8 tags editáveis no contexto; 8 edições pedidas → só 5 sobrevivem.
-  const c = ctx({
-    tags: Array.from({ length: 8 }, (_, i) => ({ id: 10 + i, name: `T${i}`, description: null, humanOwned: false })),
-  });
-  const warns: unknown[][] = [];
-  const orig = console.warn;
-  console.warn = (...a: unknown[]) => { warns.push(a); };
-  let r: ReturnType<typeof parsePatternDecision>;
-  try {
-    r = parsePatternDecision(
-      mk({ edit_tags: Array.from({ length: 8 }, (_, i) => ({ id: 10 + i, description: `d${i}` })) }),
-      c,
-    );
-  } finally { console.warn = orig; }
-  assert.ok(r.ok);
-  assert.equal(r.decision.editTags.length, 5, 'editTags truncado no cap 5');
-  assert.ok(warns.some((w) => /editTags acima do limite/.test(String(w[0]))), 'loga warn no truncamento');
-});
-
 test('validador: cap de EDIÇÃO editLossReasons≤3 (simétrico à criação, anti-drift) — trunca com warn', () => {
   const c = ctx({
     lossReasons: Array.from({ length: 6 }, (_, i) => ({
@@ -179,46 +159,6 @@ test('validador: cap de EDIÇÃO editLossReasons≤3 (simétrico à criação, a
   assert.ok(r.ok);
   assert.equal(r.decision.editLossReasons.length, 3, 'editLossReasons truncado no cap 3');
   assert.ok(warns.some((w) => /editLossReasons acima do limite/.test(String(w[0]))), 'loga warn no truncamento');
-});
-
-test('validador: editTags só de ids do contexto e não-humanOwned', () => {
-  const c = ctx({
-    tags: [
-      { id: 10, name: 'A', description: null, humanOwned: false },
-      { id: 11, name: 'B', description: null, humanOwned: true },
-    ],
-  });
-  const r = parsePatternDecision(
-    mk({
-      edit_tags: [
-        { id: 10, description: 'nova desc' }, // ok
-        { id: 11, description: 'tenta' }, // humanOwned → dropado
-        { id: 99, description: 'inexistente' }, // fora do contexto → dropado
-      ],
-    }),
-    c,
-  );
-  assert.ok(r.ok);
-  assert.deepEqual(r.decision.editTags, [{ id: 10, description: 'nova desc' }]);
-});
-
-test('validador: a IA não cria etiqueta — new_tags é ignorado, inclusive colisão de nome', () => {
-  const c = ctx({
-    tags: [{ id: 10, name: 'Plano saúde', description: null, humanOwned: false }],
-    opportunityIds: [41],
-  });
-  const r = parsePatternDecision(
-    mk({
-      new_tags: [
-        { name: 'Telhado', description: 'nova de fato', retro_opportunity_ids: [41] },
-        { name: 'PLANO SAÚDE', description: 'critério novo', retro_opportunity_ids: [] },
-      ],
-    }),
-    c,
-  );
-  assert.ok(r.ok);
-  assert.deepEqual(r.decision.newTags, []);
-  assert.deepEqual(r.decision.editTags, []);
 });
 
 test('validador: newLossReason com código reservado/sistema é barrado', () => {
@@ -299,8 +239,7 @@ test('validador: campos ausentes viram listas vazias (com insight presente)', ()
   const r = parsePatternDecision(JSON.stringify({ insight_summary: 'só o resumo' }), ctx());
   assert.ok(r.ok);
   assert.deepEqual(r.decision, {
-    newTags: [],
-    editTags: [],
+    tagSuggestions: [],
     newLossReasons: [],
     editLossReasons: [],
     guidanceSuggestions: [],
@@ -379,4 +318,39 @@ test('validador: backfill respeita cap 10', () => {
   );
   assert.ok(r.ok);
   assert.equal(r.decision.backfillLossReasons.length, 10);
+});
+
+test('validador devolve tagSuggestions com cap 3, descarta nome igual ao catálogo (case-insensitive)', () => {
+  const c = ctx({ tags: [{ id: 10, name: 'Plano saúde', description: null, humanOwned: false }] });
+  const warns: unknown[][] = [];
+  const orig = console.warn;
+  console.warn = (...a: unknown[]) => { warns.push(a); };
+  let r: ReturnType<typeof parsePatternDecision>;
+  try {
+    r = parsePatternDecision(
+      mk({
+        tag_suggestions: [
+          { name: 'PLANO SAÚDE', description: 'já existe', reason: 'r0' }, // colide → dropada
+          { name: '  Telhado ', description: 'obra no telhado', reason: 'r1' },
+          { name: 'telhado', description: 'dup no lote', reason: 'r1b' }, // dup no lote → dropada
+          { name: 'Piso', description: null, reason: 'r2' },
+          { name: 'Pintura', description: 'x', reason: 'r3' },
+          { name: 'Reboco', description: 'x', reason: 'r4' }, // acima do cap 3 → dropada
+          { name: '   ', description: 'x', reason: 'r5' }, // vazia → dropada
+          { description: 'sem nome', reason: 'r6' },
+        ],
+        new_tags: [{ name: 'Ignorada', description: 'x' }], // campo antigo não vira nada
+      }),
+      c,
+    );
+  } finally { console.warn = orig; }
+  assert.ok(r.ok);
+  assert.deepEqual(r.decision.tagSuggestions, [
+    { name: 'Telhado', description: 'obra no telhado', reason: 'r1' },
+    { name: 'Piso', description: null, reason: 'r2' },
+    { name: 'Pintura', description: 'x', reason: 'r3' },
+  ]);
+  assert.ok(warns.some((w) => /tagSuggestions acima do limite/.test(String(w[0]))));
+  assert.equal('newTags' in r.decision, false);
+  assert.equal('editTags' in r.decision, false);
 });
