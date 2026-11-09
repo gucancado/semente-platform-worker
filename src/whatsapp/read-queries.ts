@@ -256,7 +256,7 @@ export async function listThreads(pool: Pool, p: {
              SELECT jsonb_agg(jsonb_build_object('id', t.id, 'name', t.name, 'color', t.color)
                               ORDER BY t.name, t.id) AS tags
                FROM whatsapp_opportunity_tags x
-               JOIN whatsapp_tags t ON t.id = x.tag_id
+               JOIN whatsapp_tags t ON t.id = x.tag_id AND t.deleted_at IS NULL
               WHERE x.opportunity_id = o.id
            ) ot ON TRUE
           WHERE o.whatsapp_number_id = $1 AND o.identifier = a.identifier
@@ -323,8 +323,10 @@ export async function listThreads(pool: Pool, p: {
         AND ($17::bigint IS NULL OR EXISTS (
               SELECT 1 FROM whatsapp_opportunities oflt
               JOIN whatsapp_opportunity_tags oft ON oft.opportunity_id = oflt.id
+              JOIN whatsapp_tags oftt ON oftt.id = oft.tag_id AND oftt.deleted_at IS NULL
                WHERE oflt.whatsapp_number_id = $1 AND oflt.identifier = a.identifier
-                 AND oft.tag_id = $17
+                 AND (oftt.id = $17
+                      OR (SELECT external_id FROM whatsapp_tags WHERE id = $17 AND deleted_at IS NULL) = ANY(oftt.ancestor_external_ids))
             ))
         AND ($18::text[] IS NULL OR opp_col.opp_board_column = ANY($18))
         ${periodFilterSql}
@@ -533,7 +535,7 @@ export async function searchThreads(pool: Pool, p: {
              SELECT jsonb_agg(jsonb_build_object('id', t.id, 'name', t.name, 'color', t.color)
                               ORDER BY t.name, t.id) AS tags
                FROM whatsapp_opportunity_tags x
-               JOIN whatsapp_tags t ON t.id = x.tag_id
+               JOIN whatsapp_tags t ON t.id = x.tag_id AND t.deleted_at IS NULL
               WHERE x.opportunity_id = o.id
            ) ot ON TRUE
           WHERE o.whatsapp_number_id = $1 AND o.identifier = h.identifier
@@ -600,8 +602,10 @@ export async function searchThreads(pool: Pool, p: {
         AND ($14::bigint IS NULL OR EXISTS (
               SELECT 1 FROM whatsapp_opportunities oflt
               JOIN whatsapp_opportunity_tags oft ON oft.opportunity_id = oflt.id
+              JOIN whatsapp_tags oftt ON oftt.id = oft.tag_id AND oftt.deleted_at IS NULL
                WHERE oflt.whatsapp_number_id = $1 AND oflt.identifier = h.identifier
-                 AND oft.tag_id = $14
+                 AND (oftt.id = $14
+                      OR (SELECT external_id FROM whatsapp_tags WHERE id = $14 AND deleted_at IS NULL) = ANY(oftt.ancestor_external_ids))
             ))
         AND ($15::text[] IS NULL OR opp_col.opp_board_column = ANY($15))
         AND ($16::timestamptz IS NULL OR arr.first_at >= $16)

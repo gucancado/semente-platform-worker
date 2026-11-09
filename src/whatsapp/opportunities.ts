@@ -70,7 +70,7 @@ const mapScopedOpportunity = (r: any): ScopedOpportunity => ({
 // mais no `o.*`; mapOpportunity deriva a string sempre de is_qualified.
 const OPP_SELECT = `SELECT o.*,
   COALESCE((SELECT json_agg(json_build_object('id', t.id, 'name', t.name, 'color', t.color) ORDER BY t.name, t.id)
-    FROM whatsapp_opportunity_tags ot JOIN whatsapp_tags t ON t.id = ot.tag_id
+    FROM whatsapp_opportunity_tags ot JOIN whatsapp_tags t ON t.id = ot.tag_id AND t.deleted_at IS NULL
     WHERE ot.opportunity_id = o.id), '[]'::json) AS tags
   FROM whatsapp_opportunities o`;
 
@@ -120,7 +120,15 @@ export async function listOpportunities(pool: Pool, p: {
   if (isQ === null) where.push('o.is_qualified IS NULL');
   else if (isQ !== undefined) add('o.is_qualified = ?', isQ);
   if (p.identifier) add('o.identifier = ?', p.identifier);
-  if (p.tagId !== undefined) add(`EXISTS (SELECT 1 FROM whatsapp_opportunity_tags f WHERE f.opportunity_id=o.id AND f.tag_id=?)`, p.tagId);
+  if (p.tagId !== undefined) {
+    // Filtro por tag mãe traz a oportunidade da filha; external_id nulo (espelho não povoado) cai só no id.
+    values.push(p.tagId);
+    const n = `$${values.length}`;
+    where.push(`EXISTS (SELECT 1 FROM whatsapp_opportunity_tags f
+      JOIN whatsapp_tags ft ON ft.id = f.tag_id AND ft.deleted_at IS NULL
+      WHERE f.opportunity_id = o.id
+        AND (ft.id = ${n} OR (SELECT external_id FROM whatsapp_tags WHERE id = ${n} AND deleted_at IS NULL) = ANY(ft.ancestor_external_ids)))`);
+  }
   if (p.cursor) {
     values.push(p.cursor.createdAt, p.cursor.id);
     where.push(`(date_trunc('milliseconds', o.created_at), o.id) < ($${values.length - 1}::timestamptz, $${values.length}::bigint)`);
@@ -346,7 +354,7 @@ export async function createOpportunityV3(pool: Pool, p: {
     const isQ = p.isQualified ?? null;
     const tagNames = new Map<number, string>();
     if (p.tagIds?.length) {
-      const tags = await client.query(`SELECT id, name FROM whatsapp_tags WHERE workspace_id=$1 AND id=ANY($2::bigint[])`, [p.workspaceId, p.tagIds]);
+      const tags = await client.query(`SELECT id, name FROM whatsapp_tags WHERE workspace_id=$1 AND id=ANY($2::bigint[]) AND deleted_at IS NULL`, [p.workspaceId, p.tagIds]);
       if (tags.rows.length !== new Set(p.tagIds).size) return null;
       for (const row of tags.rows) tagNames.set(Number(row.id), String(row.name));
     }
@@ -641,7 +649,7 @@ export async function changeOpportunityTag(pool: Pool, p: {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    const tagResult = await client.query(`SELECT name FROM whatsapp_tags WHERE id=$1 AND workspace_id=$2`, [p.tagId, p.workspaceId]);
+    const tagResult = await client.query(`SELECT name FROM whatsapp_tags WHERE id=$1 AND workspace_id=$2 AND deleted_at IS NULL`, [p.tagId, p.workspaceId]);
     if (!tagResult.rows[0]) { await client.query('ROLLBACK'); return { found: false, changed: false }; }
     const result = p.action === 'add'
       ? await client.query(`INSERT INTO whatsapp_opportunity_tags (opportunity_id, tag_id) VALUES ($1,$2) ON CONFLICT DO NOTHING RETURNING tag_id`, [p.opportunityId, p.tagId])

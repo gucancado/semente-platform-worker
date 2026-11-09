@@ -188,7 +188,7 @@ board_opps AS (
          COALESCE(
            (SELECT jsonb_agg(jsonb_build_object('id', t.id, 'name', t.name, 'color', t.color)
                              ORDER BY t.name, t.id)
-              FROM whatsapp_opportunity_tags ot JOIN whatsapp_tags t ON t.id = ot.tag_id
+              FROM whatsapp_opportunity_tags ot JOIN whatsapp_tags t ON t.id = ot.tag_id AND t.deleted_at IS NULL
              WHERE ot.opportunity_id = o.id),
            '[]'::jsonb) AS tags
     FROM whatsapp_opportunities o

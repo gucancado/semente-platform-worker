@@ -500,16 +500,18 @@ export async function getStats(
     params.slice(0, 4),
   );
   const opportunityTagQuery = pool.query(
-    `SELECT t.name AS key, COUNT(DISTINCT o.id)::int AS cnt
+    `SELECT a.name AS key, COUNT(DISTINCT o.id)::int AS cnt
        FROM whatsapp_opportunities o
        JOIN whatsapp_opportunity_tags ot ON ot.opportunity_id = o.id
-       JOIN whatsapp_tags t ON t.id = ot.tag_id AND t.workspace_id = $1
+       JOIN whatsapp_tags t ON t.id = ot.tag_id AND t.workspace_id = $1 AND t.deleted_at IS NULL
+       JOIN whatsapp_tags a ON a.workspace_id = $1 AND a.deleted_at IS NULL
+                           AND (a.id = t.id OR a.external_id = ANY(t.ancestor_external_ids))
       WHERE o.workspace_id = $1
         AND ($2::int IS NULL OR o.whatsapp_number_id = $2)
         AND (o.loss_reason IS DISTINCT FROM 'nao_lead')
         AND ($3::timestamptz IS NULL OR o.created_at >= $3)
         AND ($4::timestamptz IS NULL OR o.created_at <= $4)
-      GROUP BY t.id, t.name`,
+      GROUP BY a.id, a.name`,
     params.slice(0, 4),
   );
   // byLossReason (novo, spec §10): distribuição das PERDAS por motivo, na janela por

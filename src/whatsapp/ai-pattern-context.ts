@@ -156,7 +156,7 @@ async function fetchJudgments(pool: Pool, workspaceId: string, periodStart: stri
 async function fetchTags(pool: Pool, workspaceId: string): Promise<PatternTag[]> {
   const { rows } = await pool.query(
     `/* pat:tags */ SELECT id, name, description, updated_by FROM whatsapp_tags
-      WHERE workspace_id = $1 ORDER BY lower(name), id`,
+      WHERE workspace_id = $1 AND deleted_at IS NULL ORDER BY lower(name), id`,
     [workspaceId],
   );
   return rows.map((r: any) => ({
@@ -306,7 +306,7 @@ export async function buildPatternContext(
         `SELECT t.name AS key, COUNT(DISTINCT o.id)::int AS cnt
            FROM whatsapp_opportunities o
            JOIN whatsapp_opportunity_tags ot ON ot.opportunity_id = o.id
-           JOIN whatsapp_tags t ON t.id = ot.tag_id AND t.workspace_id = $1
+           JOIN whatsapp_tags t ON t.id = ot.tag_id AND t.workspace_id = $1 AND t.deleted_at IS NULL
           WHERE o.workspace_id = $1 AND ${NOT_NAO_LEAD} AND ${WINDOW}
           GROUP BY t.id, t.name`,
         workspaceId,

@@ -358,7 +358,7 @@ export async function applyJudgment(
         const removedSet = new Set(removed.map((s) => s.toLowerCase()));
         for (const tagId of decision.tags) {
           const tagRes = await client.query(
-            `/* apply:tag_name */ SELECT name FROM whatsapp_tags WHERE id = $1 AND workspace_id = $2`,
+            `/* apply:tag_name */ SELECT name FROM whatsapp_tags WHERE id = $1 AND workspace_id = $2 AND deleted_at IS NULL`,
             [tagId, ctx.workspaceId],
           );
           const name = tagRes.rows[0]?.name;

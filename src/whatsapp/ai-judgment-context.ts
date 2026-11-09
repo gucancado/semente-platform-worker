@@ -215,7 +215,7 @@ async function fetchOpps(
             ) AS tag_names
        FROM whatsapp_opportunities o
        LEFT JOIN whatsapp_opportunity_tags ot ON ot.opportunity_id = o.id
-       LEFT JOIN whatsapp_tags t ON t.id = ot.tag_id
+       LEFT JOIN whatsapp_tags t ON t.id = ot.tag_id AND t.deleted_at IS NULL
       WHERE o.whatsapp_number_id = $1 AND o.identifier = $2 AND o.workspace_id = $3
       GROUP BY o.id
       ORDER BY o.created_at DESC, o.id DESC`,
@@ -243,8 +243,13 @@ async function fetchSettings(pool: Pool, workspaceId: string): Promise<JudgmentS
 
 async function fetchTags(pool: Pool, workspaceId: string): Promise<JudgmentTag[]> {
   const { rows } = await pool.query(
-    `/* ctx:tags */ SELECT id, name, description FROM whatsapp_tags
-      WHERE workspace_id = $1 ORDER BY lower(name), id`,
+    `/* ctx:tags */ SELECT t.id, t.name, t.description FROM whatsapp_tags t
+      WHERE t.workspace_id = $1 AND t.deleted_at IS NULL
+        AND NOT (t.parent_external_id IS NULL AND EXISTS (
+              SELECT 1 FROM whatsapp_tags c
+               WHERE c.workspace_id = t.workspace_id AND c.parent_external_id = t.external_id
+                 AND c.deleted_at IS NULL))
+      ORDER BY lower(t.name), t.id`,
     [workspaceId],
   );
   return rows.map((r: any) => ({ id: Number(r.id), name: r.name, description: r.description ?? null }));

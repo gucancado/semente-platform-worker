@@ -31,7 +31,7 @@ export async function listTags(pool: Pool, workspaceId: string): Promise<Catalog
     `SELECT t.id, t.name, t.color, COUNT(ot.opportunity_id)::int AS usage_count
        FROM whatsapp_tags t
        LEFT JOIN whatsapp_opportunity_tags ot ON ot.tag_id = t.id
-      WHERE t.workspace_id = $1
+      WHERE t.workspace_id = $1 AND t.deleted_at IS NULL
       GROUP BY t.id, t.name, t.color
       ORDER BY lower(t.name), t.id`,
     [workspaceId],
