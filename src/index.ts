@@ -56,6 +56,7 @@ import { OpenAISummaryLlm } from './meetings-summary/provider.js';
 import { r2Configured } from './integrations/r2.js';
 import { startCreationPoller } from './whatsapp/opportunity-pipeline.js';
 import { startAutoLossPoller } from './whatsapp/auto-loss.js';
+import { startTagVocabularySync } from './whatsapp/tag-vocabulary-sync.js';
 import { startJudgmentRunner } from './whatsapp/ai-judgment-runner.js';
 import { startPatternPoller } from './whatsapp/ai-pattern-runner.js';
 import { OpenAIJudgmentLlm } from './whatsapp/ai-llm.js';
@@ -411,6 +412,7 @@ async function main() {
   if (config.CRM_PIPELINE_ENABLED) {
     startCreationPoller(pool);
     startAutoLossPoller(pool);
+    startTagVocabularySync(pool);
     app.log.info('crm-pipeline: pollers de criação + auto-perda iniciados');
 
     // Runner do julgamento IA nível 1 (Fase D): tick horário + gate de janela
