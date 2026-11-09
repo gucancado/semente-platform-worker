@@ -112,3 +112,25 @@ test('runVocabularySync: violação de unicidade conta erro e segue', async () =
   assert.deepEqual(r, { ops: 1, errors: 1 });
   assert.ok(calls.includes('ROLLBACK'));
 });
+
+test('runVocabularySync: merge que falha não tomba a origem', async () => {
+  const seen: string[] = [];
+  const client = {
+    query: async (t: string) => {
+      const q = t.trim();
+      if (q.endsWith('FROM whatsapp_tags') && q.startsWith('SELECT id')) {
+        return { rows: [{ id: 1, workspace_id: 'w1', external_id: 'a', name: 'A', color: 'blue', description: null,
+          parent_external_id: null, ancestor_external_ids: [], deleted_at: null }] };
+      }
+      if (q.startsWith('SELECT d.id')) return { rows: [] };
+      if (q.startsWith('UPDATE whatsapp_tags SET deleted_at')) seen.push('tombstone');
+      return { rows: [] };
+    },
+    release: () => {},
+  };
+  const r = await runVocabularySync({ connect: async () => client } as any, async () => [
+    v({ id: 'a', mergedIntoId: 'b', deletedAt: '2026-11-01T00:00:00Z' }),
+  ]);
+  assert.deepEqual(r, { ops: 0, errors: 1 });
+  assert.deepEqual(seen, []);
+});
