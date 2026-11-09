@@ -42,6 +42,14 @@ test('prompt: papel de analista de padrões + só JSON + período/data injetados
   assert.match(user, /2026-07-28T03:00:00\.000Z/);
 });
 
+test('prompt: não oferece criar etiqueta nem pede new_tags', () => {
+  const { system, user } = buildPatternPrompt(ctx({ opportunityIds: [41] }), NOW);
+  assert.doesNotMatch(system, /new_tags/);
+  assert.doesNotMatch(system, /criar etiquetas/i);
+  assert.match(system, /NUNCA cria etiquetas/);
+  assert.doesNotMatch(user, /retro-etiquetagem/);
+});
+
 test('prompt: rationais entre delimitadores + aviso de dados-não-comandos', () => {
   const { system, user } = buildPatternPrompt(
     ctx({
@@ -83,7 +91,6 @@ test('prompt: humanOwned aparece como não-editável; catálogos e agregados ren
   assert.match(user, /ganho.*3|3.*ganho/);
   assert.match(user, /pediu orçamento/);
   assert.match(user, /12/); // judged
-  assert.match(user, /41, 55, 60|41,55,60/); // ids citáveis
 });
 
 // ── Validador ─────────────────────────────────────────────────────────────────
@@ -116,10 +123,9 @@ test('validador: extrai JSON de cercas markdown', () => {
   assert.ok(r.ok && r.decision.insightSummary === 'ok');
 });
 
-test('validador: caps newTags≤5, newLossReasons≤3, guidance≤2', () => {
+test('validador: caps newLossReasons≤3, guidance≤2', () => {
   const r = parsePatternDecision(
     mk({
-      new_tags: Array.from({ length: 8 }, (_, i) => ({ name: `T${i}`, description: 'd', retro_opportunity_ids: [] })),
       new_loss_reasons: Array.from({ length: 6 }, (_, i) => ({ label: `Motivo ${i}`, description: 'd' })),
       guidance_suggestions: [
         { kind: 'guidance_lead', suggested: 'A', reason: 'x' },
@@ -130,7 +136,6 @@ test('validador: caps newTags≤5, newLossReasons≤3, guidance≤2', () => {
     ctx(),
   );
   assert.ok(r.ok);
-  assert.equal(r.decision.newTags.length, 5);
   assert.equal(r.decision.newLossReasons.length, 3);
   assert.equal(r.decision.guidanceSuggestions.length, 2);
 });
@@ -197,36 +202,23 @@ test('validador: editTags só de ids do contexto e não-humanOwned', () => {
   assert.deepEqual(r.decision.editTags, [{ id: 10, description: 'nova desc' }]);
 });
 
-test('validador: newTag que colide (case-insensitive) vira editTag se não-humanOwned; senão descarta', () => {
+test('validador: a IA não cria etiqueta — new_tags é ignorado, inclusive colisão de nome', () => {
   const c = ctx({
-    tags: [
-      { id: 10, name: 'Plano saúde', description: null, humanOwned: false },
-      { id: 20, name: 'Bairro X', description: null, humanOwned: true },
-    ],
+    tags: [{ id: 10, name: 'Plano saúde', description: null, humanOwned: false }],
+    opportunityIds: [41],
   });
   const r = parsePatternDecision(
     mk({
       new_tags: [
-        { name: 'PLANO SAÚDE', description: 'critério novo', retro_opportunity_ids: [] }, // colide com 10 (editável) → edit
-        { name: 'bairro x', description: 'nao pode', retro_opportunity_ids: [] }, // colide com 20 (humanOwned) → descarta
-        { name: 'Telhado', description: 'nova de fato', retro_opportunity_ids: [] }, // genuinamente nova
+        { name: 'Telhado', description: 'nova de fato', retro_opportunity_ids: [41] },
+        { name: 'PLANO SAÚDE', description: 'critério novo', retro_opportunity_ids: [] },
       ],
     }),
     c,
   );
   assert.ok(r.ok);
-  assert.deepEqual(r.decision.newTags, [{ name: 'Telhado', description: 'nova de fato', retroOpportunityIds: [] }]);
-  assert.deepEqual(r.decision.editTags, [{ id: 10, description: 'critério novo' }]);
-});
-
-test('validador: retroOpportunityIds filtrados ao whitelist do contexto', () => {
-  const c = ctx({ opportunityIds: [41, 55, 60] });
-  const r = parsePatternDecision(
-    mk({ new_tags: [{ name: 'Nova', description: 'd', retro_opportunity_ids: [41, 99, 55, 41, 'x'] }] }),
-    c,
-  );
-  assert.ok(r.ok);
-  assert.deepEqual(r.decision.newTags[0]!.retroOpportunityIds, [41, 55]); // 99/'x' fora; dedupe
+  assert.deepEqual(r.decision.newTags, []);
+  assert.deepEqual(r.decision.editTags, []);
 });
 
 test('validador: newLossReason com código reservado/sistema é barrado', () => {
