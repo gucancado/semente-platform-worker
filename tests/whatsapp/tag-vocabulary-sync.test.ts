@@ -142,3 +142,57 @@ test('runVocabularySync: merge que falha não tomba a origem', async () => {
   assert.deepEqual(r, { ops: 0, errors: 1 });
   assert.deepEqual(seen, []);
 });
+
+test('mesclagem em cadeia aponta para o destino final', () => {
+  const ops = planVocabularySync(
+    [m({ id: 1, externalId: 'a' }), m({ id: 2, externalId: 'b' }), m({ id: 3, externalId: 'c' })],
+    [
+      v({ id: 'a', mergedIntoId: 'b', deletedAt: '2026-11-01T00:00:00Z' }),
+      v({ id: 'b', mergedIntoId: 'c', deletedAt: '2026-11-02T00:00:00Z' }),
+      v({ id: 'c', name: 'Final' }),
+    ],
+  );
+  const merges = ops.filter((o) => o.op === 'merge');
+  assert.deepEqual(merges, [
+    { op: 'merge', fromId: 1, toExternalId: 'c' },
+    { op: 'merge', fromId: 2, toExternalId: 'c' },
+  ]);
+});
+
+test('ciclo de mesclagem não gera merge nem tombstone', () => {
+  const ops = planVocabularySync(
+    [m({ id: 1, externalId: 'a' }), m({ id: 2, externalId: 'b' })],
+    [
+      v({ id: 'a', mergedIntoId: 'b', deletedAt: '2026-11-01T00:00:00Z' }),
+      v({ id: 'b', mergedIntoId: 'a', deletedAt: '2026-11-01T00:00:00Z' }),
+    ],
+  );
+  assert.deepEqual(ops, []);
+});
+
+test('tag viva com merged_into_id residual segue recebendo update', () => {
+  const ops = planVocabularySync(
+    [m({ id: 1, externalId: 'a', color: 'blue' })],
+    [v({ id: 'a', mergedIntoId: 'b', color: 'red' })],
+  );
+  assert.deepEqual(ops, [{ op: 'update', id: 1, fields: { color: 'red' } }]);
+});
+
+test('rename acumula o nome antigo em former_names e merge herda os da origem', async () => {
+  const sql: string[] = [];
+  const client = {
+    query: async (t: string) => {
+      const q = t.trim();
+      if (q.startsWith('SELECT id')) {
+        return { rows: [{ id: 1, workspace_id: 'w1', external_id: 'a', name: 'Velho', color: 'blue', description: null,
+          parent_external_id: null, ancestor_external_ids: [], deleted_at: null }] };
+      }
+      sql.push(q);
+      return { rows: [], rowCount: 1 };
+    },
+    release: () => {},
+  };
+  await runVocabularySync({ connect: async () => client } as any, async () => [v({ id: 'a', name: 'Novo' })]);
+  const upd = sql.find((s) => s.startsWith('UPDATE whatsapp_tags SET'))!;
+  assert.match(upd, /former_names/);
+});

@@ -358,12 +358,13 @@ export async function applyJudgment(
         const removedSet = new Set(removed.map((s) => s.toLowerCase()));
         for (const tagId of decision.tags) {
           const tagRes = await client.query(
-            `/* apply:tag_name */ SELECT name FROM whatsapp_tags WHERE id = $1 AND workspace_id = $2 AND deleted_at IS NULL`,
+            `/* apply:tag_name */ SELECT name, former_names FROM whatsapp_tags WHERE id = $1 AND workspace_id = $2 AND deleted_at IS NULL`,
             [tagId, ctx.workspaceId],
           );
           const name = tagRes.rows[0]?.name;
           if (name == null) { skipped.push(`tag:${tagId}:not_found`); continue; }
-          if (removedSet.has(String(name).toLowerCase())) { skipped.push(`tag:${tagId}:removed_by_human`); continue; }
+          const names = [name, ...(tagRes.rows[0]?.former_names ?? [])];
+          if (names.some((n) => removedSet.has(String(n).toLowerCase()))) { skipped.push(`tag:${tagId}:removed_by_human`); continue; }
           const ins = await client.query(
             `/* apply:tag_insert */ INSERT INTO whatsapp_opportunity_tags (opportunity_id, tag_id)
              VALUES ($1, $2) ON CONFLICT DO NOTHING RETURNING tag_id`,

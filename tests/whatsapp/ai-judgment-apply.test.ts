@@ -265,6 +265,24 @@ test('tags add-only respeitam removedByHuman; só as não-removidas entram', asy
   assert.equal(log.insertEvent[0].changedBy, 'ai');
 });
 
+test('tag renomeada: remoção humana pelo nome antigo (former_names) segue valendo, sem diferenciar caixa', async () => {
+  const order: string[] = [];
+  const insertedTags: number[] = [];
+  const { pool } = makeFakePool({
+    watermark: () => ({ rows: [{ m: new Date('2026-07-30T10:00:00.000Z') }] }),
+    open_opp: () => ({ rows: [openOppRow()] }),
+    claim: () => ({ rows: [{ id: 99 }] }),
+    last_closed: () => ({ rows: [] }),
+    tag_target: () => ({ rows: [{ id: 5 }] }),
+    tag_name: (p) => ({ rows: [p[0] === 10 ? { name: 'Cliente VIP', former_names: ['vip'] } : { name: 'novo', former_names: [] }] }),
+    tag_insert: (p) => { insertedTags.push(p[1]); return { rows: [{ tag_id: p[1] }], rowCount: 1 }; },
+  }, order);
+  const { deps } = makeDeps(order, { sticky: { ...NO_STICKY, tagsRemovedByHuman: ['VIP'] } });
+  const res = await applyJudgment(pool, baseCtx({ openOpp: openSnapshot() }), baseDecision({ tags: [10, 11] }), deps);
+  assert.ok(res.skipped.includes('tag:10:removed_by_human'));
+  assert.deepEqual(insertedTags, [11]);
+});
+
 test('closed_action=criar_nova sem opp aberta → cria opp ai + tags vão pra ela (sem trava herdada)', async () => {
   const order: string[] = [];
   const insertedTags: { opp: number; tag: number }[] = [];

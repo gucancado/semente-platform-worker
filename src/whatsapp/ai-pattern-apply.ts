@@ -208,7 +208,7 @@ export async function applyPatternDecision(
   }
 
   // ── sugestões de tag nova (humano decide no painel; dedupe por nome pendente) ──
-  for (const ts of decision.tagSuggestions) {
+  for (const ts of decision.tagSuggestions ?? []) {
     const id = await d.insertSuggestion(pool, ws, 'tag_new', {
       name: ts.name, description: ts.description, reason: ts.reason,
     });

@@ -305,3 +305,12 @@ test('sugestão tag_new repetida (dedupe por nome) vira skip', async () => {
   }), deps);
   assert.ok(res.skipped.includes('suggestion:tag_new:Telhado:dedupe'));
 });
+
+test('decisão salva no formato antigo (sem tagSuggestions) não quebra', async () => {
+  const { pool } = makeFakePool({});
+  const { deps } = makeDeps({});
+  const legacy = baseDecision() as any;
+  delete legacy.tagSuggestions;
+  const res = await applyPatternDecision(pool, baseCtx(), legacy, deps);
+  assert.ok(Array.isArray(res.applied));
+});

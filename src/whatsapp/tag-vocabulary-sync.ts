@@ -47,9 +47,24 @@ export function planVocabularySync(mirror: MirrorRow[], snapshot: VocabRow[]): S
   const merges: SyncOp[] = [];
   const mergeTombstones: SyncOp[] = [];
 
+  const snapById = new Map(snapshot.map((v) => [v.id, v]));
+  // A->B e B->C viram A->C e B->C. Ciclo: null (a origem não é tocada).
+  const finalDest = (v: VocabRow): string | null => {
+    const seen = new Set<string>([v.id]);
+    let cur = v.mergedIntoId;
+    while (cur) {
+      if (seen.has(cur)) return null;
+      seen.add(cur);
+      const next = snapById.get(cur);
+      if (!next || !next.deletedAt || !next.mergedIntoId) return cur;
+      cur = next.mergedIntoId;
+    }
+    return null;
+  };
+
   // Só tag viva do snapshot pode reivindicar o vínculo por nome.
   for (const v of snapshot) {
-    if (v.deletedAt || v.mergedIntoId) continue;
+    if (v.deletedAt) continue;
     const m = byExt.get(v.id);
     if (!m) {
       const key = `${v.workspaceId}|${v.name.toLowerCase()}`;
@@ -73,7 +88,9 @@ export function planVocabularySync(mirror: MirrorRow[], snapshot: VocabRow[]): S
     if (!m || m.deletedAt) continue;
     const deletedAt = v.deletedAt;
     if (v.mergedIntoId) {
-      merges.push({ op: 'merge', fromId: m.id, toExternalId: v.mergedIntoId });
+      const dest = finalDest(v);
+      if (!dest) continue;
+      merges.push({ op: 'merge', fromId: m.id, toExternalId: dest });
       mergeTombstones.push({ op: 'tombstone', id: m.id, deletedAt });
     } else {
       simpleTombstones.push({ op: 'tombstone', id: m.id, deletedAt });
@@ -110,6 +127,8 @@ async function applyOp(c: Q, op: SyncOp): Promise<void> {
       for (const [k, val] of Object.entries(op.fields)) {
         const col = COLS[k];
         if (!col) continue;
+        // O nome antigo vira apelido: o sticky da IA compara pelo nome em que o humano removeu.
+        if (k === 'name') sets.push('former_names = array_append(former_names, name)');
         params.push(val);
         sets.push(`${col} = $${params.length}`);
       }
@@ -130,6 +149,13 @@ async function applyOp(c: Q, op: SyncOp): Promise<void> {
         [op.fromId, dest.rows[0].id],
       );
       await c.query('DELETE FROM whatsapp_opportunity_tags WHERE tag_id = $1', [op.fromId]);
+      await c.query(
+        `UPDATE whatsapp_tags d
+            SET former_names = (SELECT COALESCE(array_agg(DISTINCT x), '{}') FROM unnest(d.former_names || s.former_names || ARRAY[s.name]) x),
+                synced_at = NOW(), updated_by = 'system:vocab'
+           FROM whatsapp_tags s WHERE s.id = $1 AND d.id = $2`,
+        [op.fromId, dest.rows[0].id],
+      );
       return;
     }
     case 'tombstone':
@@ -210,11 +236,13 @@ const TICK_MS = 60_000;
 export function startTagVocabularySync(pool: Pool): void {
   if (process.env.TAG_VOCABULARY_SYNC !== 'on') return;
   let running = false;
+  console.log('[tag-vocab] sync ligado (tick 60s)');
   const tick = async () => {
     if (running) return;
     running = true;
     try {
-      await runVocabularySync(pool, fetchVocabularySnapshot);
+      const r = await runVocabularySync(pool, fetchVocabularySnapshot);
+      if (r.ops > 0 || r.errors > 0) console.log('[tag-vocab] tick', JSON.stringify(r));
     } catch (err) {
       console.error('[tag-vocab] tick falhou:', (err as Error).message);
     } finally {

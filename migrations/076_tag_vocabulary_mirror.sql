@@ -5,6 +5,8 @@ ALTER TABLE whatsapp_tags ADD COLUMN IF NOT EXISTS parent_external_id uuid;
 ALTER TABLE whatsapp_tags ADD COLUMN IF NOT EXISTS ancestor_external_ids uuid[] NOT NULL DEFAULT '{}';
 ALTER TABLE whatsapp_tags ADD COLUMN IF NOT EXISTS deleted_at timestamptz;
 ALTER TABLE whatsapp_tags ADD COLUMN IF NOT EXISTS synced_at timestamptz;
+-- Nomes anteriores (rename/merge): o sticky da IA compara a remoção humana por nome.
+ALTER TABLE whatsapp_tags ADD COLUMN IF NOT EXISTS former_names text[] NOT NULL DEFAULT '{}';
 
 CREATE UNIQUE INDEX IF NOT EXISTS uq_whatsapp_tags_external_id
   ON whatsapp_tags (external_id) WHERE external_id IS NOT NULL;
