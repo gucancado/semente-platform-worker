@@ -165,7 +165,10 @@ export async function runVocabularySync(
       ancestorExternalIds: r.ancestor_external_ids ?? [],
       deletedAt: r.deleted_at ? new Date(r.deleted_at).toISOString() : null,
     }));
+    const failedMerges = new Set<number>();
     for (const op of planVocabularySync(mirror, snapshot)) {
+      // Origem cujo merge falhou segue viva: tombar agora deixaria os vínculos presos nela.
+      if (op.op === 'tombstone' && failedMerges.has(op.id)) continue;
       await client.query('SAVEPOINT tv_op');
       try {
         await applyOp(client, op);
@@ -174,6 +177,7 @@ export async function runVocabularySync(
       } catch (err) {
         await client.query('ROLLBACK TO SAVEPOINT tv_op');
         errors++;
+        if (op.op === 'merge') failedMerges.add(op.fromId);
         console.warn(`[tag-vocab] op ${op.op} falhou (retenta no próximo tick):`, (err as Error).message);
       }
     }
