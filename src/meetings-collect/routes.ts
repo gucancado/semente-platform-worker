@@ -4,6 +4,7 @@ import { requirePanelToken } from '../whatsapp/provision-routes.js';
 import type { MeetingsCollectDeps } from './service.js';
 import { importCollectedMeeting, promoteQueuedMeetings } from './service.js';
 import { planCollectReuse } from './reuse.js';
+import { getBotSession } from './bot-session.js';
 import {
   createOrReuseCollectedMeeting, getCollectedMeeting,
   updateCollectedMeeting, isEpisodeFrozen, reattributeEpisode,
@@ -24,7 +25,16 @@ export function registerMeetingsCollectRoutes(
 ): void {
   const auth = requirePanelToken(deps.panelToken);
 
-  app.post('/meetings-collect', { preHandler: auth }, async (req: any, reply) => {
+  // Sessão Google do bot (Painel tático). Sem dado de cliente → só o token do painel.
+  app.get('/meetings-bot/session', { preHandler: auth }, async (_req: any, reply) => {
+    try {
+      return reply.send(await getBotSession(deps.pool));
+    } catch {
+      return reply.code(503).send({ error: 'unavailable' });
+    }
+  });
+
+  app.post('/meetings-collect',{ preHandler: auth }, async (req: any, reply) => {
     const meetCode: string | undefined = req.body?.meetCode;
     const workspaceId: string | null = req.body?.workspaceId ?? null;
     const title: string | null = req.body?.title ?? null;
