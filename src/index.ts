@@ -52,14 +52,13 @@ import { startMeetingsAudioPoller } from './meetings-audio/poller.js';
 import { startMeetingsRecoverPoller } from './meetings-recover/poller.js';
 import { registerSpeakerActivityRoute } from './meetings-recover/routes.js';
 import { startOpenAIHealth } from './openai-health/start.js';
-import { OpenAISummaryLlm } from './meetings-summary/provider.js';
 import { r2Configured } from './integrations/r2.js';
 import { startCreationPoller } from './whatsapp/opportunity-pipeline.js';
 import { startAutoLossPoller } from './whatsapp/auto-loss.js';
 import { startTagVocabularySync } from './whatsapp/tag-vocabulary-sync.js';
 import { startJudgmentRunner } from './whatsapp/ai-judgment-runner.js';
 import { startPatternPoller } from './whatsapp/ai-pattern-runner.js';
-import { OpenAIJudgmentLlm } from './whatsapp/ai-llm.js';
+import { buildJudgmentLlm, buildPatternLlm, buildSummaryLlm } from './llm/tasks.js';
 import { startWhatsappMediaPoller, startMediaRetentionPoller } from './whatsapp/media-poller.js';
 import { retentionEnabled } from './whatsapp/media-policy.js';
 
@@ -390,10 +389,9 @@ async function main() {
   }
 
   if (config.MEETING_SUMMARY_MODE === 'auto') {
-    const summaryLlm = new OpenAISummaryLlm({
-      apiKey: config.OPENAI_API_KEY!, model: config.MEETING_SUMMARY_MODEL,
-    });
+    const summaryLlm = buildSummaryLlm();
     startSummaryPoller({ llm: summaryLlm }, app.log);
+    app.log.info({ provider: summaryLlm.provider, model: summaryLlm.model }, 'meeting-summary: poller iniciado');
   } else {
     app.log.info({ mode: config.MEETING_SUMMARY_MODE }, 'meeting-summary: poller NÃO iniciado (modo != auto)');
   }
@@ -416,23 +414,25 @@ async function main() {
     app.log.info('crm-pipeline: pollers de criação + auto-perda iniciados');
 
     // Runner do julgamento IA nível 1 (Fase D): tick horário + gate de janela
-    // 03:00–04:00 BRT. Só sobe com OPENAI_API_KEY (mesma chave da transcrição);
-    // sem ela, o motor de IA fica desligado sem quebrar o boot dos demais pollers.
-    if (config.OPENAI_API_KEY) {
-      const provider = new OpenAIJudgmentLlm({ apiKey: config.OPENAI_API_KEY, model: config.CRM_AI_MODEL });
+    // 03:00–04:00 BRT. Provedor por env (CRM_AI_PROVIDER/CRM_AI_MODEL, camada
+    // src/llm/). Chave ausente/modelo incompatível: o motor de IA fica desligado
+    // sem quebrar o boot dos demais pollers.
+    try {
+      const provider = buildJudgmentLlm();
       startJudgmentRunner(pool, provider, { log: app.log });
-      app.log.info({ model: config.CRM_AI_MODEL }, 'crm-ai-judgment: runner iniciado (janela 03:00–04:00 BRT)');
-
-      // Runner do motor de PADRÕES IA nível 2 (Fase E): tick horário + gate de janela
-      // DOMINGO 04:00–05:00 BRT (pós-julgamento diário). Análise semanal por workspace,
-      // 1 call LLM maior/workspace/semana. Modelo próprio (CRM_AI_PATTERN_MODEL, fallback
-      // CRM_AI_MODEL). Mesmo kill-switch (CRM_PIPELINE_ENABLED) e mesma OPENAI_API_KEY.
-      const patternModel = config.CRM_AI_PATTERN_MODEL ?? config.CRM_AI_MODEL;
-      const patternProvider = new OpenAIJudgmentLlm({ apiKey: config.OPENAI_API_KEY, model: patternModel });
+      app.log.info({ provider: provider.provider, model: provider.model }, 'crm-ai-judgment: runner iniciado (janela 03:00–04:00 BRT)');
+    } catch (err) {
+      app.log.warn({ err: (err as Error).message }, 'crm-ai-judgment: runner NÃO iniciado');
+    }
+    // Runner do motor de PADRÕES IA nível 2 (Fase E): domingo 04:00–05:00 BRT,
+    // 1 call LLM maior/workspace/semana. CRM_AI_PATTERN_PROVIDER/_MODEL, fallback
+    // no nível 1.
+    try {
+      const patternProvider = buildPatternLlm();
       startPatternPoller(pool, patternProvider, { log: app.log });
-      app.log.info({ model: patternModel }, 'crm-ai-pattern: poller iniciado (domingo 04:00–05:00 BRT)');
-    } else {
-      app.log.info('crm-ai-judgment: runner NÃO iniciado (OPENAI_API_KEY ausente)');
+      app.log.info({ provider: patternProvider.provider, model: patternProvider.model }, 'crm-ai-pattern: poller iniciado (domingo 04:00–05:00 BRT)');
+    } catch (err) {
+      app.log.warn({ err: (err as Error).message }, 'crm-ai-pattern: poller NÃO iniciado');
     }
   } else {
     app.log.info('crm-pipeline: pollers NÃO iniciados (CRM_PIPELINE_ENABLED=false)');

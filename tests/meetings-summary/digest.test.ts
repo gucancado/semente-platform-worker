@@ -185,7 +185,8 @@ test('nextJobOutcome: episódio sem turnos encerra sem chamar nada', () => {
 test('summaryCost: modelo desconhecido usa o fallback caro, nunca 0', () => {
   const usage = { inputTokens: 1_000_000, outputTokens: 0, cachedInputTokens: 0 };
   assert.ok(summaryCost('modelo-que-nao-existe', usage) > 0);
-  assert.equal(summaryCost('modelo-que-nao-existe', usage), 2.5);
+  // Fallback = o modelo mais caro em uso (Opus 5.5, US$ 4/1M de entrada).
+  assert.equal(summaryCost('modelo-que-nao-existe', usage), 4);
 });
 
 test('summaryCost: token cacheado não é cobrado duas vezes', () => {

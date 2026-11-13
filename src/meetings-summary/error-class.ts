@@ -21,12 +21,7 @@
  * transcrição: tratar o irreconhecível como sistêmico deixaria um job realmente
  * defeituoso girando na fila para sempre.
  */
-import {
-  APIError,
-  APIConnectionError,
-  APIConnectionTimeoutError,
-  APIUserAbortError,
-} from 'openai';
+import { classifyLlmError } from '../llm/errors.js';
 
 export type SummaryErrorClass = 'systemic' | 'item';
 
@@ -43,27 +38,13 @@ export const SYSTEMIC_BACKOFF_SEC = 900;
 export const SYSTEMIC_MAX_AGE_H = 720;
 
 /**
- * Status HTTP do AMBIENTE. 408/409/429 e todo 5xx são transitórios; 401/403 são
- * chave revogada ou sem permissão — também ambiente, e o mesmo episódio resume
- * normalmente quando alguém conserta a conta.
- *
- * Fora desta lista fica o 4xx de PEDIDO (400 body inválido, 404 modelo
- * inexistente, 422): retentar não muda nada, então consome tentativa.
+ * Classificação pelo erro ESTRUTURADO dos DOIS SDKs (OpenAI e Anthropic) — a
+ * regra mora em src/llm/errors.ts, compartilhada com a recuperação de reunião
+ * pela gravação (que segue na OpenAI). Crédito esgotado nos dois provedores é
+ * `systemic`.
  */
-function systemicByStatus(status: number | undefined): boolean {
-  if (status == null) return false;
-  if (status >= 500) return true;
-  return status === 401 || status === 403 || status === 408 || status === 409 || status === 429;
-}
-
 export function classifySummaryError(err: unknown): SummaryErrorClass {
-  // Rede: DNS, conexão recusada, timeout do próprio SDK. Ambiente, sempre.
-  if (err instanceof APIConnectionTimeoutError || err instanceof APIConnectionError) return 'systemic';
-  // Abort nosso (o timeout de requisição do provider) — o modelo pode responder
-  // na próxima; tratar como ambiente evita queimar tentativa num pico de latência.
-  if (err instanceof APIUserAbortError) return 'systemic';
-  if (err instanceof APIError) return systemicByStatus(err.status) ? 'systemic' : 'item';
-  return 'item';
+  return classifyLlmError(err);
 }
 
 /** Falta de conteúdo utilizável classificada como retentável ou não.

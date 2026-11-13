@@ -278,9 +278,11 @@ const EnvSchema = z.object({
   LUA_WINDOW_END: z.coerce.number().int().min(1).max(24).default(5),
   LUA_CONCURRENCY: z.coerce.number().int().positive().default(2),
   LUA_MAX_ATTEMPTS: z.coerce.number().int().positive().default(4),
-  LUA_EXTRACTION_MODEL: z.string().default('claude-sonnet-4-6'),
-  LUA_JUDGE_MODEL: z.string().default('claude-sonnet-4-6'),
-  LUA_RECAP_MODEL: z.string().default('claude-sonnet-4-6'),
+  // Provedor de LLM de texto da Lua (camada src/llm/). Troca por env, sem deploy.
+  LUA_PROVIDER: z.enum(['anthropic', 'openai']).default('anthropic'),
+  LUA_EXTRACTION_MODEL: z.string().default('claude-sonnet-5-5'),
+  LUA_JUDGE_MODEL: z.string().default('claude-sonnet-5-5'),
+  LUA_RECAP_MODEL: z.string().default('claude-sonnet-5-5'),
   LUA_EXTRACTION_MAX_INPUT: z.coerce.number().int().positive().default(60_000),
   R2_ENDPOINT: z.string().url().optional(),
   R2_ACCESS_KEY_ID: z.string().optional(),
@@ -306,6 +308,11 @@ const EnvSchema = z.object({
   // src/meetings-summary/{poller,db}.ts.
   MEETING_SUMMARY_MODE: z.enum(['off', 'auto']).default('off'),
   MEETING_SUMMARY_MODEL: z.string().default('gpt-5.4-mini'),
+  // Provedor de LLM de texto do digest (camada src/llm/). Troca por env, sem deploy;
+  // o modelo tem de ser da família do provedor (o boot recusa a mistura).
+  MEETING_SUMMARY_PROVIDER: z.enum(['anthropic', 'openai']).default('openai'),
+  // Anthropic: output_config.effort. Ausente = default do modelo.
+  MEETING_SUMMARY_EFFORT: z.enum(['low', 'medium', 'high']).optional(),
   // ── Áudio da reunião: copia a gravação do bot da Vexa pro R2 (src/meetings-audio) ──
   // Nasce 'off'. 'auto' exige coleta de reuniões ligada (VEXA_*) + R2 + ffmpeg na imagem.
   MEETINGS_AUDIO_MODE: z.enum(['off', 'auto']).default('off'),
@@ -387,12 +394,18 @@ const EnvSchema = z.object({
   // demais parâmetros do runner (CRM_AI_TICK_MS, CRM_AI_MAX_CONVERSATIONS_PER_RUN) são
   // lidos direto de process.env pelo runner (módulo config-free, pureza dos testes).
   CRM_AI_MODEL: z.string().default('gpt-4o-mini'),
+  // Provedor de LLM de texto do nível 1 (camada src/llm/). Troca por env, sem deploy.
+  CRM_AI_PROVIDER: z.enum(['anthropic', 'openai']).default('openai'),
+  // Anthropic: output_config.effort. Ausente = 'low' (classificação curta).
+  CRM_AI_EFFORT: z.enum(['low', 'medium', 'high']).optional(),
 
   // ── CRM WhatsApp v3 (Fase E) — motor de padrões IA nível 2 (semanal). Modelo LLM da
   // análise de padrões; ausente → cai no CRM_AI_MODEL (mesma família barata). A call é
   // única e maior que a do nível 1, mas 1x/workspace/semana — pode-se subir pra um modelo
   // mais capaz sem impacto de custo relevante. Resolvido na borda (index.ts / CLI).
   CRM_AI_PATTERN_MODEL: z.string().optional(),
+  // Provedor do nível 2; ausente → CRM_AI_PROVIDER (e o modelo cai no CRM_AI_MODEL).
+  CRM_AI_PATTERN_PROVIDER: z.enum(['anthropic', 'openai']).optional(),
 });
 
 export const config = EnvSchema.parse(process.env);
@@ -434,12 +447,26 @@ export function assertWhatsappMediaConfig(
  * seguir em silêncio — dependendo de qual verificação rodasse primeiro.
  */
 export function assertMeetingSummaryConfig(
-  cfg: Pick<typeof config, 'MEETING_SUMMARY_MODE' | 'OPENAI_API_KEY'>,
+  cfg: Pick<typeof config, 'MEETING_SUMMARY_MODE' | 'OPENAI_API_KEY'> &
+    Partial<Pick<typeof config, 'MEETING_SUMMARY_PROVIDER' | 'ANTHROPIC_API_KEY'>>,
 ): void {
   if (cfg.MEETING_SUMMARY_MODE === 'off') return;
-  if (!cfg.OPENAI_API_KEY) {
-    throw new Error(`MEETING_SUMMARY_MODE=${cfg.MEETING_SUMMARY_MODE} exige OPENAI_API_KEY`);
+  const provider = cfg.MEETING_SUMMARY_PROVIDER ?? 'openai';
+  const key = provider === 'anthropic' ? cfg.ANTHROPIC_API_KEY : cfg.OPENAI_API_KEY;
+  if (!key) {
+    const name = provider === 'anthropic' ? 'ANTHROPIC_API_KEY' : 'OPENAI_API_KEY';
+    throw new Error(`MEETING_SUMMARY_MODE=${cfg.MEETING_SUMMARY_MODE} (provider=${provider}) exige ${name}`);
   }
+}
+
+/** Provedor e modelo efetivos do nível 2 da IA do CRM (fallback no nível 1). */
+export function crmPatternLlmChoice(
+  cfg: Pick<typeof config, 'CRM_AI_PROVIDER' | 'CRM_AI_MODEL' | 'CRM_AI_PATTERN_PROVIDER' | 'CRM_AI_PATTERN_MODEL'>,
+): { provider: 'anthropic' | 'openai'; model: string } {
+  return {
+    provider: cfg.CRM_AI_PATTERN_PROVIDER ?? cfg.CRM_AI_PROVIDER,
+    model: cfg.CRM_AI_PATTERN_MODEL ?? cfg.CRM_AI_MODEL,
+  };
 }
 
 /**

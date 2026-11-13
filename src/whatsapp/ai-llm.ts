@@ -1,24 +1,26 @@
 /**
  * src/whatsapp/ai-llm.ts
  *
- * Provider LLM do julgamento IA nível 1 (spec v3 §7). Abstração fina sobre um chat
- * completion "one-shot": recebe {system, user} (montados por ai-judgment-prompt.ts,
- * D3) e devolve o texto BRUTO + uso de tokens. Quem valida o texto é
- * `parseJudgmentDecision` (D3); quem calcula/registra custo é o runner (D5) via
- * `judgmentCost`. Molde do provider da transcrição (src/transcription/provider.ts):
- * interface + impl OpenAI injetável (client opcional pra teste), custo por tabela de
- * preço local.
+ * Provider LLM da IA do CRM (nível 1 diário e nível 2 semanal). Fina camada
+ * sobre o TextLlm de src/llm/: recebe {system, user} (montados pelos prompts) e
+ * devolve o texto BRUTO + uso de tokens. Quem valida o texto é o parser da
+ * tarefa (parseJudgmentDecision / parsePatternDecision); quem registra custo é o
+ * runner, via `judgmentCost`.
  *
- * PURO no sentido de env: importa só `openai` (sem config.js) — a construção com
- * apiKey/model real acontece na borda (index.ts / CLI), o runner recebe o provider
- * já pronto e injetável.
+ * O PROVEDOR é escolhido na borda (index.ts / CLIs) por env — CRM_AI_PROVIDER e
+ * CRM_AI_PATTERN_PROVIDER — e cada instância carrega o schema da sua tarefa
+ * (JUDGMENT_SCHEMA ou PATTERN_SCHEMA de src/llm/schemas.ts), usado como
+ * structured output na Anthropic.
  */
-import OpenAI from 'openai';
-import { stripLoneSurrogates } from './text-safety.js';
+import { llmCost } from '../llm/pricing.js';
+import type { LlmEffort, TextLlm } from '../llm/types.js';
 
 export interface JudgmentLlmUsage {
   inputTokens: number;
   outputTokens: number;
+  /** Partes de `inputTokens` lidas/gravadas em cache (0 quando a API não informa). */
+  cachedInputTokens?: number;
+  cacheWriteTokens?: number;
 }
 
 export interface JudgmentLlmResult {
@@ -29,63 +31,54 @@ export interface JudgmentLlmResult {
 export interface JudgmentLlm {
   /** Modelo em uso — vai pra coluna `model` de llm_metrics. */
   readonly model: string;
-  /** Provedor — vai pra coluna `provider` de llm_metrics ('openai'). */
+  /** Provedor — vai pra coluna `provider` de llm_metrics ('openai' | 'anthropic'). */
   readonly provider: string;
   judge(system: string, user: string): Promise<JudgmentLlmResult>;
 }
 
-/**
- * US$ por 1M tokens (input/output) por modelo. Confirmar no pricing vigente ao trocar
- * de modelo. Modelos fora da tabela caem no fallback (o mais caro conhecido) — melhor
- * superestimar custo do que registrar 0 silenciosamente.
- */
-export const RATE_USD_PER_1M: Record<string, { input: number; output: number }> = {
-  'gpt-4o-mini': { input: 0.15, output: 0.6 },
-  'gpt-4o': { input: 2.5, output: 10 },
-};
-
-const FALLBACK_RATE = { input: 2.5, output: 10 };
-
-/** Custo em USD de uma chamada, a partir do modelo + uso de tokens. */
+/** Custo em USD de uma chamada (tabela única em src/llm/pricing.ts). */
 export function judgmentCost(model: string, usage: JudgmentLlmUsage): number {
-  const rate = RATE_USD_PER_1M[model] ?? FALLBACK_RATE;
-  const inTok = Number.isFinite(usage.inputTokens) ? usage.inputTokens : 0;
-  const outTok = Number.isFinite(usage.outputTokens) ? usage.outputTokens : 0;
-  return (inTok / 1_000_000) * rate.input + (outTok / 1_000_000) * rate.output;
+  return llmCost(model, {
+    input: usage.inputTokens,
+    output: usage.outputTokens,
+    cachedInput: usage.cachedInputTokens ?? 0,
+    cacheWrite: usage.cacheWriteTokens ?? 0,
+  });
 }
 
-export class OpenAIJudgmentLlm implements JudgmentLlm {
-  readonly model: string;
-  readonly provider = 'openai';
-  private client: OpenAI;
+/** Nível 1: saída curta (~150 tokens); o teto cobre thinking adaptativo. */
+export const JUDGMENT_MAX_TOKENS = 4000;
+/** Nível 2: até dezenas de sugestões + backfills. */
+export const PATTERN_MAX_TOKENS = 16000;
 
-  constructor(opts: { apiKey: string; model: string; client?: OpenAI }) {
-    this.client = opts.client ?? new OpenAI({ apiKey: opts.apiKey });
-    this.model = opts.model;
+export class TextJudgmentLlm implements JudgmentLlm {
+  readonly model: string;
+  readonly provider: string;
+
+  constructor(
+    private llm: TextLlm,
+    private opts: { schema: Record<string, unknown>; maxTokens: number; effort?: LlmEffort },
+  ) {
+    this.model = llm.model;
+    this.provider = llm.provider;
   }
 
   async judge(system: string, user: string): Promise<JudgmentLlmResult> {
-    // temperature 0: decisão determinística/conservadora (spec §7). response_format
-    // json_object força o modelo a devolver só JSON — o validador (D3) ainda é a defesa,
-    // mas isso reduz o descarte por cercas de código.
-    const r: any = await this.client.chat.completions.create({
-      model: this.model,
-      temperature: 0,
-      response_format: { type: 'json_object' },
-      messages: [
-        // Rede de segurança: surrogate órfão (emoji partido por algum truncamento
-        // rio acima) faz o parser JSON do servidor recusar o body — 400 e a
-        // conversa nunca é julgada. No-op em texto são. Ver text-safety.ts.
-        { role: 'system', content: stripLoneSurrogates(system) },
-        { role: 'user', content: stripLoneSurrogates(user) },
-      ],
+    const r = await this.llm.complete({
+      system,
+      messages: [{ role: 'user', content: user }],
+      json: { schema: this.opts.schema },
+      maxTokens: this.opts.maxTokens,
+      // OpenAI: só vale em modelo de raciocínio; gpt-4o-mini ignora (temperature 0).
+      effort: this.llm.provider === 'anthropic' ? this.opts.effort : undefined,
     });
-    const raw = typeof r?.choices?.[0]?.message?.content === 'string' ? r.choices[0].message.content : '';
     return {
-      raw,
+      raw: r.text,
       usage: {
-        inputTokens: Number(r?.usage?.prompt_tokens ?? 0),
-        outputTokens: Number(r?.usage?.completion_tokens ?? 0),
+        inputTokens: r.usage.input,
+        outputTokens: r.usage.output,
+        cachedInputTokens: r.usage.cachedInput,
+        cacheWriteTokens: r.usage.cacheWrite,
       },
     };
   }

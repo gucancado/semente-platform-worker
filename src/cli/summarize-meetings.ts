@@ -13,7 +13,7 @@
  */
 import { config } from '../config.js';
 import { pool } from '../db.js';
-import { OpenAISummaryLlm } from '../meetings-summary/provider.js';
+import { buildSummaryLlm } from '../llm/tasks.js';
 import { runSummaryBatch } from '../meetings-summary/poller.js';
 import {
   enqueuePendingEpisodes, enqueueOneEpisode, countPendingSummaryJobs,
@@ -37,7 +37,7 @@ async function main(): Promise<void> {
   const episode = flag('episode');
   const limit = Number(flag('limit') ?? '25');
 
-  if (!config.OPENAI_API_KEY) throw new Error('OPENAI_API_KEY ausente');
+  buildSummaryLlm(); // fail-fast: chave do provedor de MEETING_SUMMARY_PROVIDER
   if (!Number.isFinite(limit) || limit <= 0) throw new Error('--limit inválido');
 
   let enqueued = 0;
@@ -66,7 +66,8 @@ async function main(): Promise<void> {
   console.log(`enfileirados: ${enqueued}`);
   if (enqueued === 0) return;
 
-  const llm = new OpenAISummaryLlm({ apiKey: config.OPENAI_API_KEY, model: config.MEETING_SUMMARY_MODEL });
+  const llm = buildSummaryLlm();
+  console.log(`provider=${llm.provider} model=${llm.model}`);
   let processed = 0;
   // Drena em lotes até a fila esvaziar. Serial (o batch do poller já é), então
   // não há rajada contra a API — o que importa numa chave compartilhada com a

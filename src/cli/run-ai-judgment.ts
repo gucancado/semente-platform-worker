@@ -18,7 +18,7 @@ import { buildJudgmentPrompt } from '../whatsapp/ai-judgment-prompt.js';
 //                                      e IMPRIME, SEM chamar o LLM nem aplicar
 //                                      nada (inspeção humana do que a IA veria).
 //
-// Sem --dry-run: constrói o provider OpenAI real (config.OPENAI_API_KEY +
+// Sem --dry-run: constrói o provider real por env (CRM_AI_PROVIDER +
 // CRM_AI_MODEL) e roda o pipeline completo por conversa (contexto → LLM →
 // validação → aplicação → custo em llm_metrics), imprimindo applied/skipped/stale.
 // ─────────────────────────────────────────────────────────────────────────────
@@ -106,15 +106,17 @@ async function main(): Promise<void> {
     return;
   }
 
-  // Modo real: provider OpenAI (mesma lib/env da transcrição).
-  const { config } = await import('../config.js');
-  if (!config.OPENAI_API_KEY) {
-    console.error('[run-ai-judgment] OPENAI_API_KEY ausente — necessário fora do --dry-run');
+  // Modo real: provider por env (CRM_AI_PROVIDER/CRM_AI_MODEL, camada src/llm/).
+  const { buildJudgmentLlm } = await import('../llm/tasks.js');
+  let provider;
+  try {
+    provider = buildJudgmentLlm();
+  } catch (err) {
+    console.error(`[run-ai-judgment] ${(err as Error).message}`);
     await pool.end();
     process.exit(1);
   }
-  const { OpenAIJudgmentLlm } = await import('../whatsapp/ai-llm.js');
-  const provider = new OpenAIJudgmentLlm({ apiKey: config.OPENAI_API_KEY, model: config.CRM_AI_MODEL });
+  console.log(`[run-ai-judgment] provider=${provider.provider} model=${provider.model}`);
 
   let applied = 0;
   let stale = 0;

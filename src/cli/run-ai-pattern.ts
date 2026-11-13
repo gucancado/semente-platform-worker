@@ -20,7 +20,7 @@ import { buildPatternPrompt } from '../whatsapp/ai-pattern-prompt.js';
 //   --dry-run                                — monta contexto + prompt e IMPRIME, SEM
 //                                              claim, LLM ou aplicação (inspeção humana).
 //
-// Sem --dry-run: constrói o provider OpenAI real (CRM_AI_PATTERN_MODEL, fallback
+// Sem --dry-run: constrói o provider real por env (CRM_AI_PATTERN_PROVIDER/_MODEL, fallback
 // CRM_AI_MODEL) e roda o ciclo de UM workspace (claim → contexto → LLM → validação →
 // aplicação → finish/fail), imprimindo o desfecho.
 // ─────────────────────────────────────────────────────────────────────────────
@@ -101,16 +101,17 @@ async function main(): Promise<void> {
     return;
   }
 
-  // Modo real: provider OpenAI (mesma lib/env da transcrição; modelo do nível 2).
-  const { config } = await import('../config.js');
-  if (!config.OPENAI_API_KEY) {
-    console.error('[run-ai-pattern] OPENAI_API_KEY ausente — necessário fora do --dry-run');
+  // Modo real: provider por env (CRM_AI_PATTERN_PROVIDER/_MODEL, fallback no nível 1).
+  const { buildPatternLlm } = await import('../llm/tasks.js');
+  let provider;
+  try {
+    provider = buildPatternLlm();
+  } catch (err) {
+    console.error(`[run-ai-pattern] ${(err as Error).message}`);
     await pool.end();
     process.exit(1);
   }
-  const { OpenAIJudgmentLlm } = await import('../whatsapp/ai-llm.js');
-  const model = config.CRM_AI_PATTERN_MODEL ?? config.CRM_AI_MODEL;
-  const provider = new OpenAIJudgmentLlm({ apiKey: config.OPENAI_API_KEY, model });
+  console.log(`[run-ai-pattern] provider=${provider.provider} model=${provider.model}`);
 
   const outcome = await runPatternForWorkspace(pool, provider, {
     workspaceId: args.workspace, periodStart, periodEnd,
