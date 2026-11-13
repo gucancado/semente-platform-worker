@@ -15,7 +15,9 @@ type Cfg = typeof config;
 
 export function buildJudgmentLlm(cfg: Cfg = config): TextJudgmentLlm {
   const llm = createTextLlm('crm-ai-judgment', cfg.CRM_AI_PROVIDER, cfg.CRM_AI_MODEL, cfg);
-  return new TextJudgmentLlm(llm, { schema: JUDGMENT_SCHEMA, maxTokens: JUDGMENT_MAX_TOKENS, effort: cfg.CRM_AI_EFFORT ?? 'low' });
+  return new TextJudgmentLlm(llm, {
+    schema: JUDGMENT_SCHEMA, maxTokens: JUDGMENT_MAX_TOKENS, effort: cfg.CRM_AI_EFFORT ?? 'low', thinking: cfg.CRM_AI_THINKING,
+  });
 }
 
 export function buildPatternLlm(cfg: Cfg = config): TextJudgmentLlm {

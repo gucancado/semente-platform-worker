@@ -398,6 +398,9 @@ const EnvSchema = z.object({
   CRM_AI_PROVIDER: z.enum(['anthropic', 'openai']).default('openai'),
   // Anthropic: output_config.effort. Ausente = 'low' (classificação curta).
   CRM_AI_EFFORT: z.enum(['low', 'medium', 'high']).optional(),
+  // Anthropic: 'off' desliga o thinking do nível 1 (classificação curta; medido
+  // sem perda de qualidade e ~15% mais barato no Haiku 5.5). Nível 2 sempre adaptativo.
+  CRM_AI_THINKING: z.enum(['adaptive', 'off']).default('off'),
 
   // ── CRM WhatsApp v3 (Fase E) — motor de padrões IA nível 2 (semanal). Modelo LLM da
   // análise de padrões; ausente → cai no CRM_AI_MODEL (mesma família barata). A call é

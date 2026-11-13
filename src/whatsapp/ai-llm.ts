@@ -57,7 +57,7 @@ export class TextJudgmentLlm implements JudgmentLlm {
 
   constructor(
     private llm: TextLlm,
-    private opts: { schema: Record<string, unknown>; maxTokens: number; effort?: LlmEffort },
+    private opts: { schema: Record<string, unknown>; maxTokens: number; effort?: LlmEffort; thinking?: 'adaptive' | 'off' },
   ) {
     this.model = llm.model;
     this.provider = llm.provider;
@@ -71,6 +71,7 @@ export class TextJudgmentLlm implements JudgmentLlm {
       maxTokens: this.opts.maxTokens,
       // OpenAI: só vale em modelo de raciocínio; gpt-4o-mini ignora (temperature 0).
       effort: this.llm.provider === 'anthropic' ? this.opts.effort : undefined,
+      thinking: this.opts.thinking,
     });
     return {
       raw: r.text,

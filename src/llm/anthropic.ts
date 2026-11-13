@@ -7,10 +7,10 @@
  *   nunca prefill (400 nos modelos atuais) nem tool forçado (`tool_choice`
  *   tool/any dá 400 no Sonnet 5.5 / Opus 5.5). O schema passa por
  *   `toStructuredSchema`, que remove o que a API não aceita.
- * - Sem `temperature` (os modelos 5.x recusam valor não-default) e sem
- *   `thinking`: fica no default do modelo (adaptativo) e a profundidade é
- *   controlada por `effort`. `thinking: disabled` dá 400 no Opus 5.5 e no
- *   Sonnet 5.5 — por isso não é usado.
+ * - Sem `temperature` (os modelos 5.x recusam valor não-default). Thinking
+ *   fica no adaptativo do modelo, controlado por `effort`, salvo
+ *   `thinking: 'off'` (ver `thinkingOff`: `disabled` dá 400 no Opus 5.5 em
+ *   qualquer effort e no Sonnet 5.5, que usa `between_tools`).
  * - `system` com cache breakpoint: abaixo do mínimo cacheável a API ignora.
  * - stop_reason `refusal` (classificador de segurança) vira finishReason
  *   'refusal'; o texto pode não casar com o schema e o validador da tarefa trata
@@ -49,6 +49,13 @@ export function toStructuredSchema(schema: unknown): unknown {
   return out;
 }
 
+/** Forma de desligar o thinking por modelo; null = o modelo não permite. */
+export function thinkingOff(model: string): Record<string, unknown> | null {
+  if (model.startsWith('claude-opus-5-5')) return null; // 400 em qualquer effort
+  if (model.startsWith('claude-sonnet-5-5')) return { type: 'between_tools' };
+  return { type: 'disabled' };
+}
+
 function mapStop(r: string | null | undefined): LlmFinishReason | null {
   if (r == null) return null;
   if (r === 'end_turn' || r === 'stop_sequence') return 'stop';
@@ -75,9 +82,11 @@ export class AnthropicTextLlm implements TextLlm {
     if (args.json) {
       outputConfig.format = { type: 'json_schema', schema: toStructuredSchema(args.json.schema) as Record<string, unknown> };
     }
+    const off = args.thinking === 'off' ? thinkingOff(this.model) : null;
     const res = await this.client.messages.create(
       {
         model: this.model,
+        ...(off ? { thinking: off as unknown as Anthropic.ThinkingConfigParam } : {}),
         max_tokens: args.maxTokens,
         system: [{ type: 'text', text: stripLoneSurrogates(args.system), cache_control: { type: 'ephemeral' } }],
         messages: args.messages.map((m) => ({ role: m.role, content: stripLoneSurrogates(m.content) })),

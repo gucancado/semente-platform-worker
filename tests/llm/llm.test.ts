@@ -197,3 +197,20 @@ test('TextJudgmentLlm / TextSummaryLlm: repassam schema, provider e uso', async 
   assert.equal(sr.finishReason, 'stop');
   assert.ok(calls[1].body.output_config.format.schema.properties.pontos);
 });
+
+test('anthropic: thinking off vira disabled no Haiku, between_tools no Sonnet 5.5, nada no Opus 5.5', async () => {
+  const cases: Array<[string, unknown]> = [
+    ['claude-haiku-5-5', { type: 'disabled' }],
+    ['claude-sonnet-5-5', { type: 'between_tools' }],
+    ['claude-opus-5-5', undefined],
+  ];
+  for (const [model, want] of cases) {
+    const { client, calls } = fakeAnthropic(anthropicOk);
+    const llm = new AnthropicTextLlm({ apiKey: 'x', model, client });
+    await llm.complete({ system: 's', messages: [{ role: 'user', content: 'u' }], maxTokens: 10, thinking: 'off' });
+    assert.deepEqual(calls[0].body.thinking, want, model);
+  }
+  const { client, calls } = fakeAnthropic(anthropicOk);
+  await new AnthropicTextLlm({ apiKey: 'x', model: 'claude-haiku-5-5', client }).complete({ system: 's', messages: [{ role: 'user', content: 'u' }], maxTokens: 10 });
+  assert.equal(calls[0].body.thinking, undefined, 'default = adaptativo do modelo');
+});

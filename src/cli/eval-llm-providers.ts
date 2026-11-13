@@ -3,7 +3,7 @@
 //
 //   EVAL_DATABASE_URL=... OPENAI_API_KEY=... ANTHROPIC_API_KEY=... \
 //     pnpm tsx src/cli/eval-llm-providers.ts --task=crm1|crm2|summary \
-//       --models=openai:gpt-4o-mini,anthropic:claude-haiku-5-5 [--n=100] [--out=dir]
+//       --models=openai:gpt-4o-mini,anthropic:claude-haiku-5-5 [--n=100] [--effort=low] [--thinking=off] [--out=dir]
 //
 // SOMENTE LEITURA: monta o MESMO prompt da produção a partir do banco, chama cada
 // modelo e grava as saídas em JSON para análise; nunca aplica decisão nem grava
@@ -63,6 +63,7 @@ async function pMap<T, R>(items: T[], n: number, fn: (t: T, i: number) => Promis
 }
 
 type Call = { text: string; costUsd: number; latencyMs: number; inTok: number; outTok: number; finish: string | null; error?: string };
+let THINKING: 'adaptive' | 'off' | undefined;
 async function call(
   llm: TextLlm, system: string, user: string, schema: Record<string, unknown>, maxTokens: number, effort?: LlmEffort,
 ): Promise<Call> {
@@ -70,7 +71,7 @@ async function call(
   try {
     const r = await llm.complete({
       system, messages: [{ role: 'user', content: user }], json: { schema }, maxTokens,
-      effort: llm.provider === 'anthropic' ? effort : undefined, timeoutMs: 120_000,
+      effort: llm.provider === 'anthropic' ? effort : undefined, thinking: THINKING, timeoutMs: 120_000,
     });
     return {
       text: r.text, costUsd: llmCost(llm.model, r.usage), latencyMs: Date.now() - t0,
@@ -309,6 +310,7 @@ async function main() {
   const keys = { OPENAI_API_KEY: process.env.OPENAI_API_KEY, ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY };
   const llms = parseModels(a.models).map((m) => createTextLlm(`eval:${task}`, m.provider, m.model, keys));
   const effort = (a.effort as LlmEffort | undefined) ?? 'low';
+  THINKING = a.thinking as 'adaptive' | 'off' | undefined;
   const outDir = a.out ?? '.';
   fs.mkdirSync(outDir, { recursive: true });
   const pool = new pg.Pool({ connectionString: db, max: 6 });

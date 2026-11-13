@@ -34,6 +34,13 @@ export type LlmCompleteArgs = {
   /** Profundidade de raciocínio. Anthropic: `output_config.effort`. OpenAI: só
    *  modelos de raciocínio (gpt-5*), via `reasoning_effort`; ver openai.ts. */
   effort?: LlmEffort;
+  /**
+   * 'off' desliga o thinking da Anthropic onde o modelo permite (Haiku 5.5 e
+   * família 5.0 com effort ≤ high: `disabled`; Sonnet 5.5: `between_tools`;
+   * Opus 5.5 não desliga — ignorado). Default = adaptativo do modelo. Sem
+   * efeito na OpenAI.
+   */
+  thinking?: 'adaptive' | 'off';
   timeoutMs?: number;
 };
 
