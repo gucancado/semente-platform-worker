@@ -92,6 +92,8 @@ export async function claimDueSummaryJobs(batchSize: number): Promise<SummaryJob
 export type EpisodeForSummary = {
   id: number;
   revision: number;
+  /** Escopo do custo do digest em llm_metrics (mig 077). */
+  workspace_id: string | null;
   title: string | null;
   duration_seconds: number | null;
   participants: Array<{ name?: string | null }>;
@@ -100,7 +102,7 @@ export type EpisodeForSummary = {
 
 export async function loadEpisodeForSummary(episodeId: number): Promise<EpisodeForSummary | null> {
   const ep = await pool.query(
-    `SELECT id, revision, title, duration_seconds, participants
+    `SELECT id, revision, workspace_id, title, duration_seconds, participants
        FROM episodes WHERE id = $1 AND fonte = 'reuniao'`,
     [episodeId],
   );
@@ -113,6 +115,7 @@ export async function loadEpisodeForSummary(episodeId: number): Promise<EpisodeF
   return {
     id: Number(row.id),
     revision: Number(row.revision),
+    workspace_id: row.workspace_id ?? null,
     title: row.title,
     duration_seconds: row.duration_seconds,
     participants: Array.isArray(row.participants) ? row.participants : [],

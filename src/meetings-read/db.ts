@@ -204,7 +204,15 @@ export type MeetingDigestView = {
    *  à entrada do bot e desconta o trecho perdido nas gravações reparadas. 0 quando
    *  não se sabe (Fireflies: turnos e áudio já partem do mesmo ponto). */
   audio_offset_ms: number;
+  /** Custo de IA da reunião em US$ (digest + recuperação pela gravação), de
+   *  llm_metrics (mig 077). null = nada registrado (reunião anterior ao registro
+   *  por reunião). NÃO inclui a transcrição ao vivo da Vexa, que chama a OpenAI
+   *  direto e não é medida por reunião. */
+  ai_cost_usd: number | null;
 };
+
+const AI_COST_SQL = `(SELECT SUM(l.cost_usd)::float8 FROM llm_metrics l
+                       WHERE l.episode_id = episodes.id AND l.cost_usd IS NOT NULL) AS ai_cost_usd`;
 
 /** `summary_points` é jsonb: o driver devolve o que estiver gravado, e uma row
  *  legada/mexida à mão pode não ser array. Normaliza aqui, na fronteira de
@@ -246,6 +254,7 @@ export function mapDigestView(row: any): MeetingDigestView {
     summary_open_questions: coerceList(row.summary_open_questions),
     has_audio: row.audio_r2_key != null,
     audio_offset_ms: audioOffsetMs(row.metadata),
+    ai_cost_usd: row.ai_cost_usd == null ? null : Number(row.ai_cost_usd),
   };
 }
 
@@ -256,7 +265,8 @@ export async function getMeetingDigest(
   const { rows } = await pool.query(
     `SELECT id, title, occurred_at, duration_seconds, participants, workspace_id,
             summary, summary_points, summary_generated_at, audio_r2_key, metadata,
-            summary_decisions, summary_actions, summary_open_questions
+            summary_decisions, summary_actions, summary_open_questions,
+            ${AI_COST_SQL}
      FROM episodes WHERE id=$1 AND fonte='reuniao'`, [a.episodeId]);
   const row = rows[0];
   // Mesma revalidação de tenant do transcript: episódio de outro workspace → null.
@@ -279,7 +289,8 @@ export async function getMeetingTranscript(
   const ep = await pool.query(
     `SELECT id, title, occurred_at, duration_seconds, participants, workspace_id,
             summary, summary_points, summary_generated_at, audio_r2_key, metadata,
-            summary_decisions, summary_actions, summary_open_questions
+            summary_decisions, summary_actions, summary_open_questions,
+            ${AI_COST_SQL}
      FROM episodes WHERE id=$1 AND fonte='reuniao'`, [a.episodeId]);
   const row = ep.rows[0];
   // Revalidação de tenant: episódio inexistente OU de outro workspace → null (404 na rota).

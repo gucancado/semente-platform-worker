@@ -9,6 +9,8 @@ export interface TranscriptionProvider {
 export const RATE_USD_PER_MIN: Record<string, number> = {
   'gpt-4o-mini-transcribe': 0.003,
   'gpt-4o-transcribe': 0.006,
+  // Recuperação de reunião pela gravação (src/meetings-recover).
+  'gpt-4o-transcribe-diarize': 0.006,
   'whisper-1': 0.006,
 };
 

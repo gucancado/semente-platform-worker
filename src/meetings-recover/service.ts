@@ -10,6 +10,7 @@
  *
  * Por que não reaproveita a transcrição ao vivo: ela é exatamente o que falhou.
  */
+import { costFor } from '../transcription/provider.js';
 import type { Pool } from 'pg';
 import type { VexaClient } from '../integrations/vexa/client.js';
 import type { insertEpisodeWithTurns } from '../episodes/db.js';
@@ -166,6 +167,14 @@ export async function processRecoveryJob(deps: RecoverDeps, job: RecoveryJob): P
     if (job.reason === 'partial') input.force = true;
     const r = await deps.insertEpisode(input);
     const episodeId = Number(r.id);
+
+    // Custo da transcrição pela gravação, pela duração enviada (mesma regra do
+    // áudio do WhatsApp). Best-effort: perder a telemetria não desfaz a reunião.
+    await deps.pool.query(
+      `INSERT INTO llm_metrics (agent, task, provider, model, cost_usd, workspace_id, episode_id)
+       VALUES ('meetings', 'meeting_recovery', 'openai', $1, $2, $3, $4)`,
+      [deps.model, costFor(deps.model, durationS), job.workspace_id ?? null, episodeId],
+    ).catch((e: Error) => deps.log?.warn({ id, err: e.message }, 'meetings-recover: métrica de custo não gravada'));
 
     await updateCollectedMeeting(deps.pool, id, { status: 'imported', episodeId, failureReason: null });
     await finishRecovery(deps.pool, id, { status: 'done', episodeId, speechSeconds: speech });

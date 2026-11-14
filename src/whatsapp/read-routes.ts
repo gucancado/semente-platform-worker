@@ -5,6 +5,7 @@ import { listThreads, listThreadMessages, searchThreads, parseOppColumnCsv } fro
 import { exportConversation } from './export.js';
 import { getStats } from './stats.js';
 import { getTimeseries } from './timeseries.js';
+import { getWhatsappAiCostTotal } from './ai-cost.js';
 import { getFirstResponse } from './first-response.js';
 import { listDisqualifyReasons } from './disqualify-reasons.js';
 import { listSourceSignals } from './source-signals.js';
@@ -130,14 +131,20 @@ export function registerReadRoutes(
     const periodBasis = pb as 'arrival' | 'activity' | undefined;
     if (!await gateMember(req, reply, workspace_id, authz)) return;
     const k = kind === 'dm' || kind === 'group' ? kind : 'all';
-    const stats = await getStats(deps.pool, {
-      workspaceId: workspace_id,
-      numberId: nid,
-      since: emptyToUndefined(since),
-      until: emptyToUndefined(until),
-      periodBasis,
-      kind: k,
-    });
+    const [stats, aiCostUsd] = await Promise.all([
+      getStats(deps.pool, {
+        workspaceId: workspace_id,
+        numberId: nid,
+        since: emptyToUndefined(since),
+        until: emptyToUndefined(until),
+        periodBasis,
+        kind: k,
+      }),
+      // Custo de IA do período (US$, aditivo — mig 077). Ver ai-cost.ts.
+      getWhatsappAiCostTotal(deps.pool, {
+        workspaceId: workspace_id, numberId: nid, since: emptyToUndefined(since), until: emptyToUndefined(until),
+      }),
+    ]);
     let ctx;
     if (nid !== undefined) {
       const numForCtx = await getNumber(deps.pool, nid);
@@ -155,7 +162,7 @@ export function registerReadRoutes(
       workspaceId: workspace_id,
       numberId: nid ?? null,
     });
-    return reply.send({ schema: 'whatsapp_v1', context: ctx, ...stats });
+    return reply.send({ schema: 'whatsapp_v1', context: ctx, ...stats, aiCostUsd });
   });
 
   // ── GET /whatsapp/stats/timeseries ──────────────────────────────────────────

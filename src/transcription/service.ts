@@ -94,8 +94,9 @@ export async function processJob(deps: ProcessDeps, job: TranscriptionJob): Prom
       await client.query('BEGIN');
       await client.query(`UPDATE messages SET text=$2, transcription_status='done' WHERE id=$1`, [job.message_id, text]);
       await client.query(
-        `INSERT INTO llm_metrics (agent, message_id, task, provider, model, cost_usd)
-         VALUES ('transcription', $1, 'transcribe', 'openai', $2, $3)`,
+        `INSERT INTO llm_metrics (agent, message_id, task, provider, model, cost_usd, workspace_id, whatsapp_number_id)
+         SELECT 'transcription', m.id, 'transcribe', 'openai', $2, $3, m.workspace_id, m.whatsapp_number_id
+           FROM messages m WHERE m.id = $1`,
         [job.message_id, t.model, t.costUsd]);
       await client.query(
         `UPDATE transcription_jobs SET status='done', raw_envelope='{}'::jsonb, last_error=NULL, updated_at=NOW() WHERE id=$1`,

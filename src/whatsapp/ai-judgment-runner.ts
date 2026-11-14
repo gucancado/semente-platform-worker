@@ -204,13 +204,17 @@ export async function fetchPendingConversations(
 /** Registra o custo de UMA chamada LLM em llm_metrics (molde do insert da transcrição). */
 export async function recordLlmMetrics(
   pool: Pool,
-  args: { provider: string; model: string; usage: { inputTokens: number; outputTokens: number }; costUsd: number },
+  args: {
+    provider: string; model: string; usage: { inputTokens: number; outputTokens: number }; costUsd: number;
+    workspaceId?: string; numberId?: number;
+  },
 ): Promise<void> {
   await pool.query(
     `/* ai:llm_metrics */ INSERT INTO llm_metrics
-       (agent, task, provider, model, tokens_in, tokens_out, cost_usd)
-     VALUES ('crm-ai-judgment', 'judge', $1, $2, $3, $4, $5)`,
-    [args.provider, args.model, args.usage.inputTokens, args.usage.outputTokens, args.costUsd],
+       (agent, task, provider, model, tokens_in, tokens_out, cost_usd, workspace_id, whatsapp_number_id)
+     VALUES ('crm-ai-judgment', 'judge', $1, $2, $3, $4, $5, $6, $7)`,
+    [args.provider, args.model, args.usage.inputTokens, args.usage.outputTokens, args.costUsd,
+      args.workspaceId ?? null, args.numberId ?? null],
   );
 }
 
@@ -274,6 +278,8 @@ export async function runJudgmentForConversation(
     model: provider.model,
     usage: llm.usage,
     costUsd: judgmentCost(provider.model, llm.usage),
+    workspaceId: conv.workspaceId,
+    numberId: conv.numberId,
   });
 
   const parsed = parseDecision(llm.raw, ctx);

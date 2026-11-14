@@ -609,13 +609,18 @@ export async function insertLlmMetric(args: {
   cache_hit?: boolean;
   fallback_used?: boolean;
   error?: string | null;
+  /** Escopo do custo (mig 077): lido pelo painel por workspace, número e reunião. */
+  workspace_id?: string | null;
+  whatsapp_number_id?: number | null;
+  episode_id?: number | null;
 }): Promise<{ id: number }> {
   const { rows } = await pool.query<{ id: number }>(
     `INSERT INTO llm_metrics
        (agent, message_id, task, provider, model, tier,
         tokens_in, tokens_out, cache_read_tokens, cache_write_tokens,
-        cost_usd, latency_ms, cache_hit, fallback_used, error)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+        cost_usd, latency_ms, cache_hit, fallback_used, error,
+        workspace_id, whatsapp_number_id, episode_id)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
      RETURNING id`,
     [
       args.agent,
@@ -633,6 +638,9 @@ export async function insertLlmMetric(args: {
       args.cache_hit ?? false,
       args.fallback_used ?? false,
       args.error ?? null,
+      args.workspace_id ?? null,
+      args.whatsapp_number_id ?? null,
+      args.episode_id ?? null,
     ]
   );
   return { id: rows[0]!.id };

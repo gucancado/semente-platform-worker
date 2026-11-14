@@ -27,7 +27,12 @@ import type { Pool } from 'pg';
 // Definido em stats.ts, de onde este módulo já herda a semântica de `leads`.
 import { WORKSPACE_NUMBERS } from './sql-scope.js';
 
-export type TimeseriesPoint = { bucketStart: string; total: number; leads: number; oportunidades: number; ganhas: number };
+import { getWhatsappAiCostByBucket } from './ai-cost.js';
+
+/** `aiCostUsd`: custo de IA (US$) do bucket — ver ai-cost.ts. Aditivo (mig 077). */
+export type TimeseriesPoint = {
+  bucketStart: string; total: number; leads: number; oportunidades: number; ganhas: number; aiCostUsd: number;
+};
 
 /**
  * Oportunidade = thread com lead_stage em (qualificado, cliente) — mesma
@@ -185,7 +190,12 @@ export async function getTimeseries(
         LEFT JOIN opportunity_won ow ON ow.bucket = b.bucket
        ORDER BY b.bucket`;
 
-  const res = await pool.query(sqlText, params);
+  const [res, aiCost] = await Promise.all([
+    pool.query(sqlText, params),
+    getWhatsappAiCostByBucket(pool, {
+      workspaceId: p.workspaceId, numberId: p.numberId, since: p.since, until: p.until, bucket: bucketUnit,
+    }),
+  ]);
   // `bucket` já vem como texto 'YYYY-MM-DD' e o zero-fill já foi feito no SQL:
   // esta camada só renomeia colunas — sem parse de data, sem preenchimento.
   return {
@@ -195,6 +205,7 @@ export async function getTimeseries(
       leads: Number(r.leads),
       oportunidades: Number(r.oportunidades),
       ganhas: Number(r.ganhas),
+      aiCostUsd: aiCost.get(String(r.bucket)) ?? 0,
     })),
   };
 }

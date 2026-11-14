@@ -109,13 +109,18 @@ export function isWithinPatternWindow(now: Date): boolean {
 /** Registra o custo de UMA chamada LLM do nível 2 (agent='crm-ai-pattern', task='analyze'). */
 export async function recordPatternLlmMetrics(
   pool: Pool,
-  args: { provider: string; model: string; usage: { inputTokens: number; outputTokens: number }; costUsd: number },
+  args: {
+    provider: string; model: string; usage: { inputTokens: number; outputTokens: number }; costUsd: number;
+    workspaceId?: string;
+  },
 ): Promise<void> {
+  // Custo do WORKSPACE (análise de todos os números): whatsapp_number_id fica nulo.
   await pool.query(
     `/* pat:llm_metrics */ INSERT INTO llm_metrics
-       (agent, task, provider, model, tokens_in, tokens_out, cost_usd)
-     VALUES ('crm-ai-pattern', 'analyze', $1, $2, $3, $4, $5)`,
-    [args.provider, args.model, args.usage.inputTokens, args.usage.outputTokens, args.costUsd],
+       (agent, task, provider, model, tokens_in, tokens_out, cost_usd, workspace_id)
+     VALUES ('crm-ai-pattern', 'analyze', $1, $2, $3, $4, $5, $6)`,
+    [args.provider, args.model, args.usage.inputTokens, args.usage.outputTokens, args.costUsd,
+      args.workspaceId ?? null],
   );
 }
 
@@ -218,6 +223,7 @@ export async function runPatternForWorkspace(
     await recordMetrics(pool, {
       provider: provider.provider, model: provider.model,
       usage: llm.usage, costUsd: judgmentCost(provider.model, llm.usage),
+      workspaceId: target.workspaceId,
     });
 
     const parsed = parseDecision(llm.raw, ctx);

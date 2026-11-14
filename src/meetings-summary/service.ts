@@ -114,6 +114,8 @@ export async function processSummaryJob(deps: ProcessSummaryDeps, job: SummaryJo
       cost_usd: usage ? summaryCost(deps.llm.model, usage) : null,
       latency_ms: latencyMs,
       error: errorMessage ?? null,
+      workspace_id: ep.workspace_id,
+      episode_id: ep.id,
     }).catch(() => {});
   }
 
