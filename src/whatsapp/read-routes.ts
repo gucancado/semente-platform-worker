@@ -7,6 +7,7 @@ import { getStats } from './stats.js';
 import { getTimeseries } from './timeseries.js';
 import { getWhatsappAiCostTotal } from './ai-cost.js';
 import { getFirstResponse } from './first-response.js';
+import { getResponseTime } from './response-time.js';
 import { listDisqualifyReasons } from './disqualify-reasons.js';
 import { listSourceSignals } from './source-signals.js';
 import { requirePanelToken } from './provision-routes.js';
@@ -228,6 +229,25 @@ export function registerReadRoutes(
     });
     logAccess(deps.pool, { actor: req.actingUser, action: 'first_response', workspaceId: workspace_id, numberId: nid ?? null });
     return reply.send({ schema: 'whatsapp_v1', context: tenantContext({ workspaceId: workspace_id }), window: { since: sinceEff, until: emptyToUndefined(until) ?? null }, kind: k, ...result });
+  });
+
+  // ── GET /whatsapp/response-time ─────────────────────────────────────────────
+  // Tempo de resposta por vez do cliente, em horário comercial (DM, live-only).
+  // Member gate. Default: últimos 30 dias.
+  app.get('/whatsapp/response-time', { preHandler: auth }, async (req: any, reply) => {
+    const { workspace_id, number_id, since, until } = req.query as Record<string, string | undefined>;
+    if (!workspace_id) return reply.code(400).send({ error: 'workspace_id required' });
+    const nid = parseNumberId(number_id);
+    if (nid === INVALID) return reply.code(400).send({ error: 'number_id must be numeric' });
+    const sinceRaw = emptyToUndefined(since);
+    const untilRaw = emptyToUndefined(until);
+    if (sinceRaw !== undefined && Number.isNaN(Date.parse(sinceRaw))) return reply.code(400).send({ error: 'since must be a valid timestamp' });
+    if (untilRaw !== undefined && Number.isNaN(Date.parse(untilRaw))) return reply.code(400).send({ error: 'until must be a valid timestamp' });
+    if (!await gateMember(req, reply, workspace_id, authz)) return;
+    const sinceEff = sinceRaw ?? new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+    const result = await getResponseTime(deps.pool, { workspaceId: workspace_id, numberId: nid, since: sinceEff, until: untilRaw });
+    logAccess(deps.pool, { actor: req.actingUser, action: 'response_time', workspaceId: workspace_id, numberId: nid ?? null });
+    return reply.send({ schema: 'whatsapp_v1', context: tenantContext({ workspaceId: workspace_id }), window: { since: sinceEff, until: untilRaw ?? null }, ...result });
   });
 
   // ── GET /whatsapp/threads/:identifier/messages ───────────────────────────────

@@ -94,6 +94,12 @@ export function isBusinessDay(d: Date, offDates: OffDates = NO_OFF_DATES): boole
   return isBusinessLocalDay(DateTime.fromJSDate(d, { zone: ZONE }), offDates);
 }
 
+/** O instante `d` cai DENTRO do expediente (dia útil, 09h ≤ hora < 18h de São Paulo)? */
+export function isWithinBusinessHours(d: Date, offDates: OffDates = NO_OFF_DATES): boolean {
+  const local = DateTime.fromJSDate(d, { zone: ZONE });
+  return isBusinessLocalDay(local, offDates) && local.hour >= OPEN_HOUR && local.hour < CLOSE_HOUR;
+}
+
 /**
  * Milissegundos de expediente (seg–sex, 09h–18h de São Paulo, fora feriado
  * nacional e fora das datas extras) entre dois instantes.

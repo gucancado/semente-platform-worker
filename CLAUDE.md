@@ -47,3 +47,22 @@ Avaliar de novo (somente leitura, mesmo prompt da produção):
 com `EVAL_DATABASE_URL` (túnel SSH até o Postgres) + as duas chaves. Resultado da
 avaliação de 2026-11-13 na memória `motor-ia-crm-whatsapp-piloto` / `reunioes-digest-ia`
 do projeto BCD.
+
+## Tempo de resposta e espera no kanban (desde 2026-11-16)
+
+- `GET /whatsapp/response-time` (`src/whatsapp/response-time.ts`): tempo por **vez**
+  do cliente (mensagens seguidas dele = uma vez; termina na nossa próxima mensagem),
+  DM e live-only. O tempo vale só para vezes que **começam** no expediente
+  (`business-hours.ts`, seg–sex 9h–18h SP) e é contado em minutos de expediente; a
+  vez de fora do expediente entra em `turns`/`unanswered`/`offHours`, não no tempo
+  (senão a mediana ia a zero nos números que atendem à noite). Consumido pelo card
+  "Atendimento" da Visão geral do WhatsApp no painel.
+- `GET /whatsapp/board` devolve por card `lastDirection`/`waitingSince` e por coluna
+  `awaiting`; `?awaiting=1` filtra "precisa de ação". Consumido pelo selo de espera do
+  kanban.
+- **Resposta automática** (`src/whatsapp/auto-reply.ts`): nossa mensagem que chega em
+  menos de 5 s após uma do cliente não conta como resposta nas DUAS consultas
+  (medido: pico abaixo de 2 s nos números com robô/saudação). Figurinha também não
+  conta. Mudou o critério? É uma constante só.
+- Custo medido em prod (número de maior volume, 30 dias): response-time ~1,3–2 s,
+  board ~0,5 s. 180 dias ~6 s.

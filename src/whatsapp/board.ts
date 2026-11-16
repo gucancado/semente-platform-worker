@@ -39,6 +39,7 @@ import {
   type OppStatus,
 } from './opportunity-core.js';
 import { CASCADE_LOSS_REASON } from './loss-reasons.js';
+import { autoReplySql } from './auto-reply.js';
 
 /** Ordem canônica das colunas do board (spec §1, 4 colunas). Também a ordem de emissão. */
 export const BOARD_COLUMNS: readonly BoardColumn[] = [
@@ -72,6 +73,18 @@ export interface BoardCard {
   contactName: string | null;
   /** ISO (ms) da última mensagem da conversa (MAX), ou null se o par não tem mensagem. */
   lastMessageAt: string | null;
+  /**
+   * Quem mandou a última mensagem (figurinha não conta): 'inbound' = o cliente
+   * está esperando a gente; 'outbound' = a gente está esperando o cliente.
+   * null = conversa sem mensagem.
+   */
+  lastDirection: 'inbound' | 'outbound' | null;
+  /**
+   * Desde quando a espera corre. inbound → 1ª mensagem do cliente depois da
+   * nossa última (mandou 4 em 2h = está esperando há 2h); outbound → nossa
+   * última mensagem. null quando lastDirection é null.
+   */
+  waitingSince: string | null;
 }
 
 export interface BoardColumnResult {
@@ -79,6 +92,8 @@ export interface BoardColumnResult {
   nextCursor: string | null;
   /** COUNT total da coluna, INDEPENDENTE do limit (spec §10). */
   total: number;
+  /** Oportunidades EM ANDAMENTO da coluna cuja última mensagem é do cliente. */
+  awaiting: number;
 }
 
 export type BoardColumns = Record<BoardColumn, BoardColumnResult>;
@@ -176,6 +191,15 @@ board_opps AS (
          o.created_at AS opp_created_at,
          date_trunc('milliseconds', last.max_at) AS la,
          last.max_at AS last_at_raw,
+         ld.last_dir,
+         CASE ld.last_dir
+           WHEN 'outbound' THEN lo.max_out
+           WHEN 'inbound' THEN (
+             SELECT MIN(mw.created_at) FROM messages mw
+              WHERE mw.whatsapp_number_id = o.whatsapp_number_id AND mw.identifier = o.identifier
+                AND mw.direction = 'inbound' AND mw.kind IS DISTINCT FROM 'sticker'
+                AND (lo.max_out IS NULL OR mw.created_at > lo.max_out))
+         END AS waiting_since,
          (${BOARD_COLUMN_CASE_SQL}) AS board_column,
          -- contactName: push_name de evento fromMe é o dono do número, não o contato —
          -- só vale o push_name de eventos com mensagem inbound correspondente (read-queries.ts).
@@ -199,6 +223,26 @@ board_opps AS (
         FROM messages m
        WHERE m.whatsapp_number_id = o.whatsapp_number_id AND m.identifier = o.identifier
     ) last ON TRUE
+    -- Espera: direção da última mensagem e nossa última mensagem. Figurinha não
+    -- conta (um 👍 final do cliente não vira "cliente esperando") e resposta
+    -- automática também não (auto-reply.ts: a saudação do robô não tira o lead
+    -- novo da fila de quem precisa de ação).
+    LEFT JOIN LATERAL (
+      SELECT m.direction AS last_dir
+        FROM messages m
+       WHERE m.whatsapp_number_id = o.whatsapp_number_id AND m.identifier = o.identifier
+         AND m.kind IS DISTINCT FROM 'sticker' AND m.direction IN ('inbound', 'outbound')
+         AND NOT ${autoReplySql('m')}
+       ORDER BY m.created_at DESC, m.id DESC LIMIT 1
+    ) ld ON TRUE
+    LEFT JOIN LATERAL (
+      SELECT m.created_at AS max_out
+        FROM messages m
+       WHERE m.whatsapp_number_id = o.whatsapp_number_id AND m.identifier = o.identifier
+         AND m.direction = 'outbound' AND m.kind IS DISTINCT FROM 'sticker'
+         AND NOT ${autoReplySql('m')}
+       ORDER BY m.created_at DESC, m.id DESC LIMIT 1
+    ) lo ON TRUE
    WHERE o.whatsapp_number_id = $1 AND o.workspace_id = $2
      AND (tm.is_lead IS DISTINCT FROM FALSE)
      AND NOT EXISTS (
@@ -232,6 +276,8 @@ function mapBoardCard(r: any): BoardCard {
     identifier: r.identifier,
     contactName: r.contact_name ?? null,
     lastMessageAt: isoOrNull(r.last_at_raw),
+    lastDirection: r.last_dir === 'inbound' || r.last_dir === 'outbound' ? r.last_dir : null,
+    waitingSince: r.last_dir === 'inbound' || r.last_dir === 'outbound' ? isoOrNull(r.waiting_since) : null,
   };
 }
 
@@ -267,11 +313,17 @@ export async function getBoard(pool: Pool, p: {
   since?: string;
   /** ISO (timestamptz) — fim da janela de CRIAÇÃO da opp. Omitido = sem limite. */
   until?: string;
+  /**
+   * Filtro "precisa de ação": só oportunidades em andamento cuja última mensagem
+   * é do cliente. Vale pras 4 colunas (ganhos fica vazia — ganha não é em andamento).
+   */
+  awaitingOnly?: boolean;
 }): Promise<{ columns: BoardColumns }> {
   const cursorPresent = p.cursor !== undefined;
   const statusFilter = p.statusFilter ?? 'em_andamento';
   const since = p.since ?? null;
   const until = p.until ?? null;
+  const awaitingOnly = p.awaitingOnly === true;
 
   const [countRes, cardRes] = await Promise.all([
     // Totais por coluna — independentes do limit e do `column`/cursor (spec §2).
@@ -279,14 +331,16 @@ export async function getBoard(pool: Pool, p: {
     // E a janela de criação ($4/$5), que vale pras 4 colunas.
     pool.query(
       `WITH ${BOARD_OPPS_CTE}
-       SELECT board_column, COUNT(*)::int AS total
+       SELECT board_column, COUNT(*)::int AS total,
+              COUNT(*) FILTER (WHERE last_dir = 'inbound' AND status = 'em_andamento')::int AS awaiting
          FROM board_opps
         WHERE board_column IS NOT NULL
           AND (board_column = 'ganhos' OR status = $3)
           AND ($4::timestamptz IS NULL OR opp_created_at >= $4)
           AND ($5::timestamptz IS NULL OR opp_created_at <= $5)
+          AND (NOT $6::boolean OR (last_dir = 'inbound' AND status = 'em_andamento'))
         GROUP BY board_column`,
-      [p.numberId, p.workspaceId, statusFilter, since, until],
+      [p.numberId, p.workspaceId, statusFilter, since, until, awaitingOnly],
     ),
     // Cards: ROW_NUMBER por coluna (multi) OU filtrado a uma coluna + cursor (single).
     // $3=column|null $4=cursor.lastMessageAt|null $5=cursor.oppId|null $6=cursorPresent
@@ -307,6 +361,7 @@ export async function getBoard(pool: Pool, p: {
             AND ($9::timestamptz IS NULL OR opp_created_at >= $9)
             AND ($10::timestamptz IS NULL OR opp_created_at <= $10)
             AND ($3::text IS NULL OR board_column = $3)
+            AND (NOT $11::boolean OR (last_dir = 'inbound' AND status = 'em_andamento'))
             AND (NOT $6::boolean OR (
                   ($4::timestamptz IS NOT NULL AND (
                      la IS NULL OR la < $4 OR (la = $4 AND opp_id < $5)))
@@ -314,7 +369,7 @@ export async function getBoard(pool: Pool, p: {
                 ))
        )
        SELECT opp_id, identifier, title, status, is_qualified, loss_reason, board_column,
-              contact_name, tags, last_at_raw
+              contact_name, tags, last_at_raw, last_dir, waiting_since
          FROM ranked
         WHERE rn <= $7
         ORDER BY board_column, la DESC NULLS LAST, opp_id DESC`,
@@ -322,13 +377,17 @@ export async function getBoard(pool: Pool, p: {
         p.numberId, p.workspaceId, p.column ?? null,
         p.cursor?.lastMessageAt ?? null, p.cursor?.oppId ?? null,
         cursorPresent, p.limitPerColumn + 1, statusFilter,
-        since, until,
+        since, until, awaitingOnly,
       ],
     ),
   ]);
 
   const totals = new Map<string, number>();
-  for (const r of countRes.rows) totals.set(String(r.board_column), Number(r.total));
+  const awaiting = new Map<string, number>();
+  for (const r of countRes.rows) {
+    totals.set(String(r.board_column), Number(r.total));
+    awaiting.set(String(r.board_column), Number(r.awaiting ?? 0));
+  }
 
   const grouped = new Map<string, any[]>();
   for (const r of cardRes.rows) {
@@ -347,7 +406,7 @@ export async function getBoard(pool: Pool, p: {
     const nextCursor = hasMore && last
       ? encodeBoardCursor(last.lastMessageAt, last.opportunity.id)
       : null;
-    columns[col] = { cards, nextCursor, total: totals.get(col) ?? 0 };
+    columns[col] = { cards, nextCursor, total: totals.get(col) ?? 0, awaiting: awaiting.get(col) ?? 0 };
   }
 
   return { columns };

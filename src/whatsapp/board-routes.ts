@@ -34,8 +34,13 @@ export function registerBoardRoutes(
   // de posição; `ganhos` sempre entra (spec §2). `since`/`until` (toggle Novas/Todas)
   // recortam por data de CRIAÇÃO da oportunidade e valem pras 4 colunas.
   app.get('/whatsapp/board', { preHandler: auth }, async (req: any, reply) => {
-    const { number_id, limit_per_column, column, cursor, status, since, until } =
+    const { number_id, limit_per_column, column, cursor, status, since, until, awaiting } =
       req.query as Record<string, string | undefined>;
+    // awaiting=1: filtro "precisa de ação" (última mensagem é do cliente).
+    const awaitingRaw = emptyToUndefined(awaiting);
+    if (awaitingRaw !== undefined && awaitingRaw !== '1' && awaitingRaw !== '0') {
+      return reply.code(400).send({ error: 'awaiting must be 0 or 1' });
+    }
     if (!number_id) return reply.code(400).send({ error: 'number_id required' });
     if (Number.isNaN(Number(number_id))) return reply.code(400).send({ error: 'number_id must be numeric' });
 
@@ -99,6 +104,7 @@ export function registerBoardRoutes(
       statusFilter,
       since: sinceRaw,
       until: untilRaw,
+      awaitingOnly: awaitingRaw === '1',
     });
     logAccess(deps.pool, { actor: req.actingUser, action: 'board', workspaceId: num.workspaceId, numberId: num.id });
     return reply.send({
