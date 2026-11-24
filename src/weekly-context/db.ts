@@ -108,7 +108,7 @@ export async function upsertWeeklyContext(
     workspaceId: string; weekStart: string; status: 'ok' | 'empty' | 'failed';
     summary: string | null; provider: string | null; model: string | null;
     tokensIn: number | null; tokensOut: number | null; costUsd: number | null;
-    sources: { messages: number; meetings: number }; error: string | null; generatedBy: string | null;
+    sources: { messages: number; meetings: number; tasks: { open: number; completed: number } | null }; error: string | null; generatedBy: string | null;
   },
 ): Promise<void> {
   await pool.query(

@@ -72,8 +72,13 @@ do projeto BCD.
 
 Um parágrafo de até ~60 palavras por cliente, lido na tática semanal no topo da Visão
 Geral do painel. Lê o grupo do monitor vinculado ao workspace (14 dias; autor em 2+
-grupos vinculados = "BeeAds") e os digests das reuniões (21 dias). O prompt PROÍBE o que
-o painel já mostra (saldo, pagamentos, datas de reunião, tarefas, métricas, alertas).
+grupos vinculados = "BeeAds"), os digests das reuniões (21 dias) e as tarefas do Bloquim
+(abertas sem rascunho + concluídas em 14 dias, `GET /api/internal/workspaces/:id/tasks`
+com `INTERNAL_API_SECRET`, `src/bloquim/workspace-tasks.ts`; falha = resumo sem tarefas e
+`sources.tasks = null`), e o prompt manda CRUZAR o dito com as tarefas (pedido sem tarefa,
+tarefa atrasada, entrega que responde a um pedido). O prompt PROÍBE o que o painel já
+mostra (saldo, pagamentos, datas de reunião, contagem/lista de tarefas, prazos, métricas,
+alertas).
 Tabela `weekly_context_summaries` (1 linha por workspace × semana, `week_start` = segunda
 em SP). Poller de 15 min com `WEEKLY_CONTEXT_MODE=auto`: toda segunda a partir de 6h (SP)
 gera a semana corrente; workspace sem material = `empty` sem chamar LLM; `failed` volta

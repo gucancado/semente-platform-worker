@@ -40,6 +40,20 @@ test('prompt: marca autoria e avisa ausência de material', () => {
   assert.match(user, /nenhuma reunião transcrita/);
 });
 
+test('prompt: tarefas abertas e concluídas, e indisponíveis quando null', () => {
+  const withTasks = buildWeeklyContextPrompt({
+    clientName: 'Hoenka', today: '24/11/2026', messages: [], meetings: [],
+    openTasks: [{ title: 'Ajustar LP', status: 'in_progress', overdue: true, dueDate: '2026-11-20T15:00:00Z', completedAt: null, assigneeName: 'Ana' }],
+    completedTasks: [{ title: 'Criativo novo', status: 'completed', overdue: false, dueDate: null, completedAt: '2026-11-22T02:00:00Z', assigneeName: null }],
+  });
+  assert.match(withTasks.system, /Cruze as fontes/);
+  assert.match(withTasks.user, /- Ajustar LP \(ATRASADA, prazo 20\/11, Ana\)/);
+  // 02:00Z de 22/11 = 21/11 em SP
+  assert.match(withTasks.user, /- Criativo novo \(concluída 21\/11\)/);
+  const none = buildWeeklyContextPrompt({ clientName: 'X', today: '24/11/2026', messages: [], meetings: [], openTasks: null, completedTasks: null });
+  assert.match(none.user, /tarefas indisponíveis/);
+});
+
 test('cleanSummary: uma linha, sem markdown nem aspas externas', () => {
   assert.equal(cleanSummary('"**Leads** ruins.\n\nCliente   insatisfeito."'), 'Leads ruins. Cliente insatisfeito.');
 });

@@ -1,8 +1,9 @@
 /**
  * src/weekly-context/service.ts — gera (e regrava) o resumo semanal de UM workspace.
  *
- * Sem material (nenhuma mensagem de grupo nem reunião na janela) grava 'empty'
- * sem chamar o LLM. Falha da chamada grava 'failed' (o poller tenta de novo depois
+ * Sem material (nenhuma mensagem de grupo, reunião nem tarefa) grava 'empty'
+ * sem chamar o LLM. As tarefas vêm do Bloquim; se ele falhar, o resumo sai sem
+ * elas (`sources.tasks = null`). Falha da chamada grava 'failed' (o poller tenta de novo depois
  * de 1h; o painel continua mostrando o último resumo bom). O custo vai para
  * llm_metrics com agent 'weekly-context' — fora da lista do custo de IA do
  * WhatsApp (src/whatsapp/ai-cost.ts), que é outro produto.
@@ -11,7 +12,8 @@ import type { Pool } from 'pg';
 import type { TextLlm } from '../llm/types.js';
 import { llmCost } from '../llm/pricing.js';
 import { insertLlmMetric } from '../db.js';
-import { buildWeeklyContextPrompt, cleanSummary, saoPauloParts } from './core.js';
+import { buildWeeklyContextPrompt, cleanSummary, COMPLETED_TASKS_WINDOW_DAYS, saoPauloParts } from './core.js';
+import { fetchWorkspaceTasks, type WorkspaceTasks } from '../bloquim/workspace-tasks.js';
 import { loadContextInputs, upsertWeeklyContext } from './db.js';
 
 export type WeeklyContextDeps = {
@@ -20,6 +22,8 @@ export type WeeklyContextDeps = {
   effort?: 'low' | 'medium' | 'high';
   log?: { info: (o: unknown, m?: string) => void; warn: (o: unknown, m?: string) => void };
   now?: () => Date;
+  /** Sobrescreve a busca de tarefas no Bloquim (testes). */
+  fetchTasks?: (workspaceId: string, completedSince: Date) => Promise<WorkspaceTasks | null>;
 };
 
 export type WeeklyContextResult = { status: 'ok' | 'empty' | 'failed'; summary: string | null; costUsd: number | null };
@@ -35,11 +39,20 @@ export async function generateWeeklyContext(
   generatedBy: string | null,
 ): Promise<WeeklyContextResult> {
   const now = (deps.now ?? (() => new Date()))();
-  const input = await loadContextInputs(deps.pool, workspaceId);
-  const sources = { messages: input.messages.length, meetings: input.meetings.length };
+  const completedSince = new Date(now.getTime() - COMPLETED_TASKS_WINDOW_DAYS * 86_400_000);
+  const [input, tasks] = await Promise.all([
+    loadContextInputs(deps.pool, workspaceId),
+    (deps.fetchTasks ?? fetchWorkspaceTasks)(workspaceId, completedSince),
+  ]);
+  const sources = {
+    messages: input.messages.length,
+    meetings: input.meetings.length,
+    tasks: tasks ? { open: tasks.open.length, completed: tasks.completed.length } : null,
+  };
   const base = { workspaceId, weekStart, sources, generatedBy };
+  const taskCount = tasks ? tasks.open.length + tasks.completed.length : 0;
 
-  if (sources.messages === 0 && sources.meetings === 0) {
+  if (sources.messages === 0 && sources.meetings === 0 && taskCount === 0) {
     await upsertWeeklyContext(deps.pool, {
       ...base, status: 'empty', summary: null, provider: null, model: null,
       tokensIn: null, tokensOut: null, costUsd: null, error: null,
@@ -48,7 +61,10 @@ export async function generateWeeklyContext(
   }
 
   const [y, m, d] = saoPauloParts(now).day.split('-');
-  const { system, user } = buildWeeklyContextPrompt({ ...input, today: `${d}/${m}/${y}` });
+  const { system, user } = buildWeeklyContextPrompt({
+    ...input, today: `${d}/${m}/${y}`,
+    openTasks: tasks?.open ?? null, completedTasks: tasks?.completed ?? null,
+  });
   const startedAt = Date.now();
   let summary: string | null = null;
   let error: string | null = null;
