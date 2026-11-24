@@ -142,12 +142,3 @@ export async function getLatestWeeklyContext(pool: Pool, workspaceId: string): P
   if (!r) return null;
   return { ...r, cost_usd: r.cost_usd == null ? null : Number(r.cost_usd) };
 }
-
-/** Instante da última geração (qualquer status) da semana — base do cooldown do "gerar de novo". */
-export async function lastGeneratedAt(pool: Pool, workspaceId: string, weekStart: string): Promise<Date | null> {
-  const { rows } = await pool.query<{ generated_at: Date }>(
-    `SELECT generated_at FROM weekly_context_summaries WHERE workspace_id = $1 AND week_start = $2::date`,
-    [workspaceId, weekStart],
-  );
-  return rows[0]?.generated_at ?? null;
-}

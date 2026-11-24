@@ -314,9 +314,8 @@ const EnvSchema = z.object({
   // Anthropic: output_config.effort. Ausente = default do modelo.
   MEETING_SUMMARY_EFFORT: z.enum(['low', 'medium', 'high']).optional(),
   // ── Resumo semanal de contexto por cliente (src/weekly-context) ──
-  // Lido no topo da Visão Geral do painel. 'auto' liga o gerador semanal (domingo
-  // 20h SP em diante); as rotas de leitura existem sempre, e o "gerar de novo"
-  // funciona sempre que a chave do provedor existir.
+  // Lido no topo da Visão Geral do painel. 'auto' liga o gerador semanal (segunda
+  // 6h SP); a rota de leitura existe sempre. Não há geração manual.
   WEEKLY_CONTEXT_MODE: z.enum(['off', 'auto']).default('off'),
   WEEKLY_CONTEXT_PROVIDER: z.enum(['anthropic', 'openai']).default('anthropic'),
   WEEKLY_CONTEXT_MODEL: z.string().default('claude-sonnet-5-5'),

@@ -32,7 +32,7 @@ export function buildSummaryLlm(cfg: Cfg = config): TextSummaryLlm {
   return new TextSummaryLlm(llm, { effort: cfg.MEETING_SUMMARY_EFFORT });
 }
 
-/** Resumo semanal de contexto. null = chave do provedor ausente (rotas de escrita respondem 503). */
+/** Resumo semanal de contexto. null = chave do provedor ausente (o poller não sobe). */
 export function buildWeeklyContextLlm(cfg: Cfg = config): TextLlm | null {
   const key = cfg.WEEKLY_CONTEXT_PROVIDER === 'anthropic' ? cfg.ANTHROPIC_API_KEY : cfg.OPENAI_API_KEY;
   if (!key) return null;

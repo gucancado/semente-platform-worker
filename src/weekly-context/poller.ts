@@ -3,8 +3,8 @@
  *
  * A cada tick lista os workspaces com grupo vinculado que ainda não têm resumo da
  * semana e gera um por vez (serial: ~27 workspaces, ~5 s cada). Como a semana
- * vencida vira no domingo 20h (SP), é aí que a frota inteira é regenerada; no
- * resto da semana o tick só pega workspace novo ou falha de mais de 1h.
+ * vencida vira na segunda às 6h (SP), é aí que a frota inteira é gerada (tick de
+ * 15 min → pronta entre 6h e ~6h20); no resto da semana o tick só pega workspace novo ou falha de mais de 1h.
  */
 import { dueWeekStart } from './core.js';
 import { listPendingWorkspaces } from './db.js';

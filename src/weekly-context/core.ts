@@ -28,18 +28,18 @@ export function addDays(dayIso: string, n: number): string {
   return t.toISOString().slice(0, 10);
 }
 
-/** A partir de domingo nesta hora (SP), o resumo da semana seguinte é gerado. */
-export const SUNDAY_GENERATION_HOUR = 20;
+/** Segunda-feira nesta hora (SP) o resumo da semana é gerado. */
+export const MONDAY_GENERATION_HOUR = 6;
 
 /**
- * Segunda-feira (dia SP) da semana cujo resumo deve existir agora. De segunda
- * até domingo 19h59 é a semana corrente; de domingo 20h em diante, a próxima —
- * assim o resumo de segunda de manhã já está pronto.
+ * Segunda-feira (dia SP) da semana cujo resumo deve existir agora. A partir de
+ * segunda 6h é a semana corrente; antes disso (segunda de madrugada) ainda é a
+ * semana anterior — o resumo novo nasce às 6h de segunda, antes da tática.
  */
 export function dueWeekStart(now: Date): string {
   const { day, dow, hour } = saoPauloParts(now);
   const monday = addDays(day, -((dow + 6) % 7));
-  if (dow === 0 && hour >= SUNDAY_GENERATION_HOUR) return addDays(day, 1);
+  if (dow === 1 && hour < MONDAY_GENERATION_HOUR) return addDays(monday, -7);
   return monday;
 }
 

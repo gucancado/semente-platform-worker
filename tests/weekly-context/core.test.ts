@@ -15,17 +15,17 @@ test('addDays atravessa mês', () => {
   assert.equal(addDays('2026-12-01', -1), '2026-11-30');
 });
 
-test('dueWeekStart: semana corrente de segunda a domingo 19h59', () => {
-  assert.equal(dueWeekStart(new Date('2026-11-23T12:00:00-03:00')), '2026-11-23'); // segunda
+test('dueWeekStart: semana corrente a partir de segunda 6h', () => {
+  assert.equal(dueWeekStart(new Date('2026-11-23T06:00:00-03:00')), '2026-11-23'); // segunda 6h
   assert.equal(dueWeekStart(new Date('2026-11-24T10:00:00-03:00')), '2026-11-23'); // terça
-  assert.equal(dueWeekStart(new Date('2026-11-29T19:59:00-03:00')), '2026-11-23'); // domingo 19h59
+  assert.equal(dueWeekStart(new Date('2026-11-29T23:59:00-03:00')), '2026-11-23'); // domingo
 });
 
-test('dueWeekStart: domingo 20h em diante já é a próxima semana', () => {
-  assert.equal(dueWeekStart(new Date('2026-11-29T20:00:00-03:00')), '2026-11-30');
-  assert.equal(dueWeekStart(new Date('2026-11-29T23:59:00-03:00')), '2026-11-30');
-  // 01:00Z de segunda = domingo 22h SP
-  assert.equal(dueWeekStart(new Date('2026-11-30T01:00:00Z')), '2026-11-30');
+test('dueWeekStart: antes de segunda 6h ainda é a semana anterior', () => {
+  assert.equal(dueWeekStart(new Date('2026-11-30T05:59:00-03:00')), '2026-11-23');
+  // 02:00Z de segunda = domingo 23h SP
+  assert.equal(dueWeekStart(new Date('2026-11-30T02:00:00Z')), '2026-11-23');
+  assert.equal(dueWeekStart(new Date('2026-11-30T06:00:00-03:00')), '2026-11-30');
 });
 
 test('prompt: marca autoria e avisa ausência de material', () => {

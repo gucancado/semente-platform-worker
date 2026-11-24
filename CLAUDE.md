@@ -75,9 +75,9 @@ Geral do painel. Lê o grupo do monitor vinculado ao workspace (14 dias; autor e
 grupos vinculados = "BeeAds") e os digests das reuniões (21 dias). O prompt PROÍBE o que
 o painel já mostra (saldo, pagamentos, datas de reunião, tarefas, métricas, alertas).
 Tabela `weekly_context_summaries` (1 linha por workspace × semana, `week_start` = segunda
-em SP; regerar substitui). Poller de 15 min com `WEEKLY_CONTEXT_MODE=auto`: de domingo 20h
-(SP) em diante gera a semana seguinte; workspace sem material = `empty` sem chamar LLM;
-`failed` volta depois de 1h. Rotas `GET /weekly-context?workspace_id=` e
-`POST /weekly-context/regenerate` (cooldown 60 s) com `X-Panel-Token`. Custo em
+em SP). Poller de 15 min com `WEEKLY_CONTEXT_MODE=auto`: toda segunda a partir de 6h (SP)
+gera a semana corrente; workspace sem material = `empty` sem chamar LLM; `failed` volta
+depois de 1h. **Sem geração manual** (decisão de 2026-11-24). Rota
+`GET /weekly-context?workspace_id=` com `X-Panel-Token`. Custo em
 `llm_metrics` com `agent='weekly-context'` (fora do custo de IA do WhatsApp). Medido em
 2026-11-24: ~US$ 0,017 por cliente (Sonnet 5.5).

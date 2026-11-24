@@ -199,10 +199,7 @@ async function main() {
   // Resumo semanal de contexto por cliente (Visão Geral do painel): auth X-Panel-Token.
   const weeklyContextLlm = buildWeeklyContextLlm();
   await app.register(async (scope) => {
-    registerWeeklyContextRoutes(scope, {
-      pool, panelToken: config.PANEL_TOKEN, llm: weeklyContextLlm,
-      effort: config.WEEKLY_CONTEXT_EFFORT, log: app.log,
-    });
+    registerWeeklyContextRoutes(scope, { pool, panelToken: config.PANEL_TOKEN });
   });
 
   // Contrato de ESCRITA WhatsApp (painel central): auth X-Panel-Token.
