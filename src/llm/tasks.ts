@@ -10,6 +10,7 @@ import { TextJudgmentLlm, JUDGMENT_MAX_TOKENS, PATTERN_MAX_TOKENS } from '../wha
 import { TextSummaryLlm } from '../meetings-summary/provider.js';
 import { createTextLlm } from './factory.js';
 import { JUDGMENT_SCHEMA, PATTERN_SCHEMA } from './schemas.js';
+import type { TextLlm } from './types.js';
 
 type Cfg = typeof config;
 
@@ -29,4 +30,11 @@ export function buildPatternLlm(cfg: Cfg = config): TextJudgmentLlm {
 export function buildSummaryLlm(cfg: Cfg = config): TextSummaryLlm {
   const llm = createTextLlm('meeting-summary', cfg.MEETING_SUMMARY_PROVIDER, cfg.MEETING_SUMMARY_MODEL, cfg);
   return new TextSummaryLlm(llm, { effort: cfg.MEETING_SUMMARY_EFFORT });
+}
+
+/** Resumo semanal de contexto. null = chave do provedor ausente (rotas de escrita respondem 503). */
+export function buildWeeklyContextLlm(cfg: Cfg = config): TextLlm | null {
+  const key = cfg.WEEKLY_CONTEXT_PROVIDER === 'anthropic' ? cfg.ANTHROPIC_API_KEY : cfg.OPENAI_API_KEY;
+  if (!key) return null;
+  return createTextLlm('weekly-context', cfg.WEEKLY_CONTEXT_PROVIDER, cfg.WEEKLY_CONTEXT_MODEL, cfg);
 }

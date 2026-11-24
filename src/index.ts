@@ -48,6 +48,8 @@ import { setOwnCloudProbeHandler } from './webhook/routes.js';
 import { startPresenceKeepalive } from './whatsapp/presence-keepalive.js';
 import { startTranscriptionPoller } from './transcription/poller.js';
 import { startSummaryPoller } from './meetings-summary/poller.js';
+import { registerWeeklyContextRoutes } from './weekly-context/routes.js';
+import { startWeeklyContextPoller } from './weekly-context/poller.js';
 import { startMeetingsAudioPoller } from './meetings-audio/poller.js';
 import { startMeetingsRecoverPoller } from './meetings-recover/poller.js';
 import { registerSpeakerActivityRoute } from './meetings-recover/routes.js';
@@ -58,7 +60,7 @@ import { startAutoLossPoller } from './whatsapp/auto-loss.js';
 import { startTagVocabularySync } from './whatsapp/tag-vocabulary-sync.js';
 import { startJudgmentRunner } from './whatsapp/ai-judgment-runner.js';
 import { startPatternPoller } from './whatsapp/ai-pattern-runner.js';
-import { buildJudgmentLlm, buildPatternLlm, buildSummaryLlm } from './llm/tasks.js';
+import { buildJudgmentLlm, buildPatternLlm, buildSummaryLlm, buildWeeklyContextLlm } from './llm/tasks.js';
 import { startWhatsappMediaPoller, startMediaRetentionPoller } from './whatsapp/media-poller.js';
 import { retentionEnabled } from './whatsapp/media-policy.js';
 
@@ -191,6 +193,15 @@ async function main() {
       panelToken: config.PANEL_TOKEN,
       fetchInviteCode: (instance, jid) =>
         fetchGroupInviteCode({ baseUrl: config.EVOLUTION_API_URL, apiKey: config.EVOLUTION_API_KEY }, instance, jid),
+    });
+  });
+
+  // Resumo semanal de contexto por cliente (Visão Geral do painel): auth X-Panel-Token.
+  const weeklyContextLlm = buildWeeklyContextLlm();
+  await app.register(async (scope) => {
+    registerWeeklyContextRoutes(scope, {
+      pool, panelToken: config.PANEL_TOKEN, llm: weeklyContextLlm,
+      effort: config.WEEKLY_CONTEXT_EFFORT, log: app.log,
     });
   });
 
@@ -386,6 +397,13 @@ async function main() {
     startMeetingsRecoverPoller(app.log);
   } else {
     app.log.info({ mode: config.MEETINGS_RECOVERY_MODE, meetingsEnabled, r2: r2Configured() }, 'meetings-recover: poller NÃO iniciado');
+  }
+
+  if (config.WEEKLY_CONTEXT_MODE === 'auto' && weeklyContextLlm) {
+    startWeeklyContextPoller({ pool, llm: weeklyContextLlm, effort: config.WEEKLY_CONTEXT_EFFORT, log: app.log });
+    app.log.info({ provider: weeklyContextLlm.provider, model: weeklyContextLlm.model }, 'weekly-context: poller iniciado');
+  } else {
+    app.log.info({ mode: config.WEEKLY_CONTEXT_MODE, llm: Boolean(weeklyContextLlm) }, 'weekly-context: poller NÃO iniciado');
   }
 
   if (config.MEETING_SUMMARY_MODE === 'auto') {

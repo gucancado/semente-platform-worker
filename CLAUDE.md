@@ -16,6 +16,7 @@ sem deploy. Modelo de família diferente do provedor é recusado no boot.
 | IA do CRM nível 2 (semanal) | anthropic / `claude-sonnet-5-5` | `CRM_AI_PATTERN_PROVIDER`, `CRM_AI_PATTERN_MODEL` (fallback no nível 1) |
 | Digest de reunião | anthropic / `claude-haiku-5-5` | `MEETING_SUMMARY_PROVIDER`, `MEETING_SUMMARY_MODEL`, `MEETING_SUMMARY_EFFORT` |
 | Lua (desligada) | anthropic / `claude-sonnet-5-5` | `LUA_PROVIDER`, `LUA_{EXTRACTION,JUDGE,RECAP}_MODEL` |
+| Resumo semanal de contexto (Visão Geral do painel) | anthropic / `claude-sonnet-5-5`, effort medium (default no código) | `WEEKLY_CONTEXT_MODE` (`off`/`auto`), `WEEKLY_CONTEXT_PROVIDER`, `WEEKLY_CONTEXT_MODEL`, `WEEKLY_CONTEXT_EFFORT` |
 
 Defaults no código = o provedor antigo (openai, gpt-4o-mini / gpt-5.4-mini), exceto a
 Lua. **Rollback**: `*_PROVIDER=openai` + `*_MODEL=<modelo openai>` + restart.
@@ -66,3 +67,17 @@ do projeto BCD.
   conta. Mudou o critério? É uma constante só.
 - Custo medido em prod (número de maior volume, 30 dias): response-time ~1,3–2 s,
   board ~0,5 s. 180 dias ~6 s.
+
+## Resumo semanal de contexto (`src/weekly-context/`, mig 078)
+
+Um parágrafo de até ~60 palavras por cliente, lido na tática semanal no topo da Visão
+Geral do painel. Lê o grupo do monitor vinculado ao workspace (14 dias; autor em 2+
+grupos vinculados = "BeeAds") e os digests das reuniões (21 dias). O prompt PROÍBE o que
+o painel já mostra (saldo, pagamentos, datas de reunião, tarefas, métricas, alertas).
+Tabela `weekly_context_summaries` (1 linha por workspace × semana, `week_start` = segunda
+em SP; regerar substitui). Poller de 15 min com `WEEKLY_CONTEXT_MODE=auto`: de domingo 20h
+(SP) em diante gera a semana seguinte; workspace sem material = `empty` sem chamar LLM;
+`failed` volta depois de 1h. Rotas `GET /weekly-context?workspace_id=` e
+`POST /weekly-context/regenerate` (cooldown 60 s) com `X-Panel-Token`. Custo em
+`llm_metrics` com `agent='weekly-context'` (fora do custo de IA do WhatsApp). Medido em
+2026-11-24: ~US$ 0,017 por cliente (Sonnet 5.5).
